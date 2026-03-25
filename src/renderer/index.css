@@ -1,0 +1,193 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root,
+[data-theme="dark"] {
+  --aura-bg: 15 14 23;
+  --aura-surface: 26 25 41;
+  --aura-card: 35 33 54;
+  --aura-text: 232 230 240;
+  --aura-muted: 139 135 160;
+  --aura-glow: 0 24px 80px rgba(124, 58, 237, 0.18), 0 0 120px rgba(6, 182, 212, 0.08);
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --aura-bg: 248 249 252;
+  --aura-surface: 241 245 249;
+  --aura-card: 255 255 255;
+  --aura-text: 30 41 59;
+  --aura-muted: 100 116 139;
+  --aura-glow: 0 24px 60px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(15, 23, 42, 0.04);
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+html,
+body {
+  margin: 0;
+  font-family: "Segoe UI Variable Text", "Segoe UI", "Manrope", sans-serif;
+  color: rgb(var(--aura-text));
+  background:
+    radial-gradient(ellipse 72% 54% at 50% -8%, rgba(124, 58, 237, 0.18), transparent 60%),
+    radial-gradient(ellipse 34% 42% at 92% 72%, rgba(6, 182, 212, 0.08), transparent 60%),
+    linear-gradient(180deg, rgb(var(--aura-bg)) 0%, rgb(10 11 18) 100%);
+}
+
+#root {
+  isolation: isolate;
+}
+
+[data-surface="widget"] body {
+  background: transparent;
+}
+
+[data-theme="light"] body {
+  background:
+    radial-gradient(ellipse 70% 55% at 50% -10%, rgba(124, 58, 237, 0.08), transparent 58%),
+    linear-gradient(180deg, rgb(var(--aura-bg)) 0%, rgb(241 245 249) 100%);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+}
+
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.12);
+}
+
+.glass-panel {
+  background:
+    linear-gradient(180deg, rgba(34, 31, 52, 0.9) 0%, rgba(22, 20, 35, 0.82) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(24px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 20px 60px rgba(3, 6, 20, 0.28);
+}
+
+.glass-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.05), transparent 38%);
+}
+
+[data-theme="light"] .glass-panel {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.88) 0%, rgba(248, 250, 252, 0.84) 100%);
+  border-color: rgba(15, 23, 42, 0.08);
+}
+
+button,
+input,
+textarea,
+select {
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.32);
+}
+
+.fade-up {
+  animation: fade-up 0.22s ease-out both;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-subtle {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.82;
+  }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 1.25s ease-in-out infinite;
+}
+
+.message-bubble :where(pre) {
+  overflow-x: auto;
+  border-radius: 16px;
+  padding: 0.9rem 1rem;
+  background: rgba(15, 23, 42, 0.32);
+}
+
+[data-theme="light"] .message-bubble :where(pre) {
+  background: rgba(15, 23, 42, 0.04);
+}
+
+.message-bubble :where(code) {
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0.16rem 0.36rem;
+}
+
+[data-theme="light"] .message-bubble :where(code) {
+  background: rgba(15, 23, 42, 0.05);
+}
+
+.message-bubble :where(p:first-child) {
+  margin-top: 0;
+}
+
+.message-bubble :where(p:last-child) {
+  margin-bottom: 0;
+}
+
+.message-bubble :where(ul, ol) {
+  padding-left: 1.2rem;
+}
+
+.selection-action {
+  box-shadow: 0 16px 40px rgba(124, 58, 237, 0.25);
+}
