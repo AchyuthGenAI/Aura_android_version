@@ -2,26 +2,51 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ════════════════════════════════════════════════════════════════════════════
+   AURA THEME TOKENS
+   Colors defined as RGB channels so Tailwind's opacity modifier works:
+   bg-aura-surface/80 → rgb(var(--aura-surface) / 0.8)
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Dark theme (default) ─────────────────────────────────────────────────── */
 :root,
 [data-theme="dark"] {
-  --aura-bg: 15 14 23;
-  --aura-surface: 26 25 41;
-  --aura-card: 35 33 54;
-  --aura-text: 232 230 240;
-  --aura-muted: 139 135 160;
-  --aura-glow: 0 24px 80px rgba(124, 58, 237, 0.18), 0 0 120px rgba(6, 182, 212, 0.08);
+  --aura-bg:      15 14 23;     /* #0f0e17 */
+  --aura-surface: 26 25 41;     /* #1a1929 */
+  --aura-card:    35 33 54;     /* #232136 */
+  --aura-text:    232 230 240;  /* #e8e6f0 */
+  --aura-muted:   139 135 160;  /* #8b87a0 */
+
+  --aura-overlay-bg: linear-gradient(180deg, rgba(35,33,54,0.97) 0%, rgba(15,14,23,0.99) 100%);
+  --aura-header-bg:  rgba(35, 33, 54, 0.6);
+  --aura-nav-bg:     rgba(26, 25, 41, 0.95);
+  --aura-glow:       0 0 60px rgba(124, 58, 237, 0.25), 0 0 120px rgba(99, 102, 241, 0.1);
+
+  --aura-font: "SF Pro Text", "Segoe UI Variable Text", "Manrope", "Inter", sans-serif;
+  --aura-display-font: "Space Grotesk", "SF Pro Display", "Segoe UI Variable Display", sans-serif;
+
   color-scheme: dark;
 }
 
+/* ── Light theme ──────────────────────────────────────────────────────────── */
 [data-theme="light"] {
-  --aura-bg: 248 249 252;
-  --aura-surface: 241 245 249;
-  --aura-card: 255 255 255;
-  --aura-text: 30 41 59;
-  --aura-muted: 100 116 139;
-  --aura-glow: 0 24px 60px rgba(15, 23, 42, 0.08), 0 0 0 1px rgba(15, 23, 42, 0.04);
+  --aura-bg:      249 249 249;  /* #f9f9f9 */
+  --aura-surface: 243 244 246;  /* #f3f4f6 */
+  --aura-card:    255 255 255;  /* #ffffff */
+  --aura-text:    32 33 36;     /* #202124 */
+  --aura-muted:   95 99 104;    /* #5f6368 */
+
+  --aura-overlay-bg: linear-gradient(180deg, rgba(249,249,249,0.98) 0%, rgba(243,244,246,0.98) 100%);
+  --aura-header-bg:  rgba(255, 255, 255, 0.85);
+  --aura-nav-bg:     rgba(249, 249, 249, 0.97);
+  --aura-glow:       0 18px 48px rgba(15, 23, 42, 0.06), 0 0 0 1px rgba(15, 23, 42, 0.05);
+
   color-scheme: light;
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   BASE
+   ════════════════════════════════════════════════════════════════════════════ */
 
 html,
 body,
@@ -33,12 +58,18 @@ body,
 html,
 body {
   margin: 0;
-  font-family: "Segoe UI Variable Text", "Segoe UI", "Manrope", sans-serif;
+  font-family: var(--aura-font);
   color: rgb(var(--aura-text));
   background:
     radial-gradient(ellipse 72% 54% at 50% -8%, rgba(124, 58, 237, 0.18), transparent 60%),
     radial-gradient(ellipse 34% 42% at 92% 72%, rgba(6, 182, 212, 0.08), transparent 60%),
     linear-gradient(180deg, rgb(var(--aura-bg)) 0%, rgb(10 11 18) 100%);
+}
+
+[data-theme="light"] body {
+  background:
+    radial-gradient(ellipse 70% 55% at 50% -10%, rgba(124, 58, 237, 0.08), transparent 58%),
+    linear-gradient(180deg, rgb(var(--aura-bg)) 0%, rgb(241 245 249) 100%);
 }
 
 #root {
@@ -47,12 +78,6 @@ body {
 
 [data-surface="widget"] body {
   background: transparent;
-}
-
-[data-theme="light"] body {
-  background:
-    radial-gradient(ellipse 70% 55% at 50% -10%, rgba(124, 58, 237, 0.08), transparent 58%),
-    linear-gradient(180deg, rgb(var(--aura-bg)) 0%, rgb(241 245 249) 100%);
 }
 
 *,
@@ -68,19 +93,39 @@ select {
   font: inherit;
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   SCROLLBAR
+   ════════════════════════════════════════════════════════════════════════════ */
+
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 999px;
+  background: rgba(124, 58, 237, 0.3);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(124, 58, 237, 0.5);
 }
 
 [data-theme="light"] ::-webkit-scrollbar-thumb {
-  background: rgba(15, 23, 42, 0.12);
+  background: rgba(32, 33, 36, 0.16);
 }
+
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: rgba(32, 33, 36, 0.24);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   GLASS PANELS
+   ════════════════════════════════════════════════════════════════════════════ */
 
 .glass-panel {
   background:
@@ -106,6 +151,10 @@ select {
   border-color: rgba(15, 23, 42, 0.08);
 }
 
+/* ════════════════════════════════════════════════════════════════════════════
+   FORM TRANSITIONS & FOCUS
+   ════════════════════════════════════════════════════════════════════════════ */
+
 button,
 input,
 textarea,
@@ -126,34 +175,79 @@ select:focus-visible {
   box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.32);
 }
 
-.fade-up {
-  animation: fade-up 0.22s ease-out both;
+/* ════════════════════════════════════════════════════════════════════════════
+   LIGHT MODE — UTILITY CLASS OVERRIDES
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Glass / surface backgrounds ──────────────────────────────────────────── */
+[data-theme="light"] .bg-white\/3  { background-color: rgba(32, 33, 36, 0.02) !important; }
+[data-theme="light"] .bg-white\/5  { background-color: rgba(32, 33, 36, 0.03) !important; }
+[data-theme="light"] .bg-white\/8  { background-color: rgba(32, 33, 36, 0.05) !important; }
+[data-theme="light"] .bg-white\/10 { background-color: rgba(32, 33, 36, 0.06) !important; }
+[data-theme="light"] .bg-white\/15 { background-color: rgba(32, 33, 36, 0.08) !important; }
+[data-theme="light"] .bg-white\/20 { background-color: rgba(32, 33, 36, 0.10) !important; }
+
+/* ── Hover glass backgrounds ──────────────────────────────────────────────── */
+[data-theme="light"] .hover\:bg-white\/5:hover  { background-color: rgba(32, 33, 36, 0.03) !important; }
+[data-theme="light"] .hover\:bg-white\/8:hover  { background-color: rgba(32, 33, 36, 0.05) !important; }
+[data-theme="light"] .hover\:bg-white\/10:hover { background-color: rgba(32, 33, 36, 0.06) !important; }
+
+/* ── Borders ──────────────────────────────────────────────────────────────── */
+[data-theme="light"] .border-white\/5  { border-color: rgba(32, 33, 36, 0.06) !important; }
+[data-theme="light"] .border-white\/8  { border-color: rgba(32, 33, 36, 0.08) !important; }
+[data-theme="light"] .border-white\/10 { border-color: rgba(32, 33, 36, 0.10) !important; }
+[data-theme="light"] .border-white\/12 { border-color: rgba(32, 33, 36, 0.12) !important; }
+
+/* ── Code / pre blocks ─────────────────────────────────────────────────────── */
+[data-theme="light"] .bg-black\/20 { background-color: rgba(32, 33, 36, 0.04) !important; }
+[data-theme="light"] .bg-black\/30 { background-color: rgba(248, 249, 250, 0.96) !important; }
+
+/* ── Text overrides ───────────────────────────────────────────────────────── */
+[data-theme="light"] strong {
+  color: rgb(var(--aura-text)) !important;
 }
 
-@keyframes fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+[data-theme="light"] code {
+  background-color: rgba(32, 33, 36, 0.06) !important;
+  color: #0b57d0 !important;
 }
 
-@keyframes pulse-subtle {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.82;
-  }
+[data-theme="light"] pre {
+  background-color: rgba(32, 33, 36, 0.03) !important;
 }
 
-.animate-pulse-subtle {
-  animation: pulse-subtle 1.25s ease-in-out infinite;
+/* ── Box shadow ───────────────────────────────────────────────────────────── */
+[data-theme="light"] .shadow-aura-glow {
+  box-shadow: var(--aura-glow) !important;
 }
+
+/* ── Form controls ────────────────────────────────────────────────────────── */
+[data-theme="light"] input:not([type="range"]),
+[data-theme="light"] textarea,
+[data-theme="light"] select {
+  background-color: rgba(255, 255, 255, 0.9) !important;
+  color: rgb(var(--aura-text)) !important;
+  border-color: rgba(32, 33, 36, 0.12) !important;
+}
+
+[data-theme="light"] input::placeholder,
+[data-theme="light"] textarea::placeholder {
+  color: rgba(95, 99, 104, 0.65) !important;
+}
+
+[data-theme="light"] select option {
+  background: #ffffff;
+  color: #202124;
+}
+
+/* ── Toggle switch: off state ─────────────────────────────────────────────── */
+[data-theme="light"] .bg-white\/15 {
+  background-color: rgba(95, 99, 104, 0.15) !important;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   MESSAGE BUBBLE MARKDOWN
+   ════════════════════════════════════════════════════════════════════════════ */
 
 .message-bubble :where(pre) {
   overflow-x: auto;
@@ -190,4 +284,204 @@ select:focus-visible {
 
 .selection-action {
   box-shadow: 0 16px 40px rgba(124, 58, 237, 0.25);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   ANIMATIONS
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Message enter ──────────────────────────────────────────────────────── */
+@keyframes msg-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.msg-enter {
+  animation: msg-enter 0.18s ease-out both;
+}
+
+/* ── Overlay entrance ───────────────────────────────────────────────────── */
+@keyframes overlay-enter {
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.overlay-enter {
+  animation: overlay-enter 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ── Fade-up for cards / empty state ─────────────────────────────────────── */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.fade-up {
+  animation: fade-up 0.35s ease-out both;
+}
+
+.fade-up-1 { animation-delay: 0.04s; }
+.fade-up-2 { animation-delay: 0.08s; }
+.fade-up-3 { animation-delay: 0.12s; }
+.fade-up-4 { animation-delay: 0.16s; }
+
+/* ── Task banner entrance ───────────────────────────────────────────────── */
+@keyframes task-banner-enter {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.task-banner-enter {
+  animation: task-banner-enter 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ── Step row slide-in ──────────────────────────────────────────────────── */
+@keyframes step-enter {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+.step-enter {
+  animation: step-enter 0.25s ease-out both;
+}
+
+/* ── Step done checkmark pop ─────────────────────────────────────────────── */
+@keyframes check-pop {
+  0%   { transform: scale(0); opacity: 0; }
+  60%  { transform: scale(1.2); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.check-pop {
+  animation: check-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+/* ── Typing dots ────────────────────────────────────────────────────────── */
+@keyframes aura-typing-dot {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+  40% { transform: translateY(-2px); opacity: 1; }
+}
+
+/* ── Blob morph (logo / voice) ──────────────────────────────────────────── */
+@keyframes blob-morph {
+  0%   { border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%; }
+  34%  { border-radius: 70% 30% 50% 50% / 30% 30% 70% 70%; }
+  67%  { border-radius: 100% 60% 60% 100% / 100% 100% 60% 60%; }
+  100% { border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%; }
+}
+
+@keyframes blob-morph-reverse {
+  0%   { border-radius: 70% 30% 50% 50% / 30% 30% 70% 70%; }
+  34%  { border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%; }
+  67%  { border-radius: 100% 60% 60% 100% / 100% 100% 60% 60%; }
+  100% { border-radius: 70% 30% 50% 50% / 30% 30% 70% 70%; }
+}
+
+/* ── Shimmer bar (planning state) ───────────────────────────────────────── */
+@keyframes shimmer-bar {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer-bar {
+  background: linear-gradient(
+    90deg,
+    rgba(124, 58, 237, 0.1) 25%,
+    rgba(124, 58, 237, 0.3) 50%,
+    rgba(124, 58, 237, 0.1) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer-bar 1.8s ease-in-out infinite;
+}
+
+/* ── Progress bar shimmer overlay ────────────────────────────────────────── */
+@keyframes progress-shine {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(200%); }
+}
+
+.progress-shine::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.15) 50%, transparent 100%);
+  animation: progress-shine 2s ease-in-out infinite;
+}
+
+/* ── Glow pulse ──────────────────────────────────────────────────────────── */
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 58, 237, 0); }
+  50%      { box-shadow: 0 0 12px 2px rgba(124, 58, 237, 0.15); }
+}
+
+.glow-pulse {
+  animation: glow-pulse 3s ease-in-out infinite;
+}
+
+/* ── Pulse ring (voice button) ───────────────────────────────────────────── */
+@keyframes pulse-ring {
+  0%   { transform: scale(1); opacity: 0.6; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
+
+.pulse-ring {
+  animation: pulse-ring 1.5s ease-out infinite;
+}
+
+/* ── Spin ────────────────────────────────────────────────────────────────── */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Tab indicator slide ─────────────────────────────────────────────────── */
+@keyframes tab-indicator {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+
+.tab-indicator {
+  animation: tab-indicator 0.2s ease-out both;
+}
+
+/* ── URL pulse ───────────────────────────────────────────────────────────── */
+@keyframes url-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.url-pulse {
+  animation: url-pulse 2s ease-in-out infinite;
+}
+
+/* ── Task complete flash ─────────────────────────────────────────────────── */
+@keyframes task-complete {
+  0%   { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.3); }
+  50%  { box-shadow: 0 0 20px 4px rgba(16, 185, 129, 0.15); }
+  100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+
+.task-complete {
+  animation: task-complete 0.8s ease-out;
+}
+
+/* ── Caption fade in ─────────────────────────────────────────────────────── */
+@keyframes captionFadeIn {
+  0% { opacity: 0; transform: translateY(4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Pulse subtle ────────────────────────────────────────────────────────── */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.82; }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 1.25s ease-in-out infinite;
+}
+
+/* ── Shimmer X (streaming bar) ───────────────────────────────────────────── */
+@keyframes shimmer-x {
+  0%   { background-position: 200% center; }
+  100% { background-position: -200% center; }
 }
