@@ -29,6 +29,12 @@ export const IPC_CHANNELS = {
   browserCaptureScreenshot: "aura:browser:capture-screenshot",
   browserPermissionsRequest: "aura:browser:permissions-request",
   skillsList: "aura:skills:list",
+  configGet: "aura:config:get",
+  configSetApiKey: "aura:config:set-api-key",
+  configSetModel: "aura:config:set-model",
+  configGetProviders: "aura:config:get-providers",
+  gatewayGetStatus: "aura:gateway:get-status",
+  gatewayRestart: "aura:gateway:restart",
   internalBrowserSelection: "aura:internal:browser-selection",
   appEvent: "aura:event"
 } as const;

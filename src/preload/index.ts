@@ -50,6 +50,16 @@ const api: AuraDesktopApi = {
   skills: {
     list: () => ipcRenderer.invoke(IPC_CHANNELS.skillsList)
   },
+  config: {
+    get: () => ipcRenderer.invoke(IPC_CHANNELS.configGet),
+    setApiKey: (payload) => ipcRenderer.invoke(IPC_CHANNELS.configSetApiKey, payload),
+    setModel: (payload) => ipcRenderer.invoke(IPC_CHANNELS.configSetModel, payload),
+    getProviders: () => ipcRenderer.invoke(IPC_CHANNELS.configGetProviders),
+  },
+  gateway: {
+    getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.gatewayGetStatus),
+    restart: () => ipcRenderer.invoke(IPC_CHANNELS.gatewayRestart),
+  },
   onAppEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, message: Parameters<typeof listener>[0]) => {
       listener(message);

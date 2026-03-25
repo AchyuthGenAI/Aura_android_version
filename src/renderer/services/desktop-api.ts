@@ -6,7 +6,10 @@ import type {
   BrowserTabsUpdatedPayload,
   ChatSendRequest,
   ExtensionMessage,
+  GatewayStatus,
+  OpenClawConfig,
   PageContext,
+  ProviderInfo,
   RuntimeStatus,
   SkillSummary,
   WidgetBounds
@@ -58,6 +61,16 @@ export interface AuraDesktopApi {
   };
   skills: {
     list(): Promise<SkillSummary[]>;
+  };
+  config: {
+    get(): Promise<OpenClawConfig>;
+    setApiKey(payload: { provider: string; apiKey: string }): Promise<void>;
+    setModel(payload: { model: string; provider?: string }): Promise<void>;
+    getProviders(): Promise<ProviderInfo[]>;
+  };
+  gateway: {
+    getStatus(): Promise<GatewayStatus>;
+    restart(): Promise<RuntimeStatus>;
   };
   onAppEvent(listener: (message: ExtensionMessage<unknown>) => void): () => void;
 }

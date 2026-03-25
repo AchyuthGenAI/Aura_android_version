@@ -246,6 +246,33 @@ export interface SkillSummary {
   enabled: boolean;
 }
 
+export interface GatewayStatus {
+  connected: boolean;
+  port: number;
+  processRunning: boolean;
+  error?: string;
+}
+
+export interface OpenClawConfig {
+  gateway?: {
+    port?: number;
+    bind?: string;
+    auth?: { mode?: string; token?: string };
+  };
+  agents?: {
+    main?: { model?: string; provider?: string };
+  };
+  providers?: Record<string, { apiKey?: string; enabled?: boolean }>;
+}
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  configured: boolean;
+  managed: boolean;
+  model?: string;
+}
+
 export interface ToastNotice {
   id: string;
   tone: "info" | "success" | "warning" | "error";

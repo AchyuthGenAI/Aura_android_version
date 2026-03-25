@@ -8,7 +8,8 @@ import type { AuraStorageShape, ExtensionMessage, SkillSummary, WidgetBounds } f
 
 import { AuthService } from "./services/auth-service";
 import { BrowserController } from "./services/browser-controller";
-import { RuntimeManager } from "./services/runtime-manager";
+import { ConfigManager } from "./services/config-manager";
+import { GatewayManager } from "./services/gateway-manager";
 import { AuraStore } from "./services/store";
 
 const COLLAPSED_WIDGET_SIZE = 84;
@@ -21,6 +22,7 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
 let mainWindow: BrowserWindow | null = null;
 let widgetWindow: BrowserWindow | null = null;
+let activeGatewayManager: GatewayManager | null = null;
 let isQuitting = false;
 let isCreatingWindows = false;
 
@@ -266,9 +268,10 @@ const createAppWindows = async (): Promise<void> => {
 
     const browserController = new BrowserController(mainWindow, browserViewPreloadPath, emit);
     const authService = new AuthService(app.getPath("userData"), store);
-    const runtimeManager = new RuntimeManager(
+    const configManager = new ConfigManager(app.getPath("userData"));
+    activeGatewayManager = new GatewayManager(
       resolveOpenClawRootCandidates(),
-      app.getPath("userData"),
+      configManager,
       store,
       browserController,
       emit
@@ -293,9 +296,9 @@ const createAppWindows = async (): Promise<void> => {
       }
       return nextState;
     });
-    ipcMain.handle(IPC_CHANNELS.runtimeGetStatus, async () => runtimeManager.getStatus());
-    ipcMain.handle(IPC_CHANNELS.runtimeBootstrap, async () => runtimeManager.bootstrap());
-    ipcMain.handle(IPC_CHANNELS.runtimeRestart, async () => runtimeManager.restart());
+    ipcMain.handle(IPC_CHANNELS.runtimeGetStatus, async () => activeGatewayManager!.getStatus());
+    ipcMain.handle(IPC_CHANNELS.runtimeBootstrap, async () => activeGatewayManager!.bootstrap());
+    ipcMain.handle(IPC_CHANNELS.runtimeRestart, async () => activeGatewayManager!.restart());
     ipcMain.handle(IPC_CHANNELS.appShowMainWindow, async () => {
       showMainWindow();
     });
@@ -313,8 +316,18 @@ const createAppWindows = async (): Promise<void> => {
       widgetWindow.setBounds(payload, true);
       return true;
     });
-    ipcMain.handle(IPC_CHANNELS.chatSend, async (_event, payload) => runtimeManager.sendChat(payload));
-    ipcMain.handle(IPC_CHANNELS.chatStop, async () => runtimeManager.stopResponse());
+    ipcMain.handle(IPC_CHANNELS.chatSend, async (_event, payload) => activeGatewayManager!.sendChat(payload));
+    ipcMain.handle(IPC_CHANNELS.chatStop, async () => activeGatewayManager!.stopResponse());
+    ipcMain.handle(IPC_CHANNELS.configGet, async () => configManager.readConfig());
+    ipcMain.handle(IPC_CHANNELS.configSetApiKey, async (_event, payload: { provider: string; apiKey: string }) => {
+      configManager.setApiKey(payload.provider, payload.apiKey);
+    });
+    ipcMain.handle(IPC_CHANNELS.configSetModel, async (_event, payload: { model: string; provider?: string }) => {
+      configManager.setModel(payload.model, payload.provider);
+    });
+    ipcMain.handle(IPC_CHANNELS.configGetProviders, async () => configManager.getProviders());
+    ipcMain.handle(IPC_CHANNELS.gatewayGetStatus, async () => activeGatewayManager!.getGatewayStatus());
+    ipcMain.handle(IPC_CHANNELS.gatewayRestart, async () => activeGatewayManager!.restart());
     ipcMain.handle(IPC_CHANNELS.browserGetTabs, async () => browserController.getTabs());
     ipcMain.handle(IPC_CHANNELS.browserNewTab, async (_event, payload) => browserController.newTab(payload));
     ipcMain.handle(IPC_CHANNELS.browserSwitchTab, async (_event, payload: { id: string }) => browserController.switchTab(payload.id));
@@ -371,7 +384,7 @@ const createAppWindows = async (): Promise<void> => {
     ]);
 
     await browserController.initialize();
-    await runtimeManager.bootstrap();
+    await activeGatewayManager!.bootstrap();
 
     if (!launchedAsWidgetOnly && !mainWindow.isVisible()) {
       mainWindow.show();
@@ -399,6 +412,7 @@ void app.whenReady().then(() => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  void activeGatewayManager?.shutdown();
 });
 
 app.on("activate", () => {
