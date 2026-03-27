@@ -8,9 +8,9 @@ export const Card = ({
   children: ReactNode;
 }): JSX.Element => (
   <div
-    className={`relative overflow-hidden rounded-[32px] border border-white/[0.08] bg-[#1a1926]/40 p-6 shadow-2xl backdrop-blur-3xl transition-all ${className}`}
+    className={`relative overflow-hidden rounded-[32px] border border-white/[0.08] bg-[#1a1926]/50 p-6 shadow-[0_8px_32px_rgba(0,0,0,0.24)] backdrop-blur-3xl transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ${className}`}
   >
-    <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-white/[0.02] to-transparent" />
+    <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-white/[0.04] to-transparent mix-blend-overlay" />
     <div className="relative z-10">{children}</div>
   </div>
 );
@@ -32,7 +32,7 @@ export const Button = ({
     type={type}
     disabled={disabled}
     onClick={onClick}
-    className={`rounded-2xl px-5 py-3 text-[14px] font-semibold tracking-wide shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-aura-violet/20 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
+    className={`rounded-2xl px-5 py-3 text-[14px] font-semibold tracking-wide shadow-sm transition-all duration-300 hover:scale-[1.02] hover:shadow-lg hover:shadow-aura-violet/20 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100 ${className}`}
   >
     {children}
   </button>
@@ -54,7 +54,7 @@ export const TextInput = ({
     value={value}
     onChange={(e) => onChange(e.target.value)}
     placeholder={placeholder}
-    className="w-full rounded-[20px] border border-white/[0.06] bg-black/20 px-5 py-3.5 text-[14px] text-aura-text outline-none transition-all placeholder:text-aura-muted hover:bg-black/30 focus:border-aura-violet/50 focus:bg-black/40 focus:shadow-[0_0_24px_rgba(124,58,237,0.15)]"
+    className="w-full rounded-[20px] border border-white/[0.06] bg-black/20 px-5 py-3.5 text-[14px] text-aura-text outline-none transition-all placeholder:text-aura-muted hover:bg-black/30 focus:bg-black/40 focus:ring-2 focus:ring-aura-violet/50 focus:border-transparent focus:shadow-[0_0_24px_rgba(124,58,237,0.15)]"
   />
 );
 
@@ -74,7 +74,7 @@ export const TextArea = ({
     onChange={(e) => onChange(e.target.value)}
     placeholder={placeholder}
     rows={rows}
-    className="w-full resize-none rounded-[20px] border border-white/[0.06] bg-black/20 px-5 py-4 text-[14px] text-aura-text outline-none transition-all placeholder:text-aura-muted hover:bg-black/30 focus:border-aura-violet/50 focus:bg-black/40 focus:shadow-[0_0_24px_rgba(124,58,237,0.15)]"
+    className="w-full resize-none rounded-[20px] border border-white/[0.06] bg-black/20 px-5 py-4 text-[14px] text-aura-text outline-none transition-all placeholder:text-aura-muted hover:bg-black/30 focus:bg-black/40 focus:ring-2 focus:ring-aura-violet/50 focus:border-transparent focus:shadow-[0_0_24px_rgba(124,58,237,0.15)]"
   />
 );
 
@@ -100,7 +100,7 @@ export const InfoTile = ({
   value: string;
   detail: string;
 }): JSX.Element => (
-  <div className="rounded-[24px] border border-white/[0.06] bg-white/[0.02] px-5 py-5 transition-all hover:bg-white/[0.04] hover:border-white/[0.1]">
+  <div className="rounded-[24px] border border-white/[0.06] bg-white/[0.02] px-5 py-5 transition-all duration-300 hover:-translate-y-1 hover:bg-white/[0.04] hover:border-white/[0.1] hover:shadow-xl hover:shadow-aura-violet/5">
     <p className="text-[11px] uppercase tracking-[0.2em] text-aura-muted">{label}</p>
     <p className="mt-3 text-[32px] font-bold tracking-tight text-aura-text">{value}</p>
     <p className="mt-1 pb-1 text-[13px] text-aura-muted opacity-80">{detail}</p>

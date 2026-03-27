@@ -60,7 +60,7 @@ const BrowserToolbar = (): JSX.Element => {
   }, [omniboxValue]);
 
   return (
-    <div className="flex flex-col border-b border-white/5 bg-[#1a1926]/90 px-4 pt-3 pb-0 backdrop-blur-xl">
+    <div className="flex flex-col border-b border-white/5 bg-[#1a1926]/95 px-6 pt-4 pb-2 backdrop-blur-2xl">
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-1">
           <button className="flex h-8 w-8 items-center justify-center rounded-full text-aura-text transition hover:bg-white/10" onClick={() => void browserBack()}>
@@ -96,7 +96,7 @@ const BrowserToolbar = (): JSX.Element => {
         </div>
       </div>
 
-      <div className="mt-4 flex gap-1.5 overflow-x-auto">
+      <div className="mt-4 flex gap-2 overflow-x-auto no-scrollbar">
         {browserTabs.map((tab) => (
           <div
             key={tab.id}
@@ -176,7 +176,7 @@ export const BrowserPage = (): JSX.Element => {
   }, [activeBrowserTabId, browserSyncBounds, refreshPageContext, route]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[26px] border border-white/5 bg-[#252436] shadow-xl">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[32px] border border-white/5 bg-[#0c0b14] shadow-2xl">
       <BrowserToolbar />
       <div className="relative flex-1 bg-white">
         <div ref={hostRef} className="absolute inset-0" />

@@ -6,6 +6,15 @@ import { StatusPill } from "../primitives";
 import { Button, Card, InfoTile, SectionHeading, TextArea, TextInput } from "../shared";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
+const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
+  <label className="group flex flex-col gap-1.5 relative">
+    <span className="ml-1 text-[11px] font-bold uppercase tracking-[0.1em] text-aura-muted transition-colors group-focus-within:text-aura-violet">
+      {label}
+    </span>
+    {children}
+  </label>
+);
+
 export const MonitorsPage = (): JSX.Element => {
   const monitors = useAuraStore((state) => state.monitors);
   const saveMonitors = useAuraStore((state) => state.saveMonitors);
@@ -22,17 +31,17 @@ export const MonitorsPage = (): JSX.Element => {
   });
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-5 overflow-y-auto pr-1">
+    <div className="mx-auto flex h-full w-full max-w-[1200px] flex-col overflow-y-auto pr-2 pb-8 mt-2">
 
-      <div className="grid min-h-0 gap-5 xl:grid-cols-[380px_minmax(0,1fr)]">
-        <Card className="flex min-h-0 flex-col px-5 py-5">
+      <div className="grid gap-8 xl:grid-cols-[400px_minmax(0,1fr)]">
+        <div className="flex flex-col">
           <SectionHeading title="Create Monitor" detail="Keep recurring checks as first-class Aura tools." />
-          <div className="mt-4 space-y-3">
-            <TextInput value={draft.title} onChange={(value) => setDraft({ ...draft, title: value })} placeholder="Monitor title" />
-            <TextInput value={draft.url} onChange={(value) => setDraft({ ...draft, url: value })} placeholder="https://example.com/page" />
-            <TextArea value={draft.condition} onChange={(value) => setDraft({ ...draft, condition: value })} placeholder="Describe what should trigger an alert" rows={5} />
+          <div className="mt-4 space-y-4">
+            <Field label="Task Name"><TextInput value={draft.title} onChange={(value) => setDraft({ ...draft, title: value })} placeholder="Monitor title" /></Field>
+            <Field label="Target URL"><TextInput value={draft.url} onChange={(value) => setDraft({ ...draft, url: value })} placeholder="https://example.com/page" /></Field>
+            <Field label="Trigger Condition"><TextArea value={draft.condition} onChange={(value) => setDraft({ ...draft, condition: value })} placeholder="Describe what should trigger an alert" rows={5} /></Field>
             <div className="rounded-[22px] border border-white/8 bg-black/10 px-4 py-3">
-              <p className="text-xs uppercase tracking-[0.2em] text-aura-muted">Interval</p>
+              <p className="ml-1 text-[11px] font-bold uppercase tracking-[0.1em] text-aura-muted">Check Interval</p>
               <p className="mt-2 text-sm text-aura-text">Every {draft.intervalMinutes} minutes</p>
             </div>
           </div>
@@ -52,12 +61,15 @@ export const MonitorsPage = (): JSX.Element => {
               Save Monitor
             </Button>
           </div>
-        </Card>
-        <Card className="flex min-h-0 flex-col px-5 py-5">
+        </div>
+        <div className="flex flex-col">
           <SectionHeading title="Saved Monitors" detail="Desktop-managed monitor definitions and current status." />
-          <div className="mt-4 grid min-h-0 flex-1 gap-3 overflow-y-auto pr-1 md:grid-cols-2 2xl:grid-cols-3">
+          <div className="mt-4 grid flex-1 gap-4 md:grid-cols-2 2xl:grid-cols-3">
             {monitors.length === 0 ? (
-              <div className="flex flex-col items-center justify-center rounded-[28px] border border-dashed border-white/[0.08] bg-white/[0.02] px-6 py-12 text-center">
+              <div className="flex flex-col items-center justify-center rounded-[28px] border border-dashed border-white/[0.08] bg-white/[0.01] px-6 py-12 text-center transition-all hover:border-white/[0.12] hover:bg-white/[0.03]">
+                <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-emerald-400/10 text-emerald-400 shadow-[0_0_24px_rgba(52,211,153,0.2)]">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12A10 10 0 0 0 22 12 10 10 0 0 0 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+                </div>
                 <p className="text-[15px] font-semibold text-aura-text">No Monitors Yet</p>
                 <p className="mt-2 text-[13px] text-aura-muted max-w-[280px] leading-relaxed">Create one on the left and it will appear here with its current status.</p>
               </div>
@@ -76,7 +88,7 @@ export const MonitorsPage = (): JSX.Element => {
               ))
             )}
           </div>
-        </Card>
+        </div>
       </div>
     </div>
   );

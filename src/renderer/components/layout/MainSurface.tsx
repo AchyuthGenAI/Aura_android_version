@@ -1,6 +1,6 @@
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
-import { AppHeader } from "./AppHeader";
+import { AppSidebar } from "./AppSidebar";
 import { HomePage } from "../pages/HomePage";
 import { BrowserPage } from "../pages/BrowserPage";
 import { MonitorsPage } from "../pages/MonitorsPage";
@@ -12,15 +12,19 @@ export const MainSurface = (): JSX.Element => {
   const route = useAuraStore((state) => state.route);
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-[1760px] flex-col gap-5 overflow-hidden px-5 py-5">
-      <AppHeader />
-      <div className="min-h-0 flex-1 overflow-hidden">
+    <div className="mx-auto flex h-full w-full max-w-[1920px] flex-row overflow-hidden bg-[#0c0b14]">
+      <AppSidebar />
+      <div className="min-w-0 flex-1 overflow-hidden px-10 py-8 relative">
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-aura-violet/5 via-transparent to-transparent mix-blend-screen" />
+        <div className="relative h-full w-full">
         {route === "home" && <HomePage />}
         {route === "browser" && <BrowserPage />}
         {route === "monitors" && <MonitorsPage />}
         {route === "skills" && <SkillsPage />}
         {route === "profile" && <ProfilePage />}
         {route === "settings" && <SettingsPage />}
+          {route === "settings" && <SettingsPage />}
+        </div>
       </div>
     </div>
   );

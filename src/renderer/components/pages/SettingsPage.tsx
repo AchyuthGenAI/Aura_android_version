@@ -12,10 +12,11 @@ export const SettingsPage = (): JSX.Element => {
   const savePermissions = useAuraStore((state) => state.savePermissions);
 
   return (
-    <div className="grid h-full min-h-0 gap-5 overflow-y-auto pr-1 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
-      <Card className="min-h-0 px-5 py-5">
-        <SectionHeading title="Managed AI Access" detail="The desktop wrapper owns local runtime setup and provider posture." />
-        <div className="mt-5 grid gap-4 xl:grid-cols-2">
+    <div className="mx-auto flex h-full w-full max-w-[1200px] flex-col overflow-y-auto pr-2 pb-8 mt-2">
+      <div className="grid gap-12 xl:grid-cols-[minmax(0,1fr)_minmax(320px,420px)]">
+        <div className="flex flex-col">
+          <SectionHeading title="Managed AI Access" detail="The desktop wrapper owns local runtime setup and provider posture." />
+          <div className="mt-5 grid gap-4 xl:grid-cols-2">
           <SettingRow
             label="Theme"
             detail="Switch the desktop shell between dark and light."
@@ -87,9 +88,9 @@ export const SettingsPage = (): JSX.Element => {
             }
           />
         </div>
-      </Card>
-      <div className="flex min-h-0 flex-col gap-4 overflow-y-auto pr-1">
-        <Card className="px-5 py-5">
+      </div>
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-col">
           <SectionHeading title="Runtime Health" detail="No raw keys by default. Aura manages the local runtime state for the user." />
           <div className="mt-5 space-y-4">
             <div className="rounded-[24px] border border-white/8 bg-white/5 p-4">
@@ -129,9 +130,9 @@ export const SettingsPage = (): JSX.Element => {
                 ))}
               </div>
             </div>
-            <div className="rounded-[24px] border border-white/8 bg-white/5 p-4">
+            <div className="rounded-[24px] border border-white/[0.08] bg-[#1a1926]/50 p-5 shadow-[0_8px_32px_rgba(0,0,0,0.24)] backdrop-blur-3xl shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
               <p className="text-sm font-semibold text-aura-text">Environment</p>
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <div className="rounded-2xl bg-black/10 px-3 py-3">
                   <p className="text-xs uppercase tracking-[0.18em] text-aura-muted">Backend</p>
                   <p className="mt-2 text-sm text-aura-text">{desktopEnv.openClawUrl || "Not configured"}</p>
@@ -163,8 +164,9 @@ export const SettingsPage = (): JSX.Element => {
               </div>
             </div>
           </div>
-        </Card>
+        </div>
       </div>
+    </div>
     </div>
   );
 };
