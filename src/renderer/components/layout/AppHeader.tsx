@@ -31,55 +31,46 @@ export const AppHeader = (): JSX.Element => {
       .toUpperCase() || "AU";
 
   return (
-    <Card className="px-5 py-4">
-      <div className="grid gap-4 xl:grid-cols-[minmax(260px,360px)_minmax(0,1fr)_auto] xl:items-center">
-        <div className="flex min-w-0 items-center gap-3">
-          <AuraLogoBlob size="sm" isTaskRunning={runtimeStatus.phase === "running"} />
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-aura-text">Aura Desktop</p>
-            <p className="truncate text-xs text-aura-muted">Local AI workspace, built-in browser, and widget command center.</p>
-          </div>
+    <div className="flex items-center justify-between rounded-[28px] border border-white/5 bg-[#12111d]/60 px-6 py-4 shadow-sm backdrop-blur-2xl">
+      <div className="flex min-w-0 items-center gap-3">
+        <AuraLogoBlob size="xs" isTaskRunning={runtimeStatus.phase === "running"} />
+        <div className="min-w-0">
+          <p className="text-sm font-semibold tracking-tight text-aura-text">Aura Desktop</p>
         </div>
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 xl:justify-center">
+      </div>
+      <nav className="mx-4 flex flex-1 items-center justify-center">
+        <div className="flex flex-nowrap items-center gap-1.5 rounded-full bg-black/20 border border-white/5 p-1.5 shadow-inner backdrop-blur-md overflow-x-auto no-scrollbar">
           {ROUTES.map((item) => (
             <button
               key={item.id}
               onClick={() => void setRoute(item.id)}
-              className={`rounded-full px-4 py-2 text-sm font-medium whitespace-nowrap ${
-                route === item.id ? "bg-aura-gradient text-white shadow-aura-glow" : "bg-white/6 text-aura-text hover:bg-white/10"
+              className={`relative shrink-0 rounded-full px-5 py-2 text-[13px] font-semibold tracking-wide transition-all duration-300 ${
+                route === item.id ? "text-white shadow-[0px_4px_32px_rgba(124,58,237,0.3)] scale-[1.02]" : "text-aura-muted hover:bg-white/5 hover:text-white"
               }`}
             >
-              {item.label}
+              {route === item.id && (
+                <div className="absolute inset-0 rounded-full bg-aura-gradient border border-white/20" />
+              )}
+              <span className="relative z-10">{item.label}</span>
             </button>
           ))}
         </div>
-        <div className="flex items-center justify-end gap-3">
-          <Button
-            className="bg-aura-gradient text-white shadow-aura-glow hover:opacity-95"
-            onClick={() => void window.auraDesktop.app.showWidgetWindow()}
-          >
-            Open Aura
-          </Button>
-          <StatusPill
-            label={runtimeStatus.phase}
-            tone={runtimeStatus.phase === "ready" ? "success" : runtimeStatus.phase === "error" ? "error" : "default"}
-          />
-          <Button
-            className="bg-white/8 text-aura-text hover:bg-white/12"
-            onClick={() =>
-              void saveSettings({
-                ...settings,
-                theme: settings.theme === "dark" ? "light" : "dark",
-              })
-            }
-          >
-            {settings.theme === "dark" ? "Light" : "Dark"}
-          </Button>
-          <div className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/8 text-sm font-semibold text-aura-text">
-            {initials}
-          </div>
+      </nav>
+      <div className="flex items-center justify-end gap-3">
+        <Button
+          className="bg-aura-gradient text-white shadow-aura-glow transition-transform hover:scale-105"
+          onClick={() => void window.auraDesktop.app.showWidgetWindow()}
+        >
+          Open Widget
+        </Button>
+        <StatusPill
+          label={runtimeStatus.phase}
+          tone={runtimeStatus.phase === "ready" ? "success" : runtimeStatus.phase === "error" ? "error" : "default"}
+        />
+        <div className="flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/5 text-xs font-bold text-aura-text shadow-sm">
+          {initials}
         </div>
       </div>
-    </Card>
+    </div>
   );
 };

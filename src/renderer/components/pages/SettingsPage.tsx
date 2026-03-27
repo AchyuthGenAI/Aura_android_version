@@ -1,7 +1,7 @@
 import type { AuraSettings, PermissionState, ThemeMode } from "@shared/types";
 
 import { desktopEnv } from "@renderer/config/env";
-import { Card, SectionHeading, SettingRow } from "../shared";
+import { Card, SectionHeading, SettingRow, Switch } from "../shared";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
 export const SettingsPage = (): JSX.Element => {
@@ -23,7 +23,7 @@ export const SettingsPage = (): JSX.Element => {
               <select
                 value={settings.theme}
                 onChange={(event) => void saveSettings({ ...settings, theme: event.target.value as ThemeMode })}
-                className="rounded-xl border border-white/10 bg-black/10 px-3 py-2 text-sm text-aura-text"
+                className="rounded-[14px] border border-white/[0.06] bg-black/20 px-3 py-2 text-[13px] font-medium text-aura-text outline-none focus:border-aura-violet/50"
               >
                 <option value="dark">Dark</option>
                 <option value="light">Light</option>
@@ -37,7 +37,7 @@ export const SettingsPage = (): JSX.Element => {
               <select
                 value={settings.privacyMode}
                 onChange={(event) => void saveSettings({ ...settings, privacyMode: event.target.value as AuraSettings["privacyMode"] })}
-                className="rounded-xl border border-white/10 bg-black/10 px-3 py-2 text-sm text-aura-text"
+                className="rounded-[14px] border border-white/[0.06] bg-black/20 px-3 py-2 text-[13px] font-medium text-aura-text outline-none focus:border-aura-violet/50"
               >
                 <option value="standard">Standard</option>
                 <option value="strict">Strict</option>
@@ -48,10 +48,9 @@ export const SettingsPage = (): JSX.Element => {
             label="Voice Mode"
             detail="Enable voice interaction for Aura sessions."
             control={
-              <input
+              <Switch
                 checked={settings.voiceEnabled}
-                onChange={(event) => void saveSettings({ ...settings, voiceEnabled: event.target.checked })}
-                type="checkbox"
+                onChange={(checked) => void saveSettings({ ...settings, voiceEnabled: checked })}
               />
             }
           />
@@ -59,10 +58,9 @@ export const SettingsPage = (): JSX.Element => {
             label="Advanced Mode"
             detail="Expose more power-user behaviors in the desktop app."
             control={
-              <input
+              <Switch
                 checked={settings.advancedMode}
-                onChange={(event) => void saveSettings({ ...settings, advancedMode: event.target.checked })}
-                type="checkbox"
+                onChange={(checked) => void saveSettings({ ...settings, advancedMode: checked })}
               />
             }
           />
@@ -70,10 +68,9 @@ export const SettingsPage = (): JSX.Element => {
             label="Launch On Startup"
             detail="Start Aura automatically when you sign into Windows."
             control={
-              <input
+              <Switch
                 checked={settings.launchOnStartup}
-                onChange={(event) => void saveSettings({ ...settings, launchOnStartup: event.target.checked })}
-                type="checkbox"
+                onChange={(checked) => void saveSettings({ ...settings, launchOnStartup: checked })}
               />
             }
           />
@@ -81,12 +78,12 @@ export const SettingsPage = (): JSX.Element => {
             label="Widget-First Startup"
             detail="On login launches, show only the widget and keep the desktop window hidden."
             control={
-              <input
-                checked={settings.widgetOnlyOnStartup}
-                onChange={(event) => void saveSettings({ ...settings, widgetOnlyOnStartup: event.target.checked })}
-                type="checkbox"
-                disabled={!settings.launchOnStartup}
-              />
+              <div className={!settings.launchOnStartup ? "opacity-50 pointer-events-none" : ""}>
+                <Switch
+                  checked={settings.widgetOnlyOnStartup}
+                  onChange={(checked) => void saveSettings({ ...settings, widgetOnlyOnStartup: checked })}
+                />
+              </div>
             }
           />
         </div>
@@ -122,7 +119,7 @@ export const SettingsPage = (): JSX.Element => {
                           )
                         )
                       }
-                      className="rounded-xl border border-white/10 bg-black/10 px-3 py-2 text-sm text-aura-text"
+                      className="rounded-[14px] border border-white/[0.06] bg-black/20 px-3 py-2 text-[13px] font-medium text-aura-text outline-none focus:border-aura-violet/50"
                     >
                       <option value="prompt">Prompt</option>
                       <option value="granted">Granted</option>

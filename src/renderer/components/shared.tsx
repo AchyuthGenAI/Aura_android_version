@@ -8,9 +8,10 @@ export const Card = ({
   children: ReactNode;
 }): JSX.Element => (
   <div
-    className={`glass-panel relative overflow-hidden rounded-[28px] shadow-[0_18px_60px_rgba(3,6,20,0.28)] ${className}`}
+    className={`relative overflow-hidden rounded-[32px] border border-white/[0.08] bg-[#1a1926]/40 p-6 shadow-2xl backdrop-blur-3xl transition-all ${className}`}
   >
-    {children}
+    <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-white/[0.02] to-transparent" />
+    <div className="relative z-10">{children}</div>
   </div>
 );
 
@@ -31,7 +32,7 @@ export const Button = ({
     type={type}
     disabled={disabled}
     onClick={onClick}
-    className={`rounded-2xl px-4 py-2.5 text-sm font-semibold transition duration-200 hover:-translate-y-0.5 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
+    className={`rounded-2xl px-5 py-3 text-[14px] font-semibold tracking-wide shadow-sm transition-all duration-300 hover:-translate-y-0.5 hover:shadow-lg hover:shadow-aura-violet/20 active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-50 ${className}`}
   >
     {children}
   </button>
@@ -53,7 +54,7 @@ export const TextInput = ({
     value={value}
     onChange={(e) => onChange(e.target.value)}
     placeholder={placeholder}
-    className="w-full rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm text-aura-text outline-none transition placeholder:text-aura-muted focus:border-aura-violet/50 focus:bg-white/8"
+    className="w-full rounded-[20px] border border-white/[0.06] bg-black/20 px-5 py-3.5 text-[14px] text-aura-text outline-none transition-all placeholder:text-aura-muted hover:bg-black/30 focus:border-aura-violet/50 focus:bg-black/40 focus:shadow-[0_0_24px_rgba(124,58,237,0.15)]"
   />
 );
 
@@ -73,7 +74,7 @@ export const TextArea = ({
     onChange={(e) => onChange(e.target.value)}
     placeholder={placeholder}
     rows={rows}
-    className="w-full resize-none rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm text-aura-text outline-none transition placeholder:text-aura-muted focus:border-aura-violet/50 focus:bg-white/8"
+    className="w-full resize-none rounded-[20px] border border-white/[0.06] bg-black/20 px-5 py-4 text-[14px] text-aura-text outline-none transition-all placeholder:text-aura-muted hover:bg-black/30 focus:border-aura-violet/50 focus:bg-black/40 focus:shadow-[0_0_24px_rgba(124,58,237,0.15)]"
   />
 );
 
@@ -84,9 +85,9 @@ export const SectionHeading = ({
   title: string;
   detail?: string;
 }): JSX.Element => (
-  <div>
-    <h2 className="text-lg font-semibold tracking-tight text-aura-text">{title}</h2>
-    {detail && <p className="mt-1 text-sm text-aura-muted">{detail}</p>}
+  <div className="mb-2">
+    <h2 className="text-[20px] font-bold tracking-tight text-aura-text">{title}</h2>
+    {detail && <p className="mt-1.5 max-w-2xl text-[14px] leading-relaxed text-aura-muted">{detail}</p>}
   </div>
 );
 
@@ -99,10 +100,10 @@ export const InfoTile = ({
   value: string;
   detail: string;
 }): JSX.Element => (
-  <div className="rounded-[22px] border border-white/8 bg-black/10 px-4 py-4">
-    <p className="text-[11px] uppercase tracking-[0.22em] text-aura-muted">{label}</p>
-    <p className="mt-3 text-xl font-semibold tracking-tight text-aura-text">{value}</p>
-    <p className="mt-1 text-sm text-aura-muted">{detail}</p>
+  <div className="rounded-[24px] border border-white/[0.06] bg-white/[0.02] px-5 py-5 transition-all hover:bg-white/[0.04] hover:border-white/[0.1]">
+    <p className="text-[11px] uppercase tracking-[0.2em] text-aura-muted">{label}</p>
+    <p className="mt-3 text-[32px] font-bold tracking-tight text-aura-text">{value}</p>
+    <p className="mt-1 pb-1 text-[13px] text-aura-muted opacity-80">{detail}</p>
   </div>
 );
 
@@ -115,11 +116,35 @@ export const SettingRow = ({
   detail?: string;
   control: ReactNode;
 }): JSX.Element => (
-  <label className="flex items-center justify-between gap-4 rounded-[22px] border border-white/8 bg-white/5 px-4 py-4">
-    <div className="min-w-0">
-      <p className="text-sm font-medium text-aura-text">{label}</p>
-      {detail && <p className="mt-1 text-xs leading-5 text-aura-muted">{detail}</p>}
+  <label className="group flex cursor-pointer items-center justify-between gap-5 rounded-[24px] border border-white/[0.04] bg-white/[0.02] px-5 py-4 transition-all hover:border-white/[0.08] hover:bg-white/[0.04]">
+    <div className="min-w-0 flex-1">
+      <p className="text-[15px] font-semibold text-aura-text transition-colors group-hover:text-white">{label}</p>
+      {detail && <p className="mt-1.5 text-[13px] leading-relaxed text-aura-muted">{detail}</p>}
     </div>
     <div className="shrink-0">{control}</div>
   </label>
+);
+
+export const Switch = ({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}): JSX.Element => (
+  <button
+    type="button"
+    role="switch"
+    aria-checked={checked}
+    onClick={() => onChange(!checked)}
+    className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-aura-violet/50 ${
+      checked ? "bg-aura-violet" : "bg-white/10"
+    }`}
+  >
+    <span
+      className={`pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+        checked ? "translate-x-5" : "translate-x-0"
+      }`}
+    />
+  </button>
 );

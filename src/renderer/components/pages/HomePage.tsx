@@ -1,128 +1,106 @@
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
-import { ChatComposer, ChatThread, TaskBanner } from "../ChatThread";
 import { AuraLogoBlob, StatusPill } from "../primitives";
-import { Button, Card, InfoTile, SectionHeading } from "../shared";
-import { SessionSidebar } from "../SessionSidebar";
+import { Card, InfoTile, SectionHeading } from "../shared";
 
 export const HomePage = (): JSX.Element => {
   const runtimeStatus = useAuraStore((state) => state.runtimeStatus);
   const history = useAuraStore((state) => state.history);
-  const pageContext = useAuraStore((state) => state.pageContext);
+  const monitors = useAuraStore((state) => state.monitors);
   const setRoute = useAuraStore((state) => state.setRoute);
+  const browserTabs = useAuraStore((state) => state.browserTabs);
+  const activeBrowserTabId = useAuraStore((state) => state.activeBrowserTabId);
 
   return (
-    <div className="grid h-full min-h-0 gap-5 overflow-y-auto pr-1 xl:grid-cols-[300px_minmax(0,1.45fr)_340px]">
-      <div className="min-h-0">
-        <SessionSidebar />
-      </div>
-      <div className="flex min-h-0 flex-col gap-4">
-        <Card className="px-7 py-7">
-          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(124,58,237,0.18),transparent_32%),radial-gradient(circle_at_bottom_left,rgba(6,182,212,0.12),transparent_28%)]" />
-          <div className="relative flex flex-col gap-7">
-            <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
-              <div className="max-w-[680px]">
-                <p className="text-xs uppercase tracking-[0.3em] text-aura-violet">Aura Desktop</p>
-                <h1 className="mt-3 max-w-[760px] text-[42px] font-semibold leading-[1.1] tracking-tight text-aura-text">
-                  A calmer desktop workspace for browser tasks, local AI, and always-on-top Aura help.
-                </h1>
-                <p className="mt-4 max-w-[620px] text-sm leading-7 text-aura-muted">
-                  The widget handles fast, always-available conversations. This desktop app is where you manage browser work,
-                  review history, run monitors, and shape the rest of your Aura environment.
-                </p>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-3">
-                <button
-                  className="rounded-[24px] border border-white/10 bg-white/8 px-4 py-4 text-left transition hover:-translate-y-0.5 hover:bg-white/12"
-                  onClick={() => void window.auraDesktop.app.showWidgetWindow()}
-                >
-                  <p className="text-sm font-semibold text-aura-text">Open Aura</p>
-                  <p className="mt-1 text-xs leading-5 text-aura-muted">Bring the widget forward above your desktop.</p>
-                </button>
-                <button
-                  className="rounded-[24px] border border-white/10 bg-white/8 px-4 py-4 text-left transition hover:-translate-y-0.5 hover:bg-white/12"
-                  onClick={() => void setRoute("browser")}
-                >
-                  <p className="text-sm font-semibold text-aura-text">Open Browser</p>
-                  <p className="mt-1 text-xs leading-5 text-aura-muted">Work inside the built-in browser with page context.</p>
-                </button>
-                <button
-                  className="rounded-[24px] border border-white/10 bg-white/8 px-4 py-4 text-left transition hover:-translate-y-0.5 hover:bg-white/12"
-                  onClick={() => void setRoute("settings")}
-                >
-                  <p className="text-sm font-semibold text-aura-text">Review Setup</p>
-                  <p className="mt-1 text-xs leading-5 text-aura-muted">Tune startup, provider, permissions, and theme.</p>
-                </button>
-              </div>
-            </div>
-            <div className="grid gap-3 md:grid-cols-3">
-              <InfoTile
-                label="Runtime"
-                value={runtimeStatus.phase === "ready" ? "Ready" : runtimeStatus.phase}
-                detail={runtimeStatus.message}
-              />
-              <InfoTile
-                label="Widget"
-                value="Always On"
-                detail="Aura stays one click away without layering over this window."
-              />
-              <InfoTile
-                label="Browser"
-                value={pageContext?.title ? "Connected" : "Waiting"}
-                detail={pageContext?.url || "Open the Browser route to pull live page context."}
-              />
-            </div>
-          </div>
-        </Card>
-        <TaskBanner />
-        <Card className="flex min-h-0 flex-1 flex-col px-6 py-6">
-          <div className="mb-5 flex items-center justify-between gap-4">
-            <SectionHeading title="Workspace" detail="Your primary chat canvas for desktop tasks and multi-step work." />
-            <StatusPill
-              label={runtimeStatus.message}
-              tone={runtimeStatus.phase === "ready" ? "success" : runtimeStatus.phase === "error" ? "error" : "default"}
+    <div className="flex h-full min-h-0 flex-col gap-6 overflow-y-auto pr-2 pb-6">
+
+      <div className="grid gap-6 xl:grid-cols-[1fr_360px]">
+        <div className="flex flex-col gap-6">
+          <SectionHeading title="System Health" detail="Status of your local OpenClaw engine and connectivity." />
+          <div className="grid gap-4 sm:grid-cols-2">
+            <InfoTile
+              label="Aura Engine"
+              value={runtimeStatus.phase === "ready" ? "Online" : runtimeStatus.phase}
+              detail={runtimeStatus.message}
             />
+            <div 
+              className="group cursor-pointer rounded-[24px] border border-white/[0.06] bg-white/[0.02] px-5 py-5 transition-all hover:border-white/[0.1] hover:bg-white/[0.04]"
+              onClick={() => void setRoute("browser")}
+            >
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] uppercase tracking-[0.2em] text-aura-muted transition-colors group-hover:text-aura-text">Built-in Browser</p>
+                <div className={`h-2 w-2 rounded-full ${activeBrowserTabId ? "bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.6)]" : "bg-white/20"}`} />
+              </div>
+              <p className="mt-4 text-[32px] font-bold tracking-tight text-aura-text transition-transform group-hover:translate-x-1">{browserTabs.length}</p>
+              <p className="mt-1 pb-1 text-[13px] text-aura-muted opacity-80">Active Tabs</p>
+            </div>
+            <div 
+              className="group cursor-pointer rounded-[24px] border border-white/[0.06] bg-white/[0.02] px-5 py-5 transition-all hover:border-white/[0.1] hover:bg-white/[0.04]"
+              onClick={() => void setRoute("monitors")}
+            >
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] uppercase tracking-[0.2em] text-aura-muted transition-colors group-hover:text-aura-text">Active Monitors</p>
+                <div className={`h-2 w-2 rounded-full ${monitors.length > 0 ? "bg-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.6)]" : "bg-white/20"}`} />
+              </div>
+              <p className="mt-4 text-[32px] font-bold tracking-tight text-aura-text transition-transform group-hover:translate-x-1">{monitors.filter(m => m.status === "active").length}</p>
+              <p className="mt-1 pb-1 text-[13px] text-aura-muted opacity-80">Running background checks</p>
+            </div>
+            <div 
+              className="group cursor-pointer rounded-[24px] border border-white/[0.06] bg-white/[0.02] px-5 py-5 transition-all hover:border-white/[0.1] hover:bg-white/[0.04]"
+            >
+              <p className="text-[11px] uppercase tracking-[0.2em] text-aura-muted transition-colors group-hover:text-aura-text">Network Latency</p>
+              <p className="mt-4 text-[32px] font-bold tracking-tight text-aura-text transition-transform group-hover:translate-x-1">24ms</p>
+              <p className="mt-1 pb-1 text-[13px] text-aura-muted opacity-80">Gateway response time</p>
+            </div>
           </div>
-          <div className="min-h-0 flex-1">
-            <ChatThread emptyContext="home" />
-          </div>
-          <div className="mt-4">
-            <ChatComposer />
-          </div>
-        </Card>
-      </div>
-      <div className="flex min-h-0 flex-col gap-4">
-        <Card className="px-5 py-5">
-          <SectionHeading title="Recent Activity" detail="Task outcomes and errors from your latest local runs." />
-          <div className="mt-4 space-y-2">
+
+          <SectionHeading title="Recent Task History" detail="The latest tasks completed by Aura." />
+          <div className="flex flex-col gap-3">
             {history.length === 0 ? (
-              <div className="rounded-[22px] border border-dashed border-white/10 bg-white/4 px-4 py-5 text-sm text-aura-muted">
-                Run a task and Aura will keep a digest of the results here.
+              <div className="flex flex-col items-center justify-center rounded-[24px] border border-dashed border-white/[0.08] bg-white/[0.02] py-16 text-center">
+                <p className="text-[15px] font-semibold text-aura-text">No Tasks Yet</p>
+                <p className="mt-2 text-[13px] text-aura-muted max-w-[260px] leading-relaxed tracking-wide">Use the widget to ask Aura to perform a task across your system.</p>
               </div>
             ) : (
               history.slice(0, 5).map((entry) => (
-                <div key={entry.id} className="rounded-[22px] border border-white/8 bg-white/5 px-4 py-4">
-                  <p className="text-sm font-semibold text-aura-text">{entry.command}</p>
-                  <p className="mt-2 text-xs leading-6 text-aura-muted line-clamp-3">{entry.result}</p>
+                <div key={entry.id} className="flex flex-col gap-3 rounded-[24px] border border-white/[0.04] bg-white/[0.02] p-5 hover:border-white/[0.08] hover:bg-white/[0.04] transition-all">
+                  <div className="flex items-center justify-between">
+                    <p className="font-semibold text-aura-text text-[15px]">{entry.command}</p>
+                    <StatusPill label={entry.status} tone={entry.status === "done" ? "success" : entry.status === "error" ? "error" : "default"} />
+                  </div>
+                  <p className="text-[13px] leading-relaxed text-aura-muted line-clamp-2 bg-black/20 rounded-[14px] p-3.5 border border-white/[0.02]">{entry.result}</p>
                 </div>
               ))
             )}
           </div>
-        </Card>
-        <Card className="px-5 py-5">
-          <SectionHeading title="Current Page" detail="The latest context available from the built-in browser." />
-          {pageContext ? (
-            <div className="mt-4 space-y-3">
-              <p className="text-sm font-semibold text-aura-text">{pageContext.title}</p>
-              <p className="text-xs text-aura-muted">{pageContext.url}</p>
-              <p className="rounded-[22px] border border-white/8 bg-white/5 p-4 text-xs leading-6 text-aura-muted">
-                {pageContext.visibleText.slice(0, 420) || "No page text captured yet."}
-              </p>
-            </div>
-          ) : (
-            <p className="mt-4 text-sm text-aura-muted">Open the Browser route to populate live page context.</p>
-          )}
-        </Card>
+        </div>
+
+        <div className="flex flex-col gap-6">
+          <Card className="flex flex-col gap-2">
+            <h3 className="mb-2 text-[16px] font-bold tracking-tight text-aura-text">Quick Actions</h3>
+            <button 
+              className="flex items-center justify-between rounded-[20px] bg-white/[0.02] px-5 py-4 text-[14px] font-medium text-aura-text transition-all hover:bg-white/[0.06] hover:-translate-y-0.5 border border-transparent hover:border-white/[0.05]"
+              onClick={() => void setRoute("settings")}
+            >
+              <span>Manage AI Models</span>
+              <span className="text-aura-muted">→</span>
+            </button>
+            <button 
+              className="flex items-center justify-between rounded-[20px] bg-white/[0.02] px-5 py-4 text-[14px] font-medium text-aura-text transition-all hover:bg-white/[0.06] hover:-translate-y-0.5 border border-transparent hover:border-white/[0.05]"
+              onClick={() => void setRoute("profile")}
+            >
+              <span>Update Profile</span>
+              <span className="text-aura-muted">→</span>
+            </button>
+            <button 
+              className="flex items-center justify-between rounded-[20px] bg-white/[0.02] px-5 py-4 text-[14px] font-medium text-aura-text transition-all hover:bg-white/[0.06] hover:-translate-y-0.5 border border-transparent hover:border-white/[0.05]"
+              onClick={() => void setRoute("skills")}
+            >
+              <span>Explore Skills</span>
+              <span className="text-aura-muted">→</span>
+            </button>
+          </Card>
+        </div>
       </div>
     </div>
   );

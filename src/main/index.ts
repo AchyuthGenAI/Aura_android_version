@@ -137,9 +137,9 @@ const getWidgetBounds = (store: AuraStore): WidgetBounds => {
   const position = hasSavedPosition
     ? state.widgetPosition
     : {
-        x: Math.max(0, workArea.x + workArea.width - width - 24),
-        y: Math.max(0, workArea.y + workArea.height - height - 24)
-      };
+      x: Math.max(0, workArea.x + workArea.width - width - 24),
+      y: Math.max(0, workArea.y + workArea.height - height - 24)
+    };
 
   if (!hasSavedPosition) {
     store.patch({ widgetPosition: position });
@@ -236,15 +236,15 @@ const createAppWindows = async (): Promise<void> => {
       height: widgetBounds.height,
       minWidth: COLLAPSED_WIDGET_SIZE,
       minHeight: COLLAPSED_WIDGET_SIZE,
-      maxWidth: 520,
-      maxHeight: 760,
+      maxWidth: 1200,
+      maxHeight: 1200,
       show: false,
       frame: false,
       transparent: true,
       hasShadow: false,
       alwaysOnTop: true,
       skipTaskbar: true,
-      resizable: false,
+      resizable: true,
       maximizable: false,
       minimizable: false,
       fullscreenable: false,

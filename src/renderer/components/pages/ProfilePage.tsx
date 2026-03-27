@@ -12,7 +12,7 @@ const ProfileForm = ({
   profile: UserProfile;
   onChange: (next: UserProfile) => void;
 }): JSX.Element => (
-  <div className="grid gap-3 md:grid-cols-2">
+  <div className="grid gap-5 md:grid-cols-2">
     <TextInput value={profile.fullName} onChange={(value) => onChange({ ...profile, fullName: value })} placeholder="Full name" />
     <TextInput value={profile.email} onChange={(value) => onChange({ ...profile, email: value })} placeholder="Email" />
     <TextInput value={profile.phone} onChange={(value) => onChange({ ...profile, phone: value })} placeholder="Phone" />

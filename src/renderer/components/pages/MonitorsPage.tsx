@@ -23,26 +23,7 @@ export const MonitorsPage = (): JSX.Element => {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-5 overflow-y-auto pr-1">
-      <Card className="px-6 py-6">
-        <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
-          <div className="max-w-[760px]">
-            <p className="text-xs uppercase tracking-[0.3em] text-aura-violet">Monitors</p>
-            <h1 className="mt-3 text-[34px] font-semibold tracking-tight text-aura-text">Track important pages without losing the rest of your workspace.</h1>
-            <p className="mt-3 text-sm leading-7 text-aura-muted">
-              Create recurring checks for prices, job postings, dashboards, or release notes. Aura keeps the list visible and readable instead of burying it under oversized cards.
-            </p>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <InfoTile label="Total" value={String(monitors.length)} detail="Saved monitor definitions in this desktop workspace." />
-            <InfoTile
-              label="Active"
-              value={String(monitors.filter((monitor) => monitor.status === "active").length)}
-              detail="Monitors currently marked active."
-            />
-            <InfoTile label="Checks" value="Desktop" detail="Monitor creation and review stay inside the main app." />
-          </div>
-        </div>
-      </Card>
+
       <div className="grid min-h-0 gap-5 xl:grid-cols-[380px_minmax(0,1fr)]">
         <Card className="flex min-h-0 flex-col px-5 py-5">
           <SectionHeading title="Create Monitor" detail="Keep recurring checks as first-class Aura tools." />
@@ -76,20 +57,21 @@ export const MonitorsPage = (): JSX.Element => {
           <SectionHeading title="Saved Monitors" detail="Desktop-managed monitor definitions and current status." />
           <div className="mt-4 grid min-h-0 flex-1 gap-3 overflow-y-auto pr-1 md:grid-cols-2 2xl:grid-cols-3">
             {monitors.length === 0 ? (
-              <div className="rounded-[24px] border border-dashed border-white/10 bg-white/4 px-4 py-6 text-sm text-aura-muted">
-                No monitors yet. Create one on the left and it will appear here with its current status.
+              <div className="flex flex-col items-center justify-center rounded-[28px] border border-dashed border-white/[0.08] bg-white/[0.02] px-6 py-12 text-center">
+                <p className="text-[15px] font-semibold text-aura-text">No Monitors Yet</p>
+                <p className="mt-2 text-[13px] text-aura-muted max-w-[280px] leading-relaxed">Create one on the left and it will appear here with its current status.</p>
               </div>
             ) : (
               monitors.map((monitor) => (
-                <div key={monitor.id} className="rounded-[24px] border border-white/8 bg-white/5 p-4">
+                <div key={monitor.id} className="group rounded-[28px] border border-white/[0.06] bg-white/[0.02] p-6 transition-all hover:bg-white/[0.04] hover:border-white/[0.1] hover:shadow-xl hover:shadow-aura-violet/5">
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold text-aura-text">{monitor.title}</p>
-                      <p className="mt-1 truncate text-xs text-aura-muted">{monitor.url}</p>
+                      <p className="truncate text-[16px] font-bold tracking-tight text-aura-text transition-colors group-hover:text-white">{monitor.title}</p>
+                      <p className="mt-1 truncate text-[12px] tracking-wide text-aura-violet">{monitor.url}</p>
                     </div>
                     <StatusPill label={monitor.status} tone={monitor.status === "active" ? "success" : "default"} />
                   </div>
-                  <p className="mt-3 line-clamp-4 text-sm leading-6 text-aura-muted">{monitor.condition}</p>
+                  <p className="mt-4 line-clamp-4 text-[14px] leading-relaxed text-aura-muted">{monitor.condition}</p>
                 </div>
               ))
             )}
