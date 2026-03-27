@@ -4,6 +4,7 @@ import { AuraLogoBlob, MessageBubble, StatusPill, ToastViewport } from "@rendere
 import { useAuraStore } from "@renderer/store/useAuraStore";
 import type { AuraStorageShape, WidgetBounds, WidgetVisibilityPayload, OverlayTab } from "@shared/types";
 import { VoicePanel } from "@renderer/components/VoicePanel";
+import { useWindowInteraction } from "@renderer/hooks/useWindowInteraction";
 
 const COLLAPSED_SIZE = 84;
 const DEFAULT_WIDGET_SIZE = { w: 460, h: 640 };
@@ -134,72 +135,48 @@ const WidgetApp = (): JSX.Element => {
 
   // Custom JS drag removed in favor of native OS drag via -webkit-app-region
 
-  const startResize = (event: ReactPointerEvent<HTMLElement>): void => {
-    event.stopPropagation();
-    const origin = { x: event.clientX, y: event.clientY, startW: sizeRef.current.w, startH: sizeRef.current.h };
-    let hasMoved = false;
-    let frameId: number | null = null;
-    let nextSize = { ...sizeRef.current };
+  const startResize = useWindowInteraction({
+    mode: "resize",
+    onMove: (x, y, w, h) => setSize({ w, h }),
+    onComplete: () => {
+      void syncWidgetBounds({ size: { w: window.innerWidth, h: window.innerHeight } });
+    }
+  });
 
-    const handleMove = (moveEvent: PointerEvent) => {
-      hasMoved = true;
-      nextSize = {
-        w: Math.max(340, Math.min(1000, origin.startW + (moveEvent.clientX - origin.x))),
-        h: Math.max(480, Math.min(1000, origin.startH + (moveEvent.clientY - origin.y)))
-      };
-
-      if (!frameId) {
-        frameId = requestAnimationFrame(() => {
-          void window.auraDesktop.widget.setBounds({
-            x: positionRef.current.x,
-            y: positionRef.current.y,
-            width: nextSize.w,
-            height: nextSize.h
-          });
-          frameId = null;
-        });
-      }
-    };
-
-    const handleUp = (upEvent: PointerEvent) => {
-      window.removeEventListener("pointermove", handleMove);
-      window.removeEventListener("pointerup", handleUp);
-      if (frameId) {
-        cancelAnimationFrame(frameId);
-      }
+  const startHeaderDrag = useWindowInteraction({
+    mode: "drag",
+    onMove: (x, y) => setPosition({ x, y }),
+    onComplete: (hasMoved) => {
       if (hasMoved) {
-        const finalSize = {
-          w: Math.max(340, Math.min(1000, origin.startW + (upEvent.clientX - origin.x))),
-          h: Math.max(480, Math.min(1000, origin.startH + (upEvent.clientY - origin.y)))
-        };
-        setSize(finalSize);
-        void syncWidgetBounds({ size: finalSize });
+        void syncWidgetBounds({ position: { x: window.screenX, y: window.screenY } });
       }
-    };
+    }
+  });
 
-    window.addEventListener("pointermove", handleMove);
-    window.addEventListener("pointerup", handleUp);
-  };
+  const startBubbleDrag = useWindowInteraction({
+    mode: "bubble-drag",
+    collapsedSize: COLLAPSED_SIZE,
+    onMove: (x, y) => setPosition({ x, y }),
+    onComplete: (hasMoved) => {
+      if (!hasMoved) {
+        void setExpandedState(true);
+      } else {
+        void syncWidgetBounds({ position: { x: window.screenX, y: window.screenY } });
+      }
+    }
+  });
 
   const onboardingNeeded = !authState.authenticated || !consentAccepted || !profileComplete;
   const isBootstrapping = !hydrated || isHydrating || (bootstrapState.stage !== "ready" && bootstrapState.stage !== "error");
 
   if (!expanded) {
     return (
-      <div className="flex h-full w-full items-center justify-center bg-transparent">
-        <div
-          className="group relative flex h-[80px] w-[80px] items-center justify-center rounded-full bg-[#0a0914]/40 shadow-[0_0_40px_rgba(124,58,237,0.25)] backdrop-blur-3xl transition-all duration-300 hover:scale-105 hover:bg-[#0a0914]/60 hover:shadow-[0_0_60px_rgba(124,58,237,0.4)]"
-          style={{ WebkitAppRegion: "drag", WebkitUserSelect: "none" } as React.CSSProperties}
-        >
-          <div className="pointer-events-none scale-110">
-            <AuraLogoBlob size="md" isTaskRunning={runtimeStatus.phase === "running"} />
-          </div>
-          <button
-            onClick={() => void setExpandedState(true)}
-            className="absolute inset-0 m-auto h-[56px] w-[56px] rounded-full cursor-pointer"
-            style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-            title="Click to open Aura, drag to move"
-          />
+      <div 
+        className="group flex h-full w-full items-center justify-center bg-transparent cursor-pointer transition-transform duration-300 hover:scale-110"
+        onPointerDown={startBubbleDrag}
+      >
+        <div className="pointer-events-none scale-[1.25]">
+          <AuraLogoBlob size="md" isTaskRunning={runtimeStatus.phase === "running"} />
         </div>
       </div>
     );
@@ -208,14 +185,14 @@ const WidgetApp = (): JSX.Element => {
   return (
     <div className="h-full w-full bg-transparent p-2">
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
-      <div className="relative flex h-full w-full flex-col overflow-hidden rounded-[32px] border border-white/10 bg-[#12111d]/98 backdrop-blur-[60px] shadow-[0_8px_16px_rgba(0,0,0,0.6)]">
+      <div className="relative flex h-full w-full flex-col overflow-hidden rounded-[32px] border border-white/10 bg-[#12111d] backdrop-blur-[60px]">
         {/* Soft radial background glow inside the container */}
         <div className="absolute inset-x-0 -top-[10%] h-[60%] bg-[#7c3aed]/15 blur-[100px] pointer-events-none" />
         
         {/* Header (Drag area) */}
         <div
-          className="flex items-center justify-between border-b border-white/5 bg-transparent px-6 py-4"
-          style={{ WebkitAppRegion: "drag", WebkitUserSelect: "none" } as React.CSSProperties}
+          className="flex items-center justify-between border-b border-white/5 bg-transparent px-6 py-4 cursor-move"
+          onPointerDown={startHeaderDrag}
         >
           <div className="flex items-center gap-3">
             <div className="pointer-events-none">
@@ -232,7 +209,7 @@ const WidgetApp = (): JSX.Element => {
               <p className="text-[11px] text-aura-muted leading-tight mt-0.5">{profile?.email || "No Account"}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2" style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}>
+          <div className="flex items-center gap-2">
             {activeTab === "chat" && (
               <button
                 className="flex items-center gap-1.5 rounded-full bg-white/5 px-3 py-1.5 text-xs font-semibold text-aura-text transition hover:bg-white/10 mr-1"
@@ -242,9 +219,8 @@ const WidgetApp = (): JSX.Element => {
               </button>
             )}
             <button
-              className="flex h-7 w-7 items-center justify-center rounded-full text-aura-muted transition hover:bg-white/10 hover:text-aura-text"
               onClick={() => void window.auraDesktop.app.showMainWindow()}
-              title="Settings"
+              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-full bg-white/5 text-aura-muted transition-colors hover:bg-white/10 hover:text-white"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="3" />
@@ -252,9 +228,8 @@ const WidgetApp = (): JSX.Element => {
               </svg>
             </button>
             <button
-              className="flex h-7 w-7 items-center justify-center rounded-full text-aura-muted transition hover:bg-white/10 hover:text-aura-text"
               onClick={() => void setExpandedState(false)}
-              title="Close"
+              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-full bg-white/5 text-aura-muted transition-colors hover:bg-white/10 hover:text-white"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="18" y1="6" x2="6" y2="18" />
@@ -403,12 +378,12 @@ const WidgetApp = (): JSX.Element => {
         {/* Custom Resize Handle (bottom-right) */}
         {!isBootstrapping && !onboardingNeeded && (
           <div
-            className="absolute bottom-1 right-1 z-[100] flex h-8 w-8 cursor-nwse-resize items-end justify-end p-2 opacity-40 transition-opacity hover:opacity-100 mix-blend-screen"
+            className="absolute bottom-1 right-1 z-[100] flex h-10 w-10 cursor-nwse-resize items-end justify-end p-1.5 opacity-50 transition-opacity hover:opacity-100"
             onPointerDown={startResize}
           >
-            <div className="h-[3px] w-[3px] rounded-full bg-white/70" />
-            <div className="absolute bottom-2 right-4 h-[3px] w-[3px] rounded-full bg-white/70" />
-            <div className="absolute bottom-4 right-2 h-[3px] w-[3px] rounded-full bg-white/70" />
+            <div className="h-1 w-1 rounded-full bg-white/50" />
+            <div className="absolute bottom-1.5 right-5 h-1 w-1 rounded-full bg-white/50" />
+            <div className="absolute bottom-5 right-1.5 h-1 w-1 rounded-full bg-white/50" />
           </div>
         )}
       </div>

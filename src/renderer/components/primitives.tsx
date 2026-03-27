@@ -89,7 +89,6 @@ export const AuraLogoBlob = ({
       className="relative flex items-center justify-center"
       style={{ width: px, height: px }}
     >
-      <div className="absolute inset-0 rounded-full bg-aura-violet/25 blur-xl" />
       <canvas
         ref={canvasRef}
         className="absolute inset-0 h-[140%] w-[140%] -translate-x-[14%] -translate-y-[14%]"

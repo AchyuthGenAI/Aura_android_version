@@ -72,6 +72,13 @@ body {
     linear-gradient(180deg, rgb(var(--aura-bg)) 0%, rgb(241 245 249) 100%);
 }
 
+/* Widget surface: fully transparent so the floating bubble has no square backdrop */
+html[data-surface="widget"],
+html[data-surface="widget"] body {
+  background: transparent !important;
+  background-color: transparent !important;
+}
+
 #root {
   isolation: isolate;
 }
