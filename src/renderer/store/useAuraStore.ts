@@ -14,6 +14,7 @@ import type {
   BrowserTabsUpdatedPayload,
   ChatSendRequest,
   ChatThreadMessage,
+  ConfirmActionPayload,
   ContextMenuActionPayload,
   ExtensionMessage,
   HistoryEntry,
@@ -124,6 +125,7 @@ type AuraState = {
   messages: ChatThreadMessage[];
   history: HistoryEntry[];
   activeTask: AuraTask | null;
+  pendingConfirmation: ConfirmActionPayload | null;
   lastError: TaskErrorPayload | null;
   inputValue: string;
   isLoading: boolean;
@@ -149,6 +151,8 @@ type AuraState = {
   saveMacros: (value: AuraMacro[]) => Promise<void>;
   sendMessage: (source: ChatSendRequest["source"], override?: string) => Promise<void>;
   stopMessage: () => Promise<void>;
+  taskConfirmResponse: (requestId: string, confirmed: boolean) => Promise<void>;
+  cancelTask: (taskId: string) => Promise<void>;
   startNewSession: () => Promise<void>;
   loadSession: (sessionId: string) => Promise<void>;
   browserNewTab: (url?: string) => Promise<void>;
@@ -239,6 +243,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   messages: [],
   history: [],
   activeTask: null,
+  pendingConfirmation: null,
   lastError: null,
   inputValue: "",
   isLoading: false,
@@ -335,9 +340,23 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       return;
     }
 
+    if (message.type === "CONFIRM_ACTION") {
+      const payload = message.payload as ConfirmActionPayload;
+      set({ pendingConfirmation: payload });
+      return;
+    }
+
     if (message.type === "TASK_PROGRESS") {
       const payload = message.payload as TaskProgressPayload;
-      set({ activeTask: payload.task });
+      const updates: Partial<AuraState> = { activeTask: payload.task };
+
+      // Clear pending confirmation when task completes/errors/cancels
+      const status = payload.task.status;
+      if (status === "done" || status === "error" || status === "cancelled") {
+        updates.pendingConfirmation = null;
+      }
+
+      set(updates);
       return;
     }
 
@@ -558,6 +577,16 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   stopMessage: async () => {
     await window.auraDesktop.chat.stop();
     set({ isLoading: false });
+  },
+
+  taskConfirmResponse: async (requestId, confirmed) => {
+    set({ pendingConfirmation: null });
+    await window.auraDesktop.task.confirmResponse({ requestId, confirmed });
+  },
+
+  cancelTask: async (taskId) => {
+    set({ pendingConfirmation: null });
+    await window.auraDesktop.task.cancel({ taskId });
   },
 
   startNewSession: async () => {

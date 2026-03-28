@@ -318,6 +318,15 @@ const createAppWindows = async (): Promise<void> => {
     });
     ipcMain.handle(IPC_CHANNELS.chatSend, async (_event, payload) => activeGatewayManager!.sendChat(payload));
     ipcMain.handle(IPC_CHANNELS.chatStop, async () => activeGatewayManager!.stopResponse());
+    ipcMain.handle(IPC_CHANNELS.taskConfirmResponse, async (_event, payload: { requestId: string; confirmed: boolean }) => {
+      activeGatewayManager!.resolveConfirmation(payload.requestId, payload.confirmed);
+    });
+    ipcMain.handle(IPC_CHANNELS.taskCancel, async (_event, payload: { taskId: string }) => {
+      activeGatewayManager!.cancelTask(payload.taskId);
+    });
+    ipcMain.handle(IPC_CHANNELS.monitorStart, async () => { /* Phase 4 — MonitorManager */ });
+    ipcMain.handle(IPC_CHANNELS.monitorStop, async () => { /* Phase 4 — MonitorManager */ });
+    ipcMain.handle(IPC_CHANNELS.monitorList, async () => store.getState().monitors);
     ipcMain.handle(IPC_CHANNELS.configGet, async () => configManager.readConfig());
     ipcMain.handle(IPC_CHANNELS.configSetApiKey, async (_event, payload: { provider: string; apiKey: string }) => {
       configManager.setApiKey(payload.provider, payload.apiKey);

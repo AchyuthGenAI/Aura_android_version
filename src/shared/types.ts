@@ -1,5 +1,5 @@
 export type ThemeMode = "dark" | "light";
-export type AppRoute = "home" | "browser" | "monitors" | "skills" | "profile" | "settings";
+export type AppRoute = "home" | "browser" | "monitors" | "skills" | "profile" | "settings" | "history";
 export type OverlayTab = "voice" | "chat" | "history" | "tools" | "settings";
 export type ToolsSubTab = "monitors" | "macros" | "quick";
 
@@ -368,6 +368,7 @@ export interface TaskErrorPayload {
 }
 
 export interface ConfirmActionPayload {
+  requestId: string;
   taskId: string;
   message: string;
   step: TaskStep;

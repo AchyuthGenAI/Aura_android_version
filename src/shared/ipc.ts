@@ -35,6 +35,12 @@ export const IPC_CHANNELS = {
   configGetProviders: "aura:config:get-providers",
   gatewayGetStatus: "aura:gateway:get-status",
   gatewayRestart: "aura:gateway:restart",
+  taskConfirmResponse: "aura:task:confirm-response",
+  taskCancel: "aura:task:cancel",
+  monitorStart: "aura:monitor:start",
+  monitorStop: "aura:monitor:stop",
+  monitorList: "aura:monitor:list",
+  skillRun: "aura:skill:run",
   internalBrowserSelection: "aura:internal:browser-selection",
   appEvent: "aura:event"
 } as const;

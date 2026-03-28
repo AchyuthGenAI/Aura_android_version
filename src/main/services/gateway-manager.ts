@@ -9,19 +9,24 @@ import type {
   AuraTask,
   BootstrapState,
   ChatSendRequest,
+  ConfirmActionPayload,
   ExtensionMessage,
   GatewayStatus,
   PageContext,
   RuntimeStatus,
   TaskProgressPayload,
+  TaskStep,
+  ToolName,
 } from "@shared/types";
 
 import { BrowserController } from "./browser-controller";
 import { ConfigManager } from "./config-manager";
 import { AuraStore } from "./store";
+import { classify, type Classification } from "./intent-classifier";
+import { TaskExecutor } from "./task-executor";
 
 import WebSocket from "ws";
-import { resolveGroqApiKey, streamChat } from "./llm-client";
+import { completeChat, resolveGroqApiKey, streamChat } from "./llm-client";
 
 const now = (): number => Date.now();
 
@@ -64,6 +69,8 @@ export class GatewayManager {
   private streamedText = "";
   private chatDoneResolve: ((text: string) => void) | null = null;
   private chatDoneReject: ((err: Error) => void) | null = null;
+  private readonly taskExecutor = new TaskExecutor();
+  private readonly pendingConfirmations = new Map<string, { resolve: (v: boolean) => void; timeout: NodeJS.Timeout }>();
 
   constructor(
     private readonly openClawRootCandidates: string[],
@@ -100,6 +107,23 @@ export class GatewayManager {
       processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
       error: this.runtimeStatus.error,
     };
+  }
+
+  getTaskExecutor(): TaskExecutor {
+    return this.taskExecutor;
+  }
+
+  resolveConfirmation(requestId: string, confirmed: boolean): void {
+    const pending = this.pendingConfirmations.get(requestId);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      pending.resolve(confirmed);
+      this.pendingConfirmations.delete(requestId);
+    }
+  }
+
+  cancelTask(taskId: string): void {
+    this.taskExecutor.cancel(taskId);
   }
 
   async bootstrap(): Promise<BootstrapState> {
@@ -197,7 +221,6 @@ export class GatewayManager {
   }
 
   async sendChat(request: ChatSendRequest): Promise<{ messageId: string; taskId: string }> {
-
     const messageId = crypto.randomUUID();
     const taskId = crypto.randomUUID();
     this.activeMessageId = messageId;
@@ -205,9 +228,7 @@ export class GatewayManager {
     this.activeRunId = null;
     this.streamedText = "";
 
-    const task = this.createTask(taskId, request.message);
     const session = this.ensureSession(request.message);
-
     const userMessage: AuraSessionMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -218,26 +239,59 @@ export class GatewayManager {
     session.messages.push(userMessage);
     this.persistCurrentSession(session);
 
-    this.emitProgress(task, { type: "status", statusText: "Collecting page context and dispatching to OpenClaw." });
-
     const pageContext = await this.browserController.getPageContext();
-    const prompt = this.composePrompt(request, pageContext);
+    const groqConfig = this.configManager.readConfig();
+    const configKey = groqConfig.providers?.groq?.apiKey;
+    const apiKey = resolveGroqApiKey(configKey);
+
+    // ── Classify intent ──
+    let classification: Classification;
+    try {
+      classification = await classify(request.message, pageContext, apiKey);
+    } catch {
+      classification = { intent: "query", confidence: 0.5 };
+    }
 
     this.setStatus({
       ...this.runtimeStatus,
       phase: "running",
-      message: "OpenClaw is handling the current request.",
+      message: "Processing your request.",
     });
 
+    // ── Route by intent ──
+    if (classification.intent === "query") {
+      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
+    }
+
+    if (classification.intent === "navigate" && classification.directAction) {
+      return this.handleDirectAction(messageId, taskId, session, request, classification);
+    }
+
+    // task, autofill, monitor, or navigate-without-directAction → plan and execute
+    return this.handleTaskIntent(messageId, taskId, session, request, pageContext, classification);
+  }
+
+  // ── Query intent: stream LLM response ──────────────────────────────────────
+
+  private async handleQueryIntent(
+    messageId: string,
+    taskId: string,
+    session: AuraSession,
+    request: ChatSendRequest,
+    pageContext: PageContext | null,
+  ): Promise<{ messageId: string; taskId: string }> {
+    const task = this.createLegacyTask(taskId, request.message);
+    this.emitProgress(task, { type: "status", statusText: "Thinking..." });
+
+    const prompt = this.composePrompt(request, pageContext);
     task.status = "running";
     task.updatedAt = now();
     task.steps[0]!.status = "done";
     task.steps[0]!.completedAt = now();
     task.steps[1]!.status = "running";
     task.steps[1]!.startedAt = now();
-    this.emitProgress(task, { type: "step_start", statusText: "Running OpenClaw." });
+    this.emitProgress(task, { type: "step_start", statusText: "Generating response." });
 
-    // Use direct Groq LLM for chat — fast, reliable, no Gateway dependency
     try {
       const responseText = await this.streamViaGroq(messageId, prompt, request.history);
       this.handleChatSuccess(messageId, taskId, task, session, request, responseText);
@@ -250,6 +304,240 @@ export class GatewayManager {
     this.activeTaskId = null;
     this.activeRunId = null;
     return { messageId, taskId };
+  }
+
+  // ── Direct action: execute immediately, skip planning ─────────────────────
+
+  private async handleDirectAction(
+    messageId: string,
+    taskId: string,
+    session: AuraSession,
+    request: ChatSendRequest,
+    classification: Classification,
+  ): Promise<{ messageId: string; taskId: string }> {
+    const action = classification.directAction!;
+    const step: TaskStep = {
+      index: 0,
+      tool: action.tool as ToolName,
+      description: `${action.tool}: ${JSON.stringify(action.params)}`,
+      status: "pending",
+      params: action.params,
+    };
+
+    const task: AuraTask = {
+      id: taskId,
+      command: request.message,
+      status: "running",
+      createdAt: now(),
+      updatedAt: now(),
+      retries: 0,
+      steps: [step],
+    };
+
+    this.emitProgress(task, { type: "status", statusText: "Executing..." });
+
+    try {
+      const profile = this.store.getState().profile;
+      const result = await this.taskExecutor.execute({
+        task,
+        browserController: this.browserController,
+        emit: this.emit,
+        confirmStep: (payload) => this.confirmStep(payload),
+        profile,
+      });
+
+      this.handleChatSuccess(messageId, taskId, task, session, request, result || "Done!");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.handleChatError(messageId, taskId, task, session, message);
+    }
+
+    this.activeMessageId = null;
+    this.activeTaskId = null;
+    return { messageId, taskId };
+  }
+
+  // ── Task intent: plan steps → execute ─────────────────────────────────────
+
+  private async handleTaskIntent(
+    messageId: string,
+    taskId: string,
+    session: AuraSession,
+    request: ChatSendRequest,
+    pageContext: PageContext | null,
+    classification: Classification,
+  ): Promise<{ messageId: string; taskId: string }> {
+    // Emit planning status
+    const planningTask: AuraTask = {
+      id: taskId,
+      command: request.message,
+      status: "planning",
+      createdAt: now(),
+      updatedAt: now(),
+      retries: 0,
+      steps: [],
+    };
+    this.emitProgress(planningTask, { type: "status", statusText: "Planning your task..." });
+
+    // Plan the task
+    let steps: TaskStep[];
+    try {
+      steps = await this.planTask(request.message, pageContext, classification);
+    } catch {
+      // Planning failed → fall back to query mode
+      console.warn("[GatewayManager] Task planning failed, falling back to chat.");
+      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
+    }
+
+    if (steps.length === 0) {
+      // No steps planned → fall back to query
+      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
+    }
+
+    const task: AuraTask = {
+      id: taskId,
+      command: request.message,
+      status: "running",
+      createdAt: now(),
+      updatedAt: now(),
+      retries: 0,
+      steps,
+    };
+
+    this.emitProgress(task, { type: "status", statusText: "Running task..." });
+
+    try {
+      const profile = this.store.getState().profile;
+      const result = await this.taskExecutor.execute({
+        task,
+        browserController: this.browserController,
+        emit: this.emit,
+        confirmStep: (payload) => this.confirmStep(payload),
+        profile,
+      });
+
+      this.handleChatSuccess(messageId, taskId, task, session, request, result || "Task completed.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.handleChatError(messageId, taskId, task, session, message);
+    }
+
+    this.activeMessageId = null;
+    this.activeTaskId = null;
+    return { messageId, taskId };
+  }
+
+  // ── Task planner: Groq LLM generates step array ──────────────────────────
+
+  private async planTask(
+    userMessage: string,
+    pageContext: PageContext | null,
+    classification: Classification,
+  ): Promise<TaskStep[]> {
+    const groqConfig = this.configManager.readConfig();
+    const configKey = groqConfig.providers?.groq?.apiKey;
+    const apiKey = resolveGroqApiKey(configKey);
+
+    const profile = this.store.getState().profile;
+    const systemPrompt = this.buildPlannerPrompt(pageContext, profile, classification);
+
+    const result = await completeChat(apiKey, [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ], { model: "llama-3.1-8b-instant", maxTokens: 800, temperature: 0.1 });
+
+    // Extract JSON array from response (handle markdown fences)
+    const jsonMatch = result.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error("Planner did not return a valid JSON array.");
+
+    const raw = JSON.parse(jsonMatch[0]) as Array<{
+      tool: string;
+      params: Record<string, unknown>;
+      description: string;
+      requiresConfirmation?: boolean;
+    }>;
+
+    return raw.map((s, i) => ({
+      index: i,
+      tool: s.tool as ToolName,
+      description: s.description,
+      status: "pending" as const,
+      params: s.params,
+      requiresConfirmation: s.requiresConfirmation ?? false,
+    }));
+  }
+
+  private buildPlannerPrompt(
+    pageContext: PageContext | null,
+    profile: { fullName: string; email: string; phone: string },
+    classification: Classification,
+  ): string {
+    const lines = [
+      "You are a task planner for Aura Desktop, an AI assistant that automates browser actions.",
+      "Given the user's request and the current page context, output a JSON array of steps.",
+      "",
+      "Each step object must have:",
+      '  "tool": one of "navigate", "click", "type", "scroll", "submit", "select", "open_tab", "screenshot", "read", "wait", "execute_js", "hover"',
+      '  "params": object with tool-specific parameters',
+      '  "description": human-readable description of what this step does',
+      '  "requiresConfirmation": true if the action is destructive (submit, payment, delete, execute_js)',
+      "",
+      "Tool parameter details:",
+      '  navigate: { "url": "..." }',
+      '  click: { "selector": "CSS selector or text description" }',
+      '  type: { "selector": "CSS selector", "value": "text to type", "useProfile": true/false }',
+      '  scroll: { "direction": "up|down|top|bottom" }',
+      '  submit: { "selector": "form selector" } — ALWAYS requiresConfirmation: true',
+      '  select: { "selector": "CSS selector", "value": "option value" }',
+      '  wait: { "ms": 1000 }',
+      '  read: {} — reads current page content',
+      "",
+      "Rules:",
+      "- Max 10 steps",
+      "- requiresConfirmation MUST be true for: submit, execute_js, payment actions, delete actions",
+      "- Use useProfile: true when filling profile data (name, email, phone, address)",
+      "- Output ONLY the JSON array — no prose, no markdown fences, no explanation",
+    ];
+
+    if (classification.intent === "autofill" && profile.fullName) {
+      lines.push("");
+      lines.push(`User profile: name="${profile.fullName}", email="${profile.email}", phone="${profile.phone}"`);
+    }
+
+    if (pageContext) {
+      lines.push("");
+      lines.push(`Current page: ${pageContext.title} — ${pageContext.url}`);
+      if (pageContext.interactiveElements.length > 0) {
+        const elements = pageContext.interactiveElements.slice(0, 30).map(
+          (el) => `  ${el.tagName}${el.selector ? ` (${el.selector})` : ""}: ${el.name || el.text || ""}`,
+        );
+        lines.push("Interactive elements:");
+        lines.push(...elements);
+      }
+      if (pageContext.visibleText) {
+        lines.push(`Page text (first 2000 chars): ${pageContext.visibleText.slice(0, 2000)}`);
+      }
+    }
+
+    return lines.join("\n");
+  }
+
+  // ── Step confirmation ─────────────────────────────────────────────────────
+
+  private confirmStep(payload: Omit<ConfirmActionPayload, "requestId">): Promise<boolean> {
+    const requestId = crypto.randomUUID();
+    return new Promise<boolean>((resolve) => {
+      const timeout = setTimeout(() => {
+        this.pendingConfirmations.delete(requestId);
+        resolve(false); // Auto-deny after 30s
+      }, 30_000);
+
+      this.pendingConfirmations.set(requestId, { resolve, timeout });
+      this.emit({
+        type: "CONFIRM_ACTION",
+        payload: { ...payload, requestId },
+      });
+    });
   }
 
   /**
@@ -738,7 +1026,7 @@ export class GatewayManager {
     return sections.join("");
   }
 
-  private createTask(taskId: string, command: string): AuraTask {
+  private createLegacyTask(taskId: string, command: string): AuraTask {
     return {
       id: taskId,
       command,

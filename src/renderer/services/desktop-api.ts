@@ -9,6 +9,7 @@ import type {
   GatewayStatus,
   OpenClawConfig,
   PageContext,
+  PageMonitor,
   ProviderInfo,
   RuntimeStatus,
   SkillSummary,
@@ -43,6 +44,15 @@ export interface AuraDesktopApi {
   chat: {
     send(payload: ChatSendRequest): Promise<{ messageId: string; taskId: string }>;
     stop(): Promise<void>;
+  };
+  task: {
+    confirmResponse(payload: { requestId: string; confirmed: boolean }): Promise<void>;
+    cancel(payload: { taskId: string }): Promise<void>;
+  };
+  monitor: {
+    start(monitor: PageMonitor): Promise<void>;
+    stop(payload: { id: string }): Promise<void>;
+    list(): Promise<PageMonitor[]>;
   };
   browser: {
     getTabs(): Promise<BrowserTabsUpdatedPayload>;

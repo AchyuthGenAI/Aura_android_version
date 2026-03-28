@@ -32,6 +32,15 @@ const api: AuraDesktopApi = {
     send: (payload) => ipcRenderer.invoke(IPC_CHANNELS.chatSend, payload),
     stop: () => ipcRenderer.invoke(IPC_CHANNELS.chatStop)
   },
+  task: {
+    confirmResponse: (payload) => ipcRenderer.invoke(IPC_CHANNELS.taskConfirmResponse, payload),
+    cancel: (payload) => ipcRenderer.invoke(IPC_CHANNELS.taskCancel, payload)
+  },
+  monitor: {
+    start: (monitor) => ipcRenderer.invoke(IPC_CHANNELS.monitorStart, monitor),
+    stop: (payload) => ipcRenderer.invoke(IPC_CHANNELS.monitorStop, payload),
+    list: () => ipcRenderer.invoke(IPC_CHANNELS.monitorList)
+  },
   browser: {
     getTabs: () => ipcRenderer.invoke(IPC_CHANNELS.browserGetTabs),
     newTab: (payload) => ipcRenderer.invoke(IPC_CHANNELS.browserNewTab, payload),
