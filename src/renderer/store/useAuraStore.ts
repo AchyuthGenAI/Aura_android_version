@@ -262,8 +262,18 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       authState
     });
 
+    // Derive bootstrapState from runtimeStatus so SplashScreen resolves even if
+    // BOOTSTRAP_STATUS events were emitted before the event listener was registered.
+    const derivedBootstrap: BootstrapState =
+      runtimeStatus.phase === "ready"
+        ? { stage: "ready", progress: 100, message: "OpenClaw Gateway is running." }
+        : runtimeStatus.phase === "error"
+          ? { stage: "error", progress: 100, message: runtimeStatus.error ?? "Gateway error." }
+          : get().bootstrapState;
+
     set({
       runtimeStatus,
+      bootstrapState: derivedBootstrap,
       browserTabs: browserTabs.tabs,
       activeBrowserTabId: browserTabs.activeTabId,
       omniboxValue: browserTabs.tabs.find((tab) => tab.id === browserTabs.activeTabId)?.url ?? "",

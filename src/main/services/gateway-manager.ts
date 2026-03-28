@@ -21,6 +21,7 @@ import { ConfigManager } from "./config-manager";
 import { AuraStore } from "./store";
 
 import WebSocket from "ws";
+import { resolveGroqApiKey, streamChat } from "./llm-client";
 
 const now = (): number => Date.now();
 
@@ -37,18 +38,32 @@ const readOpenClawVersion = (rootPath: string | null): string | undefined => {
 type EventFrame = { type: "event"; event: string; payload: unknown; seq?: number };
 type ResponseFrame = { type: "res"; id: string; ok: boolean; payload?: unknown; error?: { code?: string; message?: string } };
 
+// chat event payload shape from the gateway protocol
+interface ChatEventPayload {
+  runId?: string;
+  sessionKey?: string;
+  seq?: number;
+  state: "delta" | "final" | "aborted" | "error";
+  message?: { text?: string; content?: string };
+  errorMessage?: string;
+}
+
 export class GatewayManager {
   private gatewayProcess: ChildProcess | null = null;
   private ws: WebSocket | null = null;
   private connected = false;
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timeout: NodeJS.Timeout }>();
-  private connectNonce: string | null = null;
+  private onConnected: (() => void) | null = null;
   private runtimeStatus: RuntimeStatus;
   private bootstrapState: BootstrapState;
   private openClawEntryPath: string | null = null;
   private openClawRootPath: string | null = null;
   private activeMessageId: string | null = null;
   private activeTaskId: string | null = null;
+  private activeRunId: string | null = null;
+  private streamedText = "";
+  private chatDoneResolve: ((text: string) => void) | null = null;
+  private chatDoneReject: ((err: Error) => void) | null = null;
 
   constructor(
     private readonly openClawRootCandidates: string[],
@@ -126,32 +141,26 @@ export class GatewayManager {
       message: "Starting OpenClaw Gateway process.",
     });
 
+    // Try starting the Gateway — if it fails, Aura still works via direct Groq LLM
     try {
       await this.startGatewayProcess();
       await this.connectWebSocket();
-
-      this.setBootstrap({ stage: "ready", progress: 100, message: "Aura is ready." });
-      this.setStatus({
-        phase: "ready",
-        running: true,
-        openClawDetected: true,
-        version,
-        port,
-        workspacePath: path.join(this.configManager.getOpenClawHomePath(), ".openclaw", "workspace"),
-        message: "OpenClaw Gateway is running.",
-      });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.setBootstrap({ stage: "error", progress: 100, message: "Failed to start Gateway.", detail: message });
-      this.setStatus({
-        phase: "error",
-        running: false,
-        openClawDetected: true,
-        version,
-        message: "Gateway failed to start.",
-        error: message,
-      });
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn("[GatewayManager] Gateway failed to start (chat will use direct Groq):", detail);
+      // Don't block — mark as ready anyway since direct LLM works
     }
+
+    this.setBootstrap({ stage: "ready", progress: 100, message: "Aura is ready." });
+    this.setStatus({
+      phase: "ready",
+      running: true,
+      openClawDetected: true,
+      version,
+      port,
+      workspacePath: path.join(this.configManager.getOpenClawHomePath(), ".openclaw", "workspace"),
+      message: this.connected ? "OpenClaw Gateway is running." : "Aura is ready (direct LLM mode).",
+    });
 
     return this.getBootstrap();
   }
@@ -171,14 +180,15 @@ export class GatewayManager {
   }
 
   async stopResponse(): Promise<void> {
-    if (!this.connected || !this.activeTaskId) return;
+    if (!this.connected || !this.activeRunId) return;
     try {
-      await this.request("sessions.abort", {});
+      await this.request("chat.abort", { runId: this.activeRunId });
     } catch {
       // best effort
     }
     this.activeMessageId = null;
     this.activeTaskId = null;
+    this.activeRunId = null;
     this.setStatus({
       ...this.runtimeStatus,
       phase: "ready",
@@ -187,17 +197,13 @@ export class GatewayManager {
   }
 
   async sendChat(request: ChatSendRequest): Promise<{ messageId: string; taskId: string }> {
-    if (!this.connected) {
-      await this.bootstrap();
-    }
-    if (!this.connected) {
-      throw new Error("OpenClaw Gateway is not connected.");
-    }
 
     const messageId = crypto.randomUUID();
     const taskId = crypto.randomUUID();
     this.activeMessageId = messageId;
     this.activeTaskId = taskId;
+    this.activeRunId = null;
+    this.streamedText = "";
 
     const task = this.createTask(taskId, request.message);
     const session = this.ensureSession(request.message);
@@ -231,14 +237,9 @@ export class GatewayManager {
     task.steps[1]!.startedAt = now();
     this.emitProgress(task, { type: "step_start", statusText: "Running OpenClaw." });
 
-    // Send via Gateway WebSocket
+    // Use direct Groq LLM for chat — fast, reliable, no Gateway dependency
     try {
-      const result = await this.request<{ text?: string }>("sessions.send", {
-        message: prompt,
-        source: request.source,
-      }, { timeoutMs: 120_000 });
-
-      const responseText = typeof result?.text === "string" ? result.text : "";
+      const responseText = await this.streamViaGroq(messageId, prompt, request.history);
       this.handleChatSuccess(messageId, taskId, task, session, request, responseText);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -247,7 +248,69 @@ export class GatewayManager {
 
     this.activeMessageId = null;
     this.activeTaskId = null;
+    this.activeRunId = null;
     return { messageId, taskId };
+  }
+
+  /**
+   * Stream chat via direct Groq API call.
+   * Emits LLM_TOKEN events in real-time as tokens arrive.
+   */
+  private streamViaGroq(
+    messageId: string,
+    prompt: string,
+    history?: Array<{ role: string; content: string }>,
+  ): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const groqConfig = this.configManager.readConfig();
+      const configKey = groqConfig.providers?.groq?.apiKey;
+      const apiKey = resolveGroqApiKey(configKey);
+
+      if (!apiKey) {
+        reject(new Error("No Groq API key configured. Add one in Settings or set GROQ_API_KEY env var."));
+        return;
+      }
+
+      const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+        { role: "system", content: "You are Aura, a helpful AI assistant running inside Aura Desktop. Be concise, friendly, and helpful. Use markdown for formatting when appropriate." },
+      ];
+
+      // Add conversation history for context
+      if (history && history.length > 0) {
+        for (const msg of history.slice(-10)) {
+          messages.push({
+            role: msg.role as "user" | "assistant",
+            content: msg.content,
+          });
+        }
+      }
+
+      messages.push({ role: "user", content: prompt });
+
+      const model = groqConfig.agents?.main?.model ?? "llama-3.3-70b-versatile";
+      let resolved = false;
+
+      streamChat(apiKey, messages, {
+        onToken: (token) => {
+          this.emit({
+            type: "LLM_TOKEN",
+            payload: { messageId, token },
+          });
+        },
+        onDone: (fullText) => {
+          if (!resolved) {
+            resolved = true;
+            resolve(fullText);
+          }
+        },
+        onError: (err) => {
+          if (!resolved) {
+            resolved = true;
+            reject(err);
+          }
+        },
+      }, { model });
+    });
   }
 
   // --- Private: Gateway Process ---
@@ -343,6 +406,15 @@ export class GatewayManager {
       const token = this.configManager.getGatewayToken();
 
       let resolved = false;
+
+      this.onConnected = () => {
+        if (!resolved) {
+          resolved = true;
+          this.connected = true;
+          resolve();
+        }
+      };
+
       const ws = new WebSocket(url, { maxPayload: 25 * 1024 * 1024 });
       this.ws = ws;
 
@@ -354,13 +426,7 @@ export class GatewayManager {
         const raw = typeof data === "string" ? data : data.toString("utf8");
         try {
           const parsed = JSON.parse(raw);
-          this.handleWsMessage(parsed, token, () => {
-            if (!resolved) {
-              resolved = true;
-              this.connected = true;
-              resolve();
-            }
-          });
+          this.handleWsMessage(parsed, token);
         } catch {
           // ignore parse errors
         }
@@ -396,6 +462,7 @@ export class GatewayManager {
 
   private disconnectWebSocket(): void {
     this.connected = false;
+    this.onConnected = null;
     this.pending.forEach(({ reject, timeout }) => {
       clearTimeout(timeout);
       reject(new Error("Gateway disconnected."));
@@ -408,11 +475,7 @@ export class GatewayManager {
     }
   }
 
-  private handleWsMessage(
-    parsed: unknown,
-    token: string,
-    onConnected: () => void,
-  ): void {
+  private handleWsMessage(parsed: unknown, token: string): void {
     if (!parsed || typeof parsed !== "object") return;
     const msg = parsed as Record<string, unknown>;
 
@@ -421,15 +484,14 @@ export class GatewayManager {
       const evt = msg as unknown as EventFrame;
 
       if (evt.event === "connect.challenge") {
-        const payload = evt.payload as { nonce?: string } | undefined;
-        this.connectNonce = payload?.nonce ?? null;
         this.sendConnectFrame(token);
         return;
       }
 
-      // Chat streaming events
-      if (evt.event === "session.message" || evt.event === "chat") {
-        this.handleStreamingEvent(evt);
+      // Chat streaming events from OpenClaw
+      if (evt.event === "chat") {
+        this.handleChatStreamEvent(evt);
+        return;
       }
 
       return;
@@ -450,11 +512,6 @@ export class GatewayManager {
         pending.reject(new Error(res.error?.message ?? "Gateway request failed"));
       }
       return;
-    }
-
-    // hello-ok response (from connect request)
-    if (msg.type === "hello-ok" || (msg.type === "res" && (msg as ResponseFrame).ok)) {
-      onConnected();
     }
   }
 
@@ -481,35 +538,77 @@ export class GatewayManager {
       },
     };
 
-    // Set up pending handler for connect response
-    const p = this.pending.get(connectReq.id);
-    if (!p) {
-      const timeout = setTimeout(() => {
-        this.pending.delete(connectReq.id);
-      }, 10_000);
-      this.pending.set(connectReq.id, {
-        resolve: () => { /* handled by onConnected callback */ },
-        reject: () => { /* handled by ws close */ },
-        timeout,
-      });
-    }
+    // The connect response is a normal res frame with payload.type === "hello-ok".
+    // When it resolves, trigger the onConnected callback.
+    const timeout = setTimeout(() => {
+      this.pending.delete(connectReq.id);
+    }, 10_000);
+
+    this.pending.set(connectReq.id, {
+      resolve: () => {
+        this.onConnected?.();
+      },
+      reject: (err) => {
+        // If connect is rejected, the ws.close handler will propagate the error
+        console.error("[GatewayManager] Connect rejected:", err.message);
+      },
+      timeout,
+    });
 
     this.ws.send(JSON.stringify(connectReq));
   }
 
-  private handleStreamingEvent(evt: EventFrame): void {
-    const payload = evt.payload as Record<string, unknown> | undefined;
+  private handleChatStreamEvent(evt: EventFrame): void {
+    const payload = evt.payload as ChatEventPayload | undefined;
     if (!payload || !this.activeMessageId) return;
 
-    const text = typeof payload.text === "string" ? payload.text : undefined;
-    const token = typeof payload.token === "string" ? payload.token : undefined;
-    const chunk = token ?? text;
+    const state = payload.state;
 
-    if (chunk) {
-      this.emit({
-        type: "LLM_TOKEN",
-        payload: { messageId: this.activeMessageId, token: chunk },
-      });
+    if (state === "delta") {
+      // Extract text from the delta message
+      const text = payload.message?.text ?? payload.message?.content ?? "";
+      if (text) {
+        this.streamedText += text;
+        this.emit({
+          type: "LLM_TOKEN",
+          payload: { messageId: this.activeMessageId, token: text },
+        });
+      }
+      return;
+    }
+
+    if (state === "final") {
+      // Use final message text if provided, otherwise use accumulated stream
+      const finalText = payload.message?.text ?? payload.message?.content ?? this.streamedText;
+      if (this.chatDoneResolve) {
+        const resolve = this.chatDoneResolve;
+        this.chatDoneResolve = null;
+        this.chatDoneReject = null;
+        resolve(finalText);
+      }
+      return;
+    }
+
+    if (state === "error") {
+      const errorMsg = payload.errorMessage ?? "OpenClaw returned an error.";
+      if (this.chatDoneReject) {
+        const reject = this.chatDoneReject;
+        this.chatDoneResolve = null;
+        this.chatDoneReject = null;
+        reject(new Error(errorMsg));
+      }
+      return;
+    }
+
+    if (state === "aborted") {
+      // User cancelled — resolve with whatever streamed so far
+      if (this.chatDoneResolve) {
+        const resolve = this.chatDoneResolve;
+        this.chatDoneResolve = null;
+        this.chatDoneReject = null;
+        resolve(this.streamedText || "(Response was stopped.)");
+      }
+      return;
     }
   }
 
@@ -620,34 +719,23 @@ export class GatewayManager {
 
   private composePrompt(request: ChatSendRequest, pageContext: PageContext | null): string {
     const profile = this.store.getState().profile;
-    const sections = [
-      "You are running inside Aura Desktop, a user-friendly wrapper around OpenClaw.",
-      `User request: ${request.message}`,
-    ];
+    const sections = [request.message];
 
     if (profile.fullName || profile.email) {
-      sections.push(`Saved profile: ${JSON.stringify({
-        fullName: profile.fullName,
-        email: profile.email,
-        phone: profile.phone,
-        addressLine1: profile.addressLine1,
-        city: profile.city,
-        state: profile.state,
-        postalCode: profile.postalCode,
-        country: profile.country,
-      })}`);
+      const profileInfo = [profile.fullName, profile.email, profile.city, profile.country].filter(Boolean).join(", ");
+      if (profileInfo) {
+        sections.push(`\n[User profile: ${profileInfo}]`);
+      }
     }
 
-    if (pageContext) {
-      sections.push(`Current page: ${JSON.stringify({
-        url: pageContext.url,
-        title: pageContext.title,
-        visibleText: pageContext.visibleText.slice(0, 5000),
-        interactiveElements: pageContext.interactiveElements.slice(0, 20),
-      })}`);
+    if (pageContext?.title) {
+      sections.push(`\n[Current page: ${pageContext.title} — ${pageContext.url}]`);
+      if (pageContext.visibleText) {
+        sections.push(`[Page content preview: ${pageContext.visibleText.slice(0, 3000)}]`);
+      }
     }
 
-    return sections.join("\n\n");
+    return sections.join("");
   }
 
   private createTask(taskId: string, command: string): AuraTask {

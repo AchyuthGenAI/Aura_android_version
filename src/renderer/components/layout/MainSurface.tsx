@@ -23,7 +23,6 @@ export const MainSurface = (): JSX.Element => {
         {route === "skills" && <SkillsPage />}
         {route === "profile" && <ProfilePage />}
         {route === "settings" && <SettingsPage />}
-          {route === "settings" && <SettingsPage />}
         </div>
       </div>
     </div>
