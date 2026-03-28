@@ -218,7 +218,12 @@ export class BrowserController {
 
     this.tabs.set(id, tab);
     this.bindViewEvents(tab);
-    await view.webContents.loadURL(tab.snapshot.url);
+    try {
+      await view.webContents.loadURL(tab.snapshot.url);
+    } catch {
+      // Network may not be ready — tab is still created, user can retry/navigate later
+      tab.snapshot.loading = false;
+    }
     this.switchToTab(id);
     this.broadcastTabs();
     return this.getTabs();
@@ -261,7 +266,11 @@ export class BrowserController {
       return this.getTabs();
     }
 
-    await tab.view.webContents.loadURL(buildSearchUrl(request.url));
+    try {
+      await tab.view.webContents.loadURL(buildSearchUrl(request.url));
+    } catch {
+      tab.snapshot.loading = false;
+    }
     this.broadcastTabs();
     return this.getTabs();
   }
