@@ -310,6 +310,7 @@ const createAppWindows = async (): Promise<void> => {
       emit
     );
     activeMonitorManager = new MonitorManager(browserController, store, emit);
+    activeGatewayManager.setMonitorManager(activeMonitorManager);
 
     ipcMain.handle(IPC_CHANNELS.authGetState, async () => authService.getState());
     ipcMain.handle(IPC_CHANNELS.authSignIn, async (_event, payload: { email: string; password: string }) =>

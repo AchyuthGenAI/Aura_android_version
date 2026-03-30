@@ -24,6 +24,7 @@ import { ConfigManager } from "./config-manager";
 import { AuraStore } from "./store";
 import { classify, type Classification } from "./intent-classifier";
 import { TaskExecutor } from "./task-executor";
+import type { MonitorManager } from "./monitor-manager";
 
 import WebSocket from "ws";
 import { completeChat, resolveGroqApiKey, streamChat } from "./llm-client";
@@ -71,6 +72,12 @@ export class GatewayManager {
   private chatDoneReject: ((err: Error) => void) | null = null;
   private readonly taskExecutor = new TaskExecutor();
   private readonly pendingConfirmations = new Map<string, { resolve: (v: boolean) => void; timeout: NodeJS.Timeout }>();
+
+  private monitorManager: MonitorManager | null = null;
+
+  setMonitorManager(mm: MonitorManager): void {
+    this.monitorManager = mm;
+  }
 
   constructor(
     private readonly openClawRootCandidates: string[],
@@ -267,7 +274,11 @@ export class GatewayManager {
       return this.handleDirectAction(messageId, taskId, session, request, classification);
     }
 
-    // task, autofill, monitor, or navigate-without-directAction → plan and execute
+    if (classification.intent === "monitor" && this.monitorManager) {
+      return this.handleMonitorIntent(messageId, taskId, session, request, pageContext, apiKey);
+    }
+
+    // task, autofill, or navigate-without-directAction → plan and execute
     return this.handleTaskIntent(messageId, taskId, session, request, pageContext, classification);
   }
 
@@ -424,6 +435,108 @@ export class GatewayManager {
 
     this.activeMessageId = null;
     this.activeTaskId = null;
+    return { messageId, taskId };
+  }
+
+  // ── Monitor intent: extract params and schedule a PageMonitor ────────────
+
+  private async handleMonitorIntent(
+    messageId: string,
+    taskId: string,
+    session: AuraSession,
+    request: ChatSendRequest,
+    pageContext: PageContext | null,
+    apiKey: string,
+  ): Promise<{ messageId: string; taskId: string }> {
+    const currentUrl = pageContext?.url ?? "";
+    const currentTitle = pageContext?.title ?? "current page";
+
+    // Use LLM to extract URL, condition, and interval from the user's message
+    let url = currentUrl;
+    let condition = request.message;
+    let intervalMinutes = 30;
+
+    try {
+      const extraction = await completeChat(
+        apiKey,
+        [
+          {
+            role: "system",
+            content:
+              `Extract a monitor configuration from the user's message. ` +
+              `Current page URL: ${currentUrl || "none"}. ` +
+              `Respond ONLY with valid JSON, no markdown: ` +
+              `{"url":"<url>","condition":"<plain-english condition>","intervalMinutes":<number>}. ` +
+              `If no URL is mentioned, use the current page URL. ` +
+              `intervalMinutes should be a reasonable check frequency (5, 15, 30, 60, 120, 360, 1440).`,
+          },
+          { role: "user", content: request.message },
+        ],
+        { model: "llama-3.1-8b-instant", maxTokens: 120, temperature: 0 },
+      );
+      const parsed = JSON.parse(extraction.trim()) as { url?: string; condition?: string; intervalMinutes?: number };
+      if (parsed.url) url = parsed.url;
+      if (parsed.condition) condition = parsed.condition;
+      if (parsed.intervalMinutes && parsed.intervalMinutes > 0) intervalMinutes = parsed.intervalMinutes;
+    } catch {
+      // LLM extraction failed — use sensible defaults
+    }
+
+    if (!url) {
+      const responseText = "I need a URL to monitor. Please open the page you want to watch first, or tell me the URL.";
+      const noUrlMsg: AuraSessionMessage = {
+        id: crypto.randomUUID(), role: "assistant", content: responseText, timestamp: now(), source: request.source,
+      };
+      session.messages.push(noUrlMsg);
+      session.endedAt = now();
+      this.persistCurrentSession(session);
+      this.emit({ type: "LLM_DONE", payload: { messageId, fullText: responseText, cleanText: responseText } });
+      this.setStatus({ ...this.runtimeStatus, phase: "ready", message: "OpenClaw Gateway is running." });
+      return { messageId, taskId };
+    }
+
+    const monitor = {
+      id: crypto.randomUUID(),
+      title: condition.slice(0, 60),
+      url,
+      condition,
+      intervalMinutes,
+      createdAt: now(),
+      lastCheckedAt: 0,
+      status: "active" as const,
+      triggerCount: 0,
+    };
+
+    // Persist to store and start polling
+    const monitors = [...this.store.getState().monitors, monitor];
+    this.store.patch({ monitors });
+    this.monitorManager!.scheduleMonitor(monitor);
+
+    const intervalLabel = intervalMinutes >= 60
+      ? `every ${intervalMinutes / 60} hour${intervalMinutes / 60 !== 1 ? "s" : ""}`
+      : `every ${intervalMinutes} minutes`;
+    const responseText =
+      `Monitor created! I'll check "${url}" ${intervalLabel} and notify you when: ${condition}. ` +
+      `You can manage it in the Monitors tab.`;
+
+    // Persist the response as a chat message
+    const assistantMessage: AuraSessionMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: responseText,
+      timestamp: now(),
+      source: request.source,
+    };
+    session.messages.push(assistantMessage);
+    session.endedAt = now();
+    this.persistCurrentSession(session);
+
+    this.emit({
+      type: "LLM_DONE",
+      payload: { messageId, fullText: responseText, cleanText: responseText },
+    });
+    this.setStatus({ ...this.runtimeStatus, phase: "ready", message: "OpenClaw Gateway is running." });
+
     return { messageId, taskId };
   }
 
