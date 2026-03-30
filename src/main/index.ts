@@ -21,6 +21,11 @@ const WIDGET_STARTUP_ARG = "--background-widget";
 const launchedAsWidgetOnly = process.argv.includes(WIDGET_STARTUP_ARG);
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
+// Allow getUserMedia (mic/camera) without OS permission prompt in Electron renderer.
+// This switch bypasses Chromium's permission dialog and lets our
+// setPermissionRequestHandler / setPermissionCheckHandler control access.
+app.commandLine.appendSwitch("use-fake-ui-for-media-stream");
+
 let mainWindow: BrowserWindow | null = null;
 let widgetWindow: BrowserWindow | null = null;
 let activeGatewayManager: GatewayManager | null = null;
@@ -289,15 +294,17 @@ const createAppWindows = async (): Promise<void> => {
 
     // Grant microphone (and camera) permission for the app windows so
     // navigator.mediaDevices.getUserMedia({ audio: true }) works in the renderer.
-    const ALLOWED_PERMISSIONS = new Set(["media", "microphone", "camera", "mediaKeySystem"]);
-    for (const win of [mainWindow, widgetWindow]) {
-      win.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
-        callback(ALLOWED_PERMISSIONS.has(permission));
-      });
-      win.webContents.session.setPermissionCheckHandler((_wc, permission) => {
-        return ALLOWED_PERMISSIONS.has(permission);
-      });
-    }
+    // Note: setPermissionRequestHandler uses Electron names ("media", "microphone")
+    //       setPermissionCheckHandler uses Chromium names ("audioCapture", "videoCapture")
+    const ALLOWED_REQUEST_PERMISSIONS = new Set(["media", "microphone", "camera", "mediaKeySystem"]);
+    const ALLOWED_CHECK_PERMISSIONS = new Set(["media", "microphone", "camera", "audioCapture", "videoCapture", "mediaKeySystem"]);
+    // Both windows share the same defaultSession — set handlers once on the session
+    mainWindow.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
+      callback(ALLOWED_REQUEST_PERMISSIONS.has(permission));
+    });
+    mainWindow.webContents.session.setPermissionCheckHandler((_wc, permission) => {
+      return ALLOWED_CHECK_PERMISSIONS.has(permission);
+    });
 
     const browserController = new BrowserController(mainWindow, browserViewPreloadPath, emit);
     const authService = new AuthService(app.getPath("userData"), store);

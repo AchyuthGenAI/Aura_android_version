@@ -13,13 +13,15 @@ Build pipeline        ✅  npm run build — clean
 Packaging             ✅  dist/win-unpacked exists (package:win:dir)
 All 7 routes          ✅  Code complete (home, browser, monitors, skills, profile, settings, history)
 Groq streaming chat   ✅  Direct API, bypasses gateway
-Voice mode            ✅  Deepgram STT/TTS + AuraFace + WebSpeech fallback
-                          ⚠  Was broken — mic permission + CSP wss: fixed in latest commit
+Voice mode            ⚠  Deepgram key confirmed valid (HTTP 200). Auth method switched to
+                          subprotocol ("token", key) — was using ?token= query-param (rejected).
+                          Needs end-to-end test after restart.
 Widget window         ✅  Frameless, draggable, always-on-top, screen-edge clamping
 Onboarding flow       ✅  Auth → Consent → Profile → MainSurface (profile skippable)
-Session storage       ✅  Sessions saved + sidebar history
+Session storage       ✅  Sessions saved + sidebar sidebar
 BrowserController     ✅  Multi-tab, DOM actions, page context, screenshots
 IPC plumbing          ✅  50+ channels wired
+Main window chat UI   ✅  HomePage now renders ChatPanel + InputBar + ActiveTaskBanner + SessionSidebar
 
 Task execution        ✅  Phase 1 complete — classify → plan → execute → confirm
 Intent classifier     ✅  Heuristic + LLM fallback (1500ms timeout)
@@ -70,19 +72,31 @@ Profile optional      ✅  Phase 5.1 complete — "Skip for now" button on Profi
 
 ## Recent Fixes (2026-03-30)
 
-### Voice Mode Broken — Fixed
-Root cause was three separate issues all preventing Deepgram from working:
+### Voice Mode Broken — Fixed (three-bug root cause)
+1. **Electron mic permission not granted** — Added `session.setPermissionRequestHandler` +
+   `setPermissionCheckHandler` in `index.ts`. Also added `app.commandLine.appendSwitch("use-fake-ui-for-media-stream")`
+   to bypass Chromium's permission dialog (mic still uses real hardware).
+   Permission check handler now covers `"audioCapture"` (Chromium internal name) in addition to `"media"`.
 
-1. **Electron mic permission not granted** — Electron denies `getUserMedia` by default.
-   Fix: Added `session.setPermissionRequestHandler` + `setPermissionCheckHandler` for both
-   `mainWindow` and `widgetWindow` in `src/main/index.ts`.
+2. **CSP blocked Deepgram WebSocket** — Updated `index.html` CSP: `connect-src` now includes `wss:`,
+   `media-src` includes `blob:` for TTS audio.
 
-2. **CSP blocked Deepgram WebSocket** — `connect-src https:` does NOT cover `wss:` in CSP.
-   Fix: Updated `index.html` CSP to add `wss:` to `connect-src` and `blob:` to `media-src`
-   (required for TTS audio playback via `URL.createObjectURL(blob)`).
+3. **Silent failure** — `VoicePanel.tsx` now shows `voiceError` in idle caption area.
 
-3. **Silent failure** — When Deepgram failed, VoicePanel silently went idle with no feedback.
-   Fix: `VoicePanel.tsx` now shows error messages in the idle caption area.
+### Deepgram Auth Method — Fixed (2026-03-30)
+- Query-param auth (`?token=<key>`) was being rejected by Deepgram with "HTTP Authentication failed".
+- Confirmed key is valid (HTTP 200 on REST API).
+- Fixed: switched to WebSocket **subprotocol auth** — `new WebSocket(url, ["token", apiKey])`.
+  This sends `Sec-WebSocket-Protocol: token, <key>` in the upgrade request, which is Deepgram's
+  documented browser authentication method.
+- File: `src/renderer/services/deepgram.ts`
+
+### Main Window Chat UI — Wired (2026-03-30)
+- `HomePage` was showing a stats dashboard; `ChatPanel`, `InputBar`, `ActiveTaskBanner`,
+  `SessionSidebar` all existed but were never imported anywhere.
+- Fixed: `HomePage.tsx` now renders the full chat layout.
+- Voice mode toggle: when `settings.voiceEnabled` is true, `VoicePanel` renders instead of chat.
+- Sidebar nav "Home" renamed to "Chat" with chat bubble icon.
 
 ### Widget Off-Screen Bug — Fixed
 - `getWidgetBounds()` was using corrupted widgetSize (84x84 saved when widget was collapsed).
@@ -95,13 +109,13 @@ Root cause was three separate issues all preventing Deepgram from working:
 ## What's Next (Priority Order)
 
 ### HIGH — Voice Mode End-to-End Test
-Voice is now unblocked. Must verify the full loop:
+Deepgram auth switched to subprotocol method. Must verify the full loop after restart:
+- [ ] `[Deepgram] WebSocket CONNECTED!` appears in console (no "HTTP Authentication failed")
 - [ ] Mic level bars animate when speaking
 - [ ] Transcript appears live in VoicePanel
 - [ ] Silence triggers command submission
 - [ ] TTS plays back response audio
 - [ ] Interrupting during TTS returns to listening
-- [ ] Error state shows human-readable message (not silent idle)
 
 ### HIGH — MonitorsPage Full Wire-Up
 The MonitorManager backend is built (Phase 4), but verify the full flow:

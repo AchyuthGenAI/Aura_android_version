@@ -1,7 +1,7 @@
 import type { AuraSettings, PermissionState, ThemeMode } from "@shared/types";
 
 import { desktopEnv } from "@renderer/config/env";
-import { Card, SectionHeading, SettingRow, Switch } from "../shared";
+import { SectionHeading, SettingRow, Switch } from "../shared";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
 export const SettingsPage = (): JSX.Element => {

@@ -67,60 +67,72 @@ WIDGET_VISIBILITY  → show/hide widget window
 
 ---
 
-## Voice Mode Fix (2026-03-30)
-
-Three bugs were preventing voice from working. **All fixed:**
+## Voice Mode Fixes (2026-03-30)
 
 ### Bug 1 — Electron blocks getUserMedia by default
 **File:** `src/main/index.ts`
-**Fix:** After creating both windows, register permission handlers:
+**Fix:** Register permission handlers on the session, and append the `use-fake-ui-for-media-stream`
+Chromium switch (bypasses the OS dialog; mic still uses real hardware):
 ```typescript
-const ALLOWED_PERMISSIONS = new Set(["media", "microphone", "camera", "mediaKeySystem"]);
-for (const win of [mainWindow, widgetWindow]) {
-  win.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
-    callback(ALLOWED_PERMISSIONS.has(permission));
-  });
-  win.webContents.session.setPermissionCheckHandler((_wc, permission) => {
-    return ALLOWED_PERMISSIONS.has(permission);
-  });
-}
+app.commandLine.appendSwitch("use-fake-ui-for-media-stream");
+
+// In createAppWindows(), after both windows are created:
+const ALLOWED_REQUEST_PERMISSIONS = new Set(["media", "microphone", "camera", "mediaKeySystem"]);
+const ALLOWED_CHECK_PERMISSIONS = new Set(["media", "microphone", "camera", "audioCapture", "videoCapture", "mediaKeySystem"]);
+mainWindow.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
+  callback(ALLOWED_REQUEST_PERMISSIONS.has(permission));
+});
+mainWindow.webContents.session.setPermissionCheckHandler((_wc, permission) => {
+  return ALLOWED_CHECK_PERMISSIONS.has(permission);
+});
 ```
-**Why this is critical:** Without this, `navigator.mediaDevices.getUserMedia({ audio: true })` throws
-`NotAllowedError` in both Deepgram and WebSpeech paths, and voice silently goes idle.
+**Why:** `"audioCapture"` is Chromium's internal name for mic (differs from Electron's `"media"`/`"microphone"`).
+Both windows share the same `defaultSession` so only one call is needed.
 
 ### Bug 2 — CSP blocks Deepgram WebSocket and TTS audio
 **File:** `index.html`
-**Fix:**
 ```html
-<!-- BEFORE (broken) -->
-connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* https:;
-
-<!-- AFTER (fixed) -->
 connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* https: wss:;
 media-src 'self' blob: https:;
 ```
-**Why:** `https:` in `connect-src` does NOT cover `wss:` — they are separate URI schemes.
-Deepgram uses `wss://api.deepgram.com/...`. TTS uses `URL.createObjectURL(blob)` which requires `blob:` in `media-src`.
+`https:` does NOT cover `wss:`. `blob:` required for TTS via `URL.createObjectURL()`.
 
 ### Bug 3 — Silent failure with no user feedback
 **File:** `src/renderer/components/VoicePanel.tsx`
-**Fix:** Added `voiceError` state. Shown in idle phase caption area when Deepgram fails.
-Permission denial is now caught separately and does NOT fall through to WebSpeech.
+Added `voiceError` state displayed in idle caption area.
+
+### Bug 4 — Deepgram rejecting query-param auth
+**File:** `src/renderer/services/deepgram.ts`
+Deepgram's WebSocket API does not accept `?token=<key>` in the URL. Returns "HTTP Authentication failed".
+**Fix:** Use WebSocket subprotocol auth instead:
+```typescript
+// BEFORE (broken):
+const url = `wss://api.deepgram.com/v1/listen?token=${encodeURIComponent(apiKey)}&${baseParams}`;
+this.socket = new WebSocket(url);
+
+// AFTER (fixed):
+const url = `wss://api.deepgram.com/v1/listen?${baseParams}`;
+this.socket = new WebSocket(url, ["token", this.apiKey]);
+```
+This sends `Sec-WebSocket-Protocol: token, <key>` which is Deepgram's documented browser auth.
 
 ---
 
 ## Next Work Items
 
 ### 1. Voice Mode Verification (HIGH)
-After the fix, test the full loop manually:
-1. Open Voice panel, click mic button
-2. Console should show: `[Deepgram] Requesting microphone access...` then `[Deepgram] Microphone access granted`
-3. Then: `[Deepgram] Connecting to WebSocket...` then `[Deepgram] WebSocket CONNECTED!`
-4. Speak — `[Deepgram] Audio chunk #1...` should log, mic bars should animate
-5. Stop speaking — transcript appears, command submits
-6. LLM responds — TTS plays back via Deepgram aura-asteria-en voice
+All four voice bugs are fixed. Test the full loop after restarting dev server:
+1. Open Voice panel (widget or main window with `voiceEnabled: true` in settings), click mic
+2. Console must show `[Deepgram] WebSocket CONNECTED!` — if still "HTTP Authentication failed",
+   the subprotocol auth change in `deepgram.ts` wasn't picked up; hard-restart the app.
+3. Speak — `[Deepgram] Audio chunk #1...` logs, mic level bars animate in pink
+4. Stop speaking — UtteranceEnd fires, transcript submits to LLM
+5. LLM response arrives — TTS plays via Deepgram aura-asteria-en, captions appear
+6. After TTS ends — returns to listening state automatically
 
-If voice still fails: check DevTools console for `[Deepgram]` log lines to pinpoint failure.
+If WebSpeech fallback error appears (`Voice recognition failed: network`): this is expected in
+Electron (Google's speech API is inaccessible). It only triggers when Deepgram fails first.
+Fix Deepgram and WebSpeech won't be reached.
 
 ### 2. MonitorsPage Verification (HIGH)
 The `MonitorManager` backend is complete. Verify `MonitorsPage.tsx` integration:

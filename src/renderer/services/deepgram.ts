@@ -94,7 +94,7 @@ export class DeepgramClient {
     return new Promise<void>((resolve, reject) => {
       let settled = false;
 
-      // Build Deepgram URL with query-param auth
+      // Build Deepgram URL (no auth in URL — auth via subprotocol header)
       const baseParams =
         `model=nova-2&language=en-US` +
         `&interim_results=true` +
@@ -103,13 +103,13 @@ export class DeepgramClient {
         `&vad_events=true` +
         `&smart_format=true`;
 
-      // Try query-param auth first (more reliable in Electron)
-      const url = `wss://api.deepgram.com/v1/listen?token=${encodeURIComponent(this.apiKey)}&${baseParams}`;
+      const url = `wss://api.deepgram.com/v1/listen?${baseParams}`;
 
-      console.log("[Deepgram] Connecting to WebSocket (query-param auth)...");
+      console.log("[Deepgram] Connecting to WebSocket (subprotocol auth)...");
       console.log("[Deepgram] API key starts with:", this.apiKey.substring(0, 8) + "...");
 
-      this.socket = new WebSocket(url);
+      // Deepgram accepts auth via WebSocket subprotocol: ["token", "<api-key>"]
+      this.socket = new WebSocket(url, ["token", this.apiKey]);
 
       const connectTimeout = setTimeout(() => {
         if (!settled && this.socket?.readyState !== WebSocket.OPEN) {

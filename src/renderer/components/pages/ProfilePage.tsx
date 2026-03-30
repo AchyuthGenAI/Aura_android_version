@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import type { UserProfile } from "@shared/types";
 
-import { Button, Card, SectionHeading, TextInput } from "../shared";
+import { Button, SectionHeading, TextInput } from "../shared";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
 const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
