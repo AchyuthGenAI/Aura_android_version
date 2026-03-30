@@ -27,8 +27,10 @@ export const ProfileForm = ({
 
 export const ProfileSetupScreen = ({
   onDone,
+  onSkip,
 }: {
   onDone: () => Promise<void>;
+  onSkip?: () => Promise<void>;
 }): JSX.Element => {
   const profile = useAuraStore((state) => state.profile);
   const saveProfile = useAuraStore((state) => state.saveProfile);
@@ -50,7 +52,7 @@ export const ProfileSetupScreen = ({
           </div>
         </div>
         <ProfileForm profile={draft} onChange={setDraft} />
-        <div className="mt-6">
+        <div className="mt-6 flex items-center gap-3">
           <Button
             className="bg-aura-gradient text-white"
             onClick={async () => {
@@ -60,6 +62,14 @@ export const ProfileSetupScreen = ({
           >
             Finish Setup
           </Button>
+          {onSkip && (
+            <Button
+              className="border border-white/10 bg-white/6 text-aura-muted hover:bg-white/10"
+              onClick={() => void onSkip()}
+            >
+              Skip for now
+            </Button>
+          )}
         </div>
       </Card>
     </div>

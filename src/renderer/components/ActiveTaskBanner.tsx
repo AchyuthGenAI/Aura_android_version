@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 
-import type { AuraTask } from "@shared/types";
-
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
 const TOOL_ICONS: Record<string, string> = {
@@ -42,7 +40,9 @@ const ElapsedTimer = ({ startedAt }: { startedAt: number }): JSX.Element => {
 
 export const ActiveTaskBanner = (): JSX.Element | null => {
   const activeTask = useAuraStore((s) => s.activeTask);
+  const cancelTask = useAuraStore((s) => s.cancelTask);
   const stepsRef = useRef<HTMLDivElement | null>(null);
+  const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
     if (stepsRef.current) {
@@ -50,7 +50,17 @@ export const ActiveTaskBanner = (): JSX.Element | null => {
     }
   }, [activeTask?.steps.length]);
 
-  if (!activeTask) return null;
+  // Auto-dismiss 3s after done
+  useEffect(() => {
+    if (!activeTask) { setDismissed(false); return; }
+    if (activeTask.status === "done") {
+      const id = setTimeout(() => setDismissed(true), 3000);
+      return () => clearTimeout(id);
+    }
+    setDismissed(false);
+  }, [activeTask?.status, activeTask?.id]);
+
+  if (!activeTask || dismissed) return null;
 
   const doneSteps = activeTask.steps.filter((s) => s.status === "done").length;
   const totalSteps = activeTask.steps.length;
@@ -82,6 +92,14 @@ export const ActiveTaskBanner = (): JSX.Element | null => {
             >
               {activeTask.status}
             </span>
+            {(activeTask.status === "running" || activeTask.status === "planning") && (
+              <button
+                className="rounded-lg border border-white/10 bg-white/6 px-2 py-0.5 text-[10px] text-aura-muted transition hover:bg-white/12 hover:text-red-300"
+                onClick={() => void cancelTask(activeTask.id)}
+              >
+                Cancel
+              </button>
+            )}
           </div>
         </div>
 
@@ -136,6 +154,12 @@ export const ActiveTaskBanner = (): JSX.Element | null => {
         {activeTask.error && (
           <p className="mt-3 rounded-[14px] border border-red-400/20 bg-red-500/8 px-3 py-2 text-xs text-red-300">
             {activeTask.error}
+          </p>
+        )}
+
+        {activeTask.status === "done" && activeTask.result && (
+          <p className="mt-3 truncate rounded-[14px] bg-emerald-500/8 px-3 py-2 text-xs text-emerald-300">
+            {activeTask.result}
           </p>
         )}
       </div>

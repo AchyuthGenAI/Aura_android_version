@@ -6,6 +6,7 @@ import { AuthScreen } from "@renderer/components/AuthScreen";
 import { ConsentScreen } from "@renderer/components/ConsentScreen";
 import { ProfileSetupScreen } from "@renderer/components/ProfileSetupScreen";
 import { MainSurface } from "@renderer/components/layout/MainSurface";
+import { ConfirmModal } from "@renderer/components/ConfirmModal";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
 export default function App(): JSX.Element {
@@ -35,9 +36,15 @@ export default function App(): JSX.Element {
     return <SplashScreen />;
   }
 
+  const skipProfile = async (): Promise<void> => {
+    await window.auraDesktop.storage.set({ profileComplete: true });
+    await hydrate();
+  };
+
   return (
     <div className="h-full">
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
+      <ConfirmModal />
       {!authState.authenticated ? (
         <AuthScreen onDone={hydrate} />
       ) : !consentAccepted ? (
@@ -48,7 +55,7 @@ export default function App(): JSX.Element {
           }}
         />
       ) : !profileComplete ? (
-        <ProfileSetupScreen onDone={hydrate} />
+        <ProfileSetupScreen onDone={hydrate} onSkip={skipProfile} />
       ) : (
         <MainSurface />
       )}
