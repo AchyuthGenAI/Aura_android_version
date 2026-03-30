@@ -10,6 +10,7 @@ import { AuthService } from "./services/auth-service";
 import { BrowserController } from "./services/browser-controller";
 import { ConfigManager } from "./services/config-manager";
 import { GatewayManager } from "./services/gateway-manager";
+import { MonitorManager } from "./services/monitor-manager";
 import { AuraStore } from "./services/store";
 
 const COLLAPSED_WIDGET_SIZE = 84;
@@ -23,6 +24,7 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 let mainWindow: BrowserWindow | null = null;
 let widgetWindow: BrowserWindow | null = null;
 let activeGatewayManager: GatewayManager | null = null;
+let activeMonitorManager: MonitorManager | null = null;
 let isQuitting = false;
 let isCreatingWindows = false;
 
@@ -276,6 +278,7 @@ const createAppWindows = async (): Promise<void> => {
       browserController,
       emit
     );
+    activeMonitorManager = new MonitorManager(browserController, store, emit);
 
     ipcMain.handle(IPC_CHANNELS.authGetState, async () => authService.getState());
     ipcMain.handle(IPC_CHANNELS.authSignIn, async (_event, payload: { email: string; password: string }) =>
@@ -324,8 +327,12 @@ const createAppWindows = async (): Promise<void> => {
     ipcMain.handle(IPC_CHANNELS.taskCancel, async (_event, payload: { taskId: string }) => {
       activeGatewayManager!.cancelTask(payload.taskId);
     });
-    ipcMain.handle(IPC_CHANNELS.monitorStart, async () => { /* Phase 4 — MonitorManager */ });
-    ipcMain.handle(IPC_CHANNELS.monitorStop, async () => { /* Phase 4 — MonitorManager */ });
+    ipcMain.handle(IPC_CHANNELS.monitorStart, async (_event, monitor) => {
+      activeMonitorManager!.scheduleMonitor(monitor as import("@shared/types").PageMonitor);
+    });
+    ipcMain.handle(IPC_CHANNELS.monitorStop, async (_event, payload: { id: string }) => {
+      activeMonitorManager!.unscheduleMonitor(payload.id);
+    });
     ipcMain.handle(IPC_CHANNELS.monitorList, async () => store.getState().monitors);
     ipcMain.handle(IPC_CHANNELS.configGet, async () => configManager.readConfig());
     ipcMain.handle(IPC_CHANNELS.configSetApiKey, async (_event, payload: { provider: string; apiKey: string }) => {
@@ -394,6 +401,7 @@ const createAppWindows = async (): Promise<void> => {
 
     await browserController.initialize();
     await activeGatewayManager!.bootstrap();
+    activeMonitorManager!.start();
 
     if (!launchedAsWidgetOnly && !mainWindow.isVisible()) {
       mainWindow.show();
@@ -421,6 +429,7 @@ void app.whenReady().then(() => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  activeMonitorManager?.stop();
   void activeGatewayManager?.shutdown();
 });
 

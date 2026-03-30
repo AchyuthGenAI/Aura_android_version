@@ -30,6 +30,7 @@ const WidgetApp = (): JSX.Element => {
   const stopMessage = useAuraStore((state) => state.stopMessage);
   const startNewSession = useAuraStore((state) => state.startNewSession);
   const profile = useAuraStore((state) => state.profile);
+  const activeTask = useAuraStore((state) => state.activeTask);
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [expanded, setExpanded] = useState(false);
   const [size, setSize] = useState(DEFAULT_WIDGET_SIZE);
@@ -169,14 +170,19 @@ const WidgetApp = (): JSX.Element => {
   const onboardingNeeded = !authState.authenticated || !consentAccepted || !profileComplete;
   const isBootstrapping = !hydrated || isHydrating || (bootstrapState.stage !== "ready" && bootstrapState.stage !== "error");
 
+  const isTaskActive = activeTask?.status === "planning" || activeTask?.status === "running";
+
   if (!expanded) {
     return (
-      <div 
-        className="group flex h-full w-full items-center justify-center bg-transparent cursor-pointer transition-transform duration-300 hover:scale-110"
+      <div
+        className="group relative flex h-full w-full items-center justify-center bg-transparent cursor-pointer transition-transform duration-300 hover:scale-110"
         onPointerDown={startBubbleDrag}
       >
+        {isTaskActive && (
+          <div className="pulse-ring absolute inset-0 rounded-full border-2 border-aura-violet/60" />
+        )}
         <div className="pointer-events-none scale-[1.25]">
-          <AuraLogoBlob size="md" isTaskRunning={runtimeStatus.phase === "running"} />
+          <AuraLogoBlob size="md" isTaskRunning={runtimeStatus.phase === "running" || isTaskActive} />
         </div>
       </div>
     );
@@ -196,7 +202,7 @@ const WidgetApp = (): JSX.Element => {
         >
           <div className="flex items-center gap-3">
             <div className="pointer-events-none">
-              <AuraLogoBlob size="xs" isTaskRunning={runtimeStatus.phase === "running"} />
+              <AuraLogoBlob size="xs" isTaskRunning={runtimeStatus.phase === "running" || isTaskActive} />
             </div>
             <div className="flex flex-col">
               <div className="flex items-center gap-2">

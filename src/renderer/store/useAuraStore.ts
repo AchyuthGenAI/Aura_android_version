@@ -148,6 +148,9 @@ type AuraState = {
   saveSettings: (value: AuraSettings) => Promise<void>;
   savePermissions: (value: PermissionState[]) => Promise<void>;
   saveMonitors: (value: PageMonitor[]) => Promise<void>;
+  startMonitor: (monitor: PageMonitor) => Promise<void>;
+  stopMonitor: (id: string) => Promise<void>;
+  deleteMonitor: (id: string) => Promise<void>;
   saveMacros: (value: AuraMacro[]) => Promise<void>;
   sendMessage: (source: ChatSendRequest["source"], override?: string) => Promise<void>;
   stopMessage: () => Promise<void>;
@@ -421,6 +424,16 @@ export const useAuraStore = create<AuraState>((set, get) => ({
 
     if (message.type === "BOOTSTRAP_STATUS") {
       set({ bootstrapState: (message.payload as { bootstrap: BootstrapState }).bootstrap });
+      return;
+    }
+
+    if (message.type === "MONITOR_TRIGGERED") {
+      const payload = message.payload as { monitor: PageMonitor };
+      const monitors = get().monitors.map((m) =>
+        m.id === payload.monitor.id ? payload.monitor : m
+      );
+      set({ monitors });
+      void window.auraDesktop.storage.set({ monitors });
     }
   },
 
@@ -478,6 +491,32 @@ export const useAuraStore = create<AuraState>((set, get) => ({
 
   saveMonitors: async (value) => {
     const nextState = await window.auraDesktop.storage.set({ monitors: value });
+    applyStorageState(set, nextState);
+  },
+
+  startMonitor: async (monitor) => {
+    // Persist active status first
+    const monitors = get().monitors.map((m) =>
+      m.id === monitor.id ? { ...m, status: "active" as const } : m
+    );
+    const nextState = await window.auraDesktop.storage.set({ monitors });
+    applyStorageState(set, nextState);
+    await window.auraDesktop.monitor.start(monitor);
+  },
+
+  stopMonitor: async (id) => {
+    const monitors = get().monitors.map((m) =>
+      m.id === id ? { ...m, status: "paused" as const } : m
+    );
+    const nextState = await window.auraDesktop.storage.set({ monitors });
+    applyStorageState(set, nextState);
+    await window.auraDesktop.monitor.stop({ id });
+  },
+
+  deleteMonitor: async (id) => {
+    await window.auraDesktop.monitor.stop({ id });
+    const monitors = get().monitors.filter((m) => m.id !== id);
+    const nextState = await window.auraDesktop.storage.set({ monitors });
     applyStorageState(set, nextState);
   },
 

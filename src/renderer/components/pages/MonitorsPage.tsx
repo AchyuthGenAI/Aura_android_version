@@ -15,9 +15,25 @@ const Field = ({ label, children }: { label: string; children: React.ReactNode }
   </label>
 );
 
+const formatChecked = (ts: number): string => {
+  if (!ts) return "Never";
+  const d = new Date(ts);
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  if (diffMins < 1) return "Just now";
+  if (diffMins < 60) return `${diffMins}m ago`;
+  const diffHrs = Math.floor(diffMins / 60);
+  if (diffHrs < 24) return `${diffHrs}h ago`;
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+};
+
 export const MonitorsPage = (): JSX.Element => {
   const monitors = useAuraStore((state) => state.monitors);
   const saveMonitors = useAuraStore((state) => state.saveMonitors);
+  const startMonitor = useAuraStore((state) => state.startMonitor);
+  const stopMonitor = useAuraStore((state) => state.stopMonitor);
+  const deleteMonitor = useAuraStore((state) => state.deleteMonitor);
   const [draft, setDraft] = useState<PageMonitor>({
     id: "",
     title: "",
@@ -75,15 +91,47 @@ export const MonitorsPage = (): JSX.Element => {
               </div>
             ) : (
               monitors.map((monitor) => (
-                <div key={monitor.id} className="group rounded-[28px] border border-white/[0.06] bg-white/[0.02] p-6 transition-all hover:bg-white/[0.04] hover:border-white/[0.1] hover:shadow-xl hover:shadow-aura-violet/5">
+                <div key={monitor.id} className={`group rounded-[28px] border bg-white/[0.02] p-6 transition-all hover:bg-white/[0.04] hover:shadow-xl hover:shadow-aura-violet/5 ${monitor.status === "triggered" ? "border-amber-500/30 animate-pulse-slow" : "border-white/[0.06] hover:border-white/[0.1]"}`}>
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
                       <p className="truncate text-[16px] font-bold tracking-tight text-aura-text transition-colors group-hover:text-white">{monitor.title}</p>
                       <p className="mt-1 truncate text-[12px] tracking-wide text-aura-violet">{monitor.url}</p>
                     </div>
-                    <StatusPill label={monitor.status} tone={monitor.status === "active" ? "success" : "default"} />
+                    <StatusPill
+                      label={monitor.status}
+                      tone={monitor.status === "active" ? "success" : monitor.status === "triggered" ? "error" : "default"}
+                    />
                   </div>
-                  <p className="mt-4 line-clamp-4 text-[14px] leading-relaxed text-aura-muted">{monitor.condition}</p>
+                  <p className="mt-3 line-clamp-3 text-[13px] leading-relaxed text-aura-muted">{monitor.condition}</p>
+                  <div className="mt-3 flex items-center justify-between">
+                    <p className="text-[11px] text-aura-muted/60">Checked: {formatChecked(monitor.lastCheckedAt)}</p>
+                    {monitor.triggerCount > 0 && (
+                      <p className="text-[11px] text-amber-400/80">{monitor.triggerCount} trigger{monitor.triggerCount !== 1 ? "s" : ""}</p>
+                    )}
+                  </div>
+                  <div className="mt-4 flex gap-2">
+                    {monitor.status === "active" ? (
+                      <button
+                        className="flex-1 rounded-[12px] border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium text-aura-muted transition hover:bg-white/10 hover:text-white"
+                        onClick={() => void stopMonitor(monitor.id)}
+                      >
+                        Pause
+                      </button>
+                    ) : (
+                      <button
+                        className="flex-1 rounded-[12px] border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-400 transition hover:bg-emerald-500/20"
+                        onClick={() => void startMonitor(monitor)}
+                      >
+                        Start
+                      </button>
+                    )}
+                    <button
+                      className="rounded-[12px] border border-red-500/20 bg-red-500/5 px-3 py-1.5 text-xs font-medium text-red-400/70 transition hover:bg-red-500/15 hover:text-red-400"
+                      onClick={() => void deleteMonitor(monitor.id)}
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
               ))
             )}
