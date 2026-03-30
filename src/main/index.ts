@@ -130,11 +130,19 @@ const loadRendererWindow = async (window: BrowserWindow, mode: "app" | "widget")
   });
 };
 
+const DEFAULT_WIDGET_W = 460;
+const DEFAULT_WIDGET_H = 640;
+
 const getWidgetBounds = (store: AuraStore): WidgetBounds => {
   const state = store.getState();
   const workArea = screen.getPrimaryDisplay().workArea;
-  const width = state.widgetExpanded ? state.widgetSize.w : COLLAPSED_WIDGET_SIZE;
-  const height = state.widgetExpanded ? state.widgetSize.h : COLLAPSED_WIDGET_SIZE;
+
+  // Recover from corrupted widgetSize (e.g. saved as collapsed 84x84)
+  const overlayW = state.widgetSize.w >= 200 ? state.widgetSize.w : DEFAULT_WIDGET_W;
+  const overlayH = state.widgetSize.h >= 200 ? state.widgetSize.h : DEFAULT_WIDGET_H;
+
+  const width = state.widgetExpanded ? overlayW : COLLAPSED_WIDGET_SIZE;
+  const height = state.widgetExpanded ? overlayH : COLLAPSED_WIDGET_SIZE;
   const hasSavedPosition = state.widgetPosition.x !== 0 || state.widgetPosition.y !== 0;
   const position = hasSavedPosition
     ? state.widgetPosition
@@ -188,13 +196,24 @@ const ensureWidgetWindowVisible = (): void => {
   widgetWindow.showInactive();
 };
 
-const showWidgetWindow = (store: AuraStore, expand = true): void => {
+const showWidgetWindow = (store: AuraStore, expand = true, forceCenter = false): void => {
   if (!widgetWindow || widgetWindow.isDestroyed()) {
     return;
   }
 
   store.patch({ widgetExpanded: expand });
-  widgetWindow.setBounds(getWidgetBounds(store), true);
+  
+  const bounds = getWidgetBounds(store);
+  if (forceCenter) {
+    const workArea = screen.getPrimaryDisplay().workArea;
+    const centeredX = Math.max(0, workArea.x + Math.floor((workArea.width - bounds.width) / 2));
+    const centeredY = Math.max(0, workArea.y + Math.floor((workArea.height - bounds.height) / 2));
+    bounds.x = centeredX;
+    bounds.y = centeredY;
+    store.patch({ widgetPosition: { x: centeredX, y: centeredY } });
+  }
+
+  widgetWindow.setBounds(bounds, true);
   ensureWidgetWindowVisible();
   widgetWindow.webContents.send(IPC_CHANNELS.appEvent, {
     type: "WIDGET_VISIBILITY",
@@ -268,6 +287,18 @@ const createAppWindows = async (): Promise<void> => {
       }
     };
 
+    // Grant microphone (and camera) permission for the app windows so
+    // navigator.mediaDevices.getUserMedia({ audio: true }) works in the renderer.
+    const ALLOWED_PERMISSIONS = new Set(["media", "microphone", "camera", "mediaKeySystem"]);
+    for (const win of [mainWindow, widgetWindow]) {
+      win.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
+        callback(ALLOWED_PERMISSIONS.has(permission));
+      });
+      win.webContents.session.setPermissionCheckHandler((_wc, permission) => {
+        return ALLOWED_PERMISSIONS.has(permission);
+      });
+    }
+
     const browserController = new BrowserController(mainWindow, browserViewPreloadPath, emit);
     const authService = new AuthService(app.getPath("userData"), store);
     const configManager = new ConfigManager(app.getPath("userData"));
@@ -306,7 +337,7 @@ const createAppWindows = async (): Promise<void> => {
       showMainWindow();
     });
     ipcMain.handle(IPC_CHANNELS.appShowWidgetWindow, async () => {
-      showWidgetWindow(store, true);
+      showWidgetWindow(store, true, true);
     });
     ipcMain.handle(IPC_CHANNELS.appQuit, async () => {
       isQuitting = true;

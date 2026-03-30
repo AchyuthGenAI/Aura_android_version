@@ -78,6 +78,7 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
   const [captionKey, setCaptionKey] = useState(0);
   const [transcript, setTranscript] = useState("");
   const [taskStatus, setTaskStatus] = useState("");
+  const [voiceError, setVoiceError] = useState("");
   const [micStream, setMicStream] = useState<MediaStream | null>(null);
 
   // Refs for stable closures
@@ -147,12 +148,14 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
   // ── Start listening cycle ───────────────────────────────────────────────
 
   const startListeningCycle = useCallback(async () => {
+    console.log("[VoicePanel] startListeningCycle called, inVoiceMode:", inVoiceModeRef.current);
     if (!inVoiceModeRef.current) { transitionPhase("idle"); return; }
 
     await stopClient();
     setCaption("");
     setTranscript("");
     setTaskStatus("");
+    setVoiceError("");
     lastTranscriptRef.current = "";
     transitionPhase("listening");
 
@@ -160,6 +163,7 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
       void (async () => {
         const text = await stopClient();
         const command = text.trim() || lastTranscriptRef.current.trim();
+        console.log("[VoicePanel] Silence detected. Submitting command:", command || "(empty)");
         await submitCommand(command);
       })();
     };
@@ -171,36 +175,56 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
       onError: (e: Error) => {
         console.warn("[VoicePanel] Voice error:", e.message);
         setMicStream(null);
-        if (inVoiceModeRef.current && isActiveRef.current) {
-          setTimeout(() => void startListeningCycleRef.current(), 800);
-        } else {
-          transitionPhase("idle");
-        }
+        inVoiceModeRef.current = false;
+        transitionPhase("idle");
+        setVoiceError(
+          e.message.toLowerCase().includes("permission") || e.message.toLowerCase().includes("denied")
+            ? "Microphone permission denied"
+            : e.message.toLowerCase().includes("api key") || e.message.toLowerCase().includes("401")
+            ? "Invalid Deepgram API key"
+            : e.message.slice(0, 60),
+        );
       },
     };
 
     // Try Deepgram
-    try {
-      const key = dgKeyRef.current;
-      if (key) {
+    const key = dgKeyRef.current;
+    console.log("[VoicePanel] Deepgram key available:", !!key, key ? "(len=" + key.length + ")" : "");
+
+    if (key) {
+      try {
         const client = new DeepgramClient(key, callbacks);
+        console.log("[VoicePanel] Starting DeepgramClient...");
         await client.start();
+        console.log("[VoicePanel] DeepgramClient started successfully, isRunning:", client.isRunning);
         clientRef.current = client;
         setMicStream(client.micStream);
         return;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn("[VoicePanel] Deepgram failed, falling through to WebSpeech:", msg);
+        // Permission denied is fatal — don't silently fall through
+        if (/permission|denied|notallowed/i.test(msg)) {
+          inVoiceModeRef.current = false;
+          transitionPhase("idle");
+          setVoiceError("Microphone permission denied — restart the app and allow mic access.");
+          return;
+        }
       }
-    } catch (e) {
-      console.warn("[VoicePanel] Deepgram failed, using browser speech:", e instanceof Error ? e.message : e);
     }
 
     // WebSpeech fallback
+    console.log("[VoicePanel] Trying WebSpeech fallback...");
     const client = new WebSpeechClient(callbacks);
     if (!client.isSupported()) {
+      console.warn("[VoicePanel] WebSpeech NOT supported in this environment. Voice mode unavailable.");
       transitionPhase("idle");
       inVoiceModeRef.current = false;
+      setVoiceError("Voice not available — add VITE_DEEPGRAM_API_KEY to .env.local");
       return;
     }
     await client.start();
+    console.log("[VoicePanel] WebSpeech client started.");
     clientRef.current = client;
     setMicStream(null);
   }, [stopClient, submitCommand]);
@@ -422,13 +446,19 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
             </div>
           )}
 
-          {/* Idle hint */}
+          {/* Idle hint / error */}
           {phase === "idle" && (
             <div className="flex flex-col items-center gap-1.5 px-4 py-2">
               <p className="text-center text-sm font-semibold text-aura-text/70">Voice Mode</p>
-              <p className="text-center text-[11px] text-aura-muted/60">
-                Tap the mic to talk to Aura hands-free
-              </p>
+              {voiceError ? (
+                <p className="text-center text-[11px] text-red-400/80 leading-relaxed max-w-[240px]">
+                  {voiceError}
+                </p>
+              ) : (
+                <p className="text-center text-[11px] text-aura-muted/60">
+                  Tap the mic to talk to Aura hands-free
+                </p>
+              )}
             </div>
           )}
         </div>

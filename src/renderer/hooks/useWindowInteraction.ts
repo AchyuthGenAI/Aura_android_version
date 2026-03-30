@@ -26,10 +26,10 @@ export const useWindowInteraction = ({ mode, onMove, onComplete, collapsedSize =
       if (targetElement.closest("button") || targetElement.closest("a") || targetElement.closest("input")) {
         return;
       }
-      
+
       e.stopPropagation();
       if (mode === "resize") e.preventDefault();
-      
+
       const target = e.currentTarget;
       target.setPointerCapture(e.pointerId);
 
@@ -37,6 +37,8 @@ export const useWindowInteraction = ({ mode, onMove, onComplete, collapsedSize =
       const initialH = window.innerHeight;
       const initialMouseX = e.screenX;
       const initialMouseY = e.screenY;
+      const minX = (window.screen as any).availLeft || 0;
+      const minY = (window.screen as any).availTop || 0;
       const winX = window.screenX;
       const winY = window.screenY;
 
@@ -61,8 +63,16 @@ export const useWindowInteraction = ({ mode, onMove, onComplete, collapsedSize =
             const deltaY = moveEv.screenY - initialMouseY;
 
             if (mode === "resize") {
-              nextW = Math.max(300, Math.min(initialW + deltaX, 800));
-              nextH = Math.max(400, Math.min(initialH + deltaY, 1000));
+              const minX = (window.screen as any).availLeft || 0;
+              const minY = (window.screen as any).availTop || 0;
+              const screenRight = minX + (window.screen.availWidth || window.innerWidth);
+              const screenBottom = minY + (window.screen.availHeight || window.innerHeight);
+
+              const maxWidth = screenRight - winX;
+              const maxHeight = screenBottom - winY;
+
+              nextW = Math.max(300, Math.min(initialW + deltaX, maxWidth));
+              nextH = Math.max(400, Math.min(initialH + deltaY, maxHeight));
             } else {
               nextX = winX + deltaX;
               nextY = winY + deltaY;
@@ -70,10 +80,18 @@ export const useWindowInteraction = ({ mode, onMove, onComplete, collapsedSize =
                 nextW = collapsedSize;
                 nextH = collapsedSize;
               }
+
+              const minX = (window.screen as any).availLeft || 0;
+              const minY = (window.screen as any).availTop || 0;
+              const maxX = minX + (window.screen.availWidth || window.innerWidth) - nextW;
+              const maxY = minY + (window.screen.availHeight || window.innerHeight) - nextH;
+
+              nextX = Math.max(minX, Math.min(nextX, maxX));
+              nextY = Math.max(minY, Math.min(nextY, maxY));
             }
 
             onMove(nextX, nextY, nextW, nextH);
-            
+
             void window.auraDesktop.widget.setBounds({
               x: nextX,
               y: nextY,

@@ -108,21 +108,38 @@ const WidgetApp = (): JSX.Element => {
     expanded?: boolean;
     size?: { w: number; h: number };
   }): Promise<void> => {
-    const nextPosition = next.position ?? positionRef.current;
+    let nextPosition = next.position ?? positionRef.current;
     const nextExpanded = next.expanded ?? expandedRef.current;
     const nextSize = next.size ?? sizeRef.current;
+    
+    const minX = (window.screen as any).availLeft || 0;
+    const minY = (window.screen as any).availTop || 0;
+    const screenW = window.screen.availWidth || window.innerWidth || 1920;
+    const screenH = window.screen.availHeight || window.innerHeight || 1080;
+
+    const width = nextExpanded ? Math.min(nextSize.w, screenW) : COLLAPSED_SIZE;
+    const height = nextExpanded ? Math.min(nextSize.h, screenH) : COLLAPSED_SIZE;
+
+    const maxX = minX + screenW - width;
+    const maxY = minY + screenH - height;
+
+    nextPosition = {
+      x: Math.max(minX, Math.min(nextPosition.x, maxX)),
+      y: Math.max(minY, Math.min(nextPosition.y, maxY))
+    };
+
     const bounds: WidgetBounds = {
       x: nextPosition.x,
       y: nextPosition.y,
-      width: nextExpanded ? nextSize.w : COLLAPSED_SIZE,
-      height: nextExpanded ? nextSize.h : COLLAPSED_SIZE
+      width,
+      height
     };
 
     await window.auraDesktop.widget.setBounds(bounds);
     await window.auraDesktop.storage.set({
       widgetPosition: nextPosition,
       widgetExpanded: nextExpanded,
-      widgetSize: nextSize
+      widgetSize: { w: width, h: height }
     });
   };
 
