@@ -4,6 +4,7 @@ import { AuraLogoBlob, MessageBubble, StatusPill, ToastViewport } from "@rendere
 import { useAuraStore } from "@renderer/store/useAuraStore";
 import type { AuraStorageShape, WidgetBounds, WidgetVisibilityPayload, OverlayTab } from "@shared/types";
 import { VoicePanel } from "@renderer/components/VoicePanel";
+import { ConfirmModal } from "@renderer/components/ConfirmModal";
 import { useWindowInteraction } from "@renderer/hooks/useWindowInteraction";
 
 const COLLAPSED_SIZE = 84;
@@ -211,6 +212,7 @@ const WidgetApp = (): JSX.Element => {
 
   return (
     <div className="h-full w-full bg-transparent p-2">
+      <ConfirmModal />
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
       <div className="relative flex h-full w-full flex-col overflow-hidden rounded-[32px] border border-white/10 bg-[#12111d] backdrop-blur-[60px]">
         {/* Soft radial background glow inside the container */}
