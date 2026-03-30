@@ -117,8 +117,11 @@ const WidgetApp = (): JSX.Element => {
     const screenW = window.screen.availWidth || window.innerWidth || 1920;
     const screenH = window.screen.availHeight || window.innerHeight || 1080;
 
-    const width = nextExpanded ? Math.min(nextSize.w, screenW) : COLLAPSED_SIZE;
-    const height = nextExpanded ? Math.min(nextSize.h, screenH) : COLLAPSED_SIZE;
+    // Use overlay size when expanded, collapsed constant when collapsed
+    const overlayW = Math.max(nextSize.w, DEFAULT_WIDGET_SIZE.w);
+    const overlayH = Math.max(nextSize.h, DEFAULT_WIDGET_SIZE.h);
+    const width = nextExpanded ? Math.min(overlayW, screenW) : COLLAPSED_SIZE;
+    const height = nextExpanded ? Math.min(overlayH, screenH) : COLLAPSED_SIZE;
 
     const maxX = minX + screenW - width;
     const maxY = minY + screenH - height;
@@ -136,10 +139,11 @@ const WidgetApp = (): JSX.Element => {
     };
 
     await window.auraDesktop.widget.setBounds(bounds);
+    // Always persist the OVERLAY size, never the collapsed size
     await window.auraDesktop.storage.set({
       widgetPosition: nextPosition,
       widgetExpanded: nextExpanded,
-      widgetSize: { w: width, h: height }
+      widgetSize: { w: overlayW, h: overlayH }
     });
   };
 
