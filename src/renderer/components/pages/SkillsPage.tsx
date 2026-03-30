@@ -1,12 +1,14 @@
 import { useEffect } from "react";
 
 import { StatusPill } from "../primitives";
-import { Card, InfoTile, SectionHeading } from "../shared";
+import { SectionHeading } from "../shared";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
 export const SkillsPage = (): JSX.Element => {
   const skills = useAuraStore((state) => state.skills);
   const loadSkills = useAuraStore((state) => state.loadSkills);
+  const setRoute = useAuraStore((state) => state.setRoute);
+  const setInputValue = useAuraStore((state) => state.setInputValue);
 
   useEffect(() => {
     void loadSkills();
@@ -32,7 +34,18 @@ export const SkillsPage = (): JSX.Element => {
                 </div>
                 <StatusPill label={skill.enabled ? "Enabled" : "Disabled"} tone={skill.enabled ? "success" : "default"} />
               </div>
-              <p className="mt-5 text-[14px] leading-relaxed text-aura-muted line-clamp-3">{skill.description}</p>
+              <p className="mt-5 flex-1 text-[14px] leading-relaxed text-aura-muted line-clamp-3">{skill.description}</p>
+              <div className="mt-4">
+                <button
+                  className="rounded-[14px] border border-aura-violet/30 bg-aura-violet/10 px-4 py-1.5 text-xs font-semibold text-aura-violet transition hover:bg-aura-violet/20"
+                  onClick={() => {
+                    setInputValue(`Use the ${skill.name} skill to `);
+                    void setRoute("home");
+                  }}
+                >
+                  Use this skill →
+                </button>
+              </div>
             </div>
           ))}
         </div>

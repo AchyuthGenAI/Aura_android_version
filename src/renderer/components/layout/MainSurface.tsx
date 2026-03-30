@@ -5,6 +5,7 @@ import { HomePage } from "../pages/HomePage";
 import { BrowserPage } from "../pages/BrowserPage";
 import { MonitorsPage } from "../pages/MonitorsPage";
 import { SkillsPage } from "../pages/SkillsPage";
+import { HistoryPage } from "../pages/HistoryPage";
 import { ProfilePage } from "../pages/ProfilePage";
 import { SettingsPage } from "../pages/SettingsPage";
 
@@ -21,6 +22,7 @@ export const MainSurface = (): JSX.Element => {
         {route === "browser" && <BrowserPage />}
         {route === "monitors" && <MonitorsPage />}
         {route === "skills" && <SkillsPage />}
+        {route === "history" && <HistoryPage />}
         {route === "profile" && <ProfilePage />}
         {route === "settings" && <SettingsPage />}
         </div>
