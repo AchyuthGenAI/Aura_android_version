@@ -5,6 +5,7 @@ import type {
   BrowserLayoutBounds,
   BrowserTabsUpdatedPayload,
   ChatSendRequest,
+  DesktopScreenshotResult,
   ExtensionMessage,
   GatewayStatus,
   OpenClawConfig,
@@ -81,6 +82,15 @@ export interface AuraDesktopApi {
   gateway: {
     getStatus(): Promise<GatewayStatus>;
     restart(): Promise<RuntimeStatus>;
+  };
+  desktop: {
+    screenshot(): Promise<DesktopScreenshotResult>;
+    click(p: { x: number; y: number; button?: string }): Promise<void>;
+    move(p: { x: number; y: number }): Promise<void>;
+    type(p: { text: string }): Promise<void>;
+    key(p: { key: string }): Promise<void>;
+    openApp(p: { target: string }): Promise<void>;
+    getScreenSize(): Promise<{ width: number; height: number }>;
   };
   onAppEvent(listener: (message: ExtensionMessage<unknown>) => void): () => void;
 }

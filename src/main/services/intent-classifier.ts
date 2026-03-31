@@ -10,7 +10,7 @@
 import type { PageContext } from "@shared/types";
 import { completeChat } from "./llm-client";
 
-export type DesktopIntent = "query" | "task" | "navigate" | "autofill" | "monitor";
+export type DesktopIntent = "query" | "task" | "navigate" | "autofill" | "monitor" | "desktop";
 
 export interface DirectAction {
   tool: string;
@@ -42,6 +42,7 @@ const ECOMMERCE_RE = /\b(add\s+to\s+(cart|bag|wishlist)|remove\s+from\s+(cart|ba
 const CONTINUATION_RE = /^(?:then|now|also|next|after\s+that|and\s+then|and\s+also)\s+(?:click|open|go|search|navigate|add|buy|order|checkout|submit|fill|type|scroll|select|press|find|remove|apply|sign|log|proceed|complete|place)\b/i;
 const SUMMARIZE_RE = /\b(summarize|summarise|tldr|tl;dr|tl dr|sum up|give me a summary|brief me|overview of this|what (does|did) this (page|article|site|post) (say|cover|talk about)|key points|main points)\b/i;
 const MONITOR_RE = /\b(monitor|watch this page|track this page|alert me|notify me when|tell me when|let me know when|keep an eye|check this page|check for changes|watch for)\b/i;
+const DESKTOP_RE = /\b(open\s+(notepad|excel|word|vscode|vs\s*code|calculator|paint|cmd|terminal|powershell|file\s*explorer|explorer|chrome|firefox|spotify|discord|slack|steam|task\s*manager)|take\s+(a\s+)?screenshot|screenshot\s+of\s+(the\s+)?screen|click\s+on\s+(the\s+)?(desktop|screen|taskbar|start(\s*menu)?)|type\s+(on\s+)?(the\s+)?(desktop|screen)|move\s+(the\s+)?(mouse|cursor)\s+to|press\s+(windows|win)\s+key|minimize\s+(all|every)|show\s+desktop|desktop\s+(automation|control|takeover))\b/i;
 const AUTOFILL_RE = /\b(fill (this |the |out )?(form|fields?)|autofill|auto-fill|use my (profile|info|details|data)|fill with my (info|details|profile|data)|complete (the |this )?form|fill in (the |this )?form)\b/i;
 
 const OPEN_SITE_ALIASES: Record<string, string> = {
@@ -167,6 +168,9 @@ export function classifyHeuristic(message: string): Classification {
 
   // Monitor
   if (MONITOR_RE.test(trimmed)) return { intent: "monitor", confidence: 0.92 };
+
+  // Desktop automation (open native apps, take screenshots, mouse/keyboard control)
+  if (DESKTOP_RE.test(trimmed)) return { intent: "desktop", confidence: 0.93 };
 
   // Summarize → treat as query (LLM handles it)
   if (SUMMARIZE_RE.test(trimmed)) return { intent: "query", confidence: 0.9 };

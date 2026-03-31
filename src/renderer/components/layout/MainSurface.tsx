@@ -3,6 +3,7 @@ import { useAuraStore } from "@renderer/store/useAuraStore";
 import { AppSidebar } from "./AppSidebar";
 import { HomePage } from "../pages/HomePage";
 import { BrowserPage } from "../pages/BrowserPage";
+import { DesktopPage } from "../pages/DesktopPage";
 import { MonitorsPage } from "../pages/MonitorsPage";
 import { SkillsPage } from "../pages/SkillsPage";
 import { HistoryPage } from "../pages/HistoryPage";
@@ -19,6 +20,7 @@ export const MainSurface = (): JSX.Element => {
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-aura-violet/5 via-transparent to-transparent mix-blend-screen" />
         <div className="relative h-full w-full">
         {route === "home" && <HomePage />}
+        {route === "desktop" && <DesktopPage />}
         {route === "browser" && <BrowserPage />}
         {route === "monitors" && <MonitorsPage />}
         {route === "skills" && <SkillsPage />}

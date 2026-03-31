@@ -42,5 +42,12 @@ export const IPC_CHANNELS = {
   monitorList: "aura:monitor:list",
   skillRun: "aura:skill:run",
   internalBrowserSelection: "aura:internal:browser-selection",
-  appEvent: "aura:event"
+  appEvent: "aura:event",
+  desktopScreenshot: "aura:desktop:screenshot",
+  desktopClick: "aura:desktop:click",
+  desktopMove: "aura:desktop:move",
+  desktopType: "aura:desktop:type",
+  desktopKey: "aura:desktop:key",
+  desktopOpenApp: "aura:desktop:open-app",
+  desktopGetScreenSize: "aura:desktop:get-screen-size",
 } as const;

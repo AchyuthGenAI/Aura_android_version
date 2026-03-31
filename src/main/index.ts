@@ -9,6 +9,7 @@ import type { AuraStorageShape, ExtensionMessage, SkillSummary, WidgetBounds } f
 import { AuthService } from "./services/auth-service";
 import { BrowserController } from "./services/browser-controller";
 import { ConfigManager } from "./services/config-manager";
+import { DesktopController } from "./services/desktop-controller";
 import { GatewayManager } from "./services/gateway-manager";
 import { MonitorManager } from "./services/monitor-manager";
 import { AuraStore } from "./services/store";
@@ -30,6 +31,7 @@ let mainWindow: BrowserWindow | null = null;
 let widgetWindow: BrowserWindow | null = null;
 let activeGatewayManager: GatewayManager | null = null;
 let activeMonitorManager: MonitorManager | null = null;
+let activeDesktopController: DesktopController | null = null;
 let isQuitting = false;
 let isCreatingWindows = false;
 
@@ -318,6 +320,34 @@ const createAppWindows = async (): Promise<void> => {
     );
     activeMonitorManager = new MonitorManager(browserController, store, emit);
     activeGatewayManager.setMonitorManager(activeMonitorManager);
+
+    activeDesktopController = new DesktopController();
+    activeGatewayManager.setDesktopController(activeDesktopController);
+
+    // ── Desktop IPC handlers ───────────────────────────────────────────────
+    ipcMain.handle(IPC_CHANNELS.desktopScreenshot, async () =>
+      activeDesktopController!.captureScreenshot()
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopClick, async (_e, p: { x: number; y: number; button?: string }) =>
+      activeDesktopController!.click(p.x, p.y, (p.button ?? "left") as "left" | "right" | "middle")
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopMove, async (_e, p: { x: number; y: number }) =>
+      activeDesktopController!.moveMouse(p.x, p.y)
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopType, async (_e, p: { text: string }) =>
+      activeDesktopController!.typeText(p.text)
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopKey, async (_e, p: { key: string }) =>
+      activeDesktopController!.pressKey(p.key)
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopOpenApp, async (_e, p: { target: string }) =>
+      p.target.startsWith("http")
+        ? activeDesktopController!.openUrl(p.target)
+        : activeDesktopController!.openApp(p.target)
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopGetScreenSize, async () =>
+      activeDesktopController!.getScreenSize()
+    );
 
     ipcMain.handle(IPC_CHANNELS.authGetState, async () => authService.getState());
     ipcMain.handle(IPC_CHANNELS.authSignIn, async (_event, payload: { email: string; password: string }) =>

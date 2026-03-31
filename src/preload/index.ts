@@ -69,6 +69,15 @@ const api: AuraDesktopApi = {
     getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.gatewayGetStatus),
     restart: () => ipcRenderer.invoke(IPC_CHANNELS.gatewayRestart),
   },
+  desktop: {
+    screenshot: () => ipcRenderer.invoke(IPC_CHANNELS.desktopScreenshot),
+    click: (p: { x: number; y: number; button?: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopClick, p),
+    move: (p: { x: number; y: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopMove, p),
+    type: (p: { text: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopType, p),
+    key: (p: { key: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopKey, p),
+    openApp: (p: { target: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopOpenApp, p),
+    getScreenSize: () => ipcRenderer.invoke(IPC_CHANNELS.desktopGetScreenSize),
+  },
   onAppEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, message: Parameters<typeof listener>[0]) => {
       listener(message);

@@ -25,6 +25,7 @@ import { AuraStore } from "./store";
 import { classify, type Classification } from "./intent-classifier";
 import { TaskExecutor } from "./task-executor";
 import type { MonitorManager } from "./monitor-manager";
+import type { DesktopController } from "./desktop-controller";
 
 import WebSocket from "ws";
 import { completeChat, resolveGroqApiKey, streamChat } from "./llm-client";
@@ -74,9 +75,14 @@ export class GatewayManager {
   private readonly pendingConfirmations = new Map<string, { resolve: (v: boolean) => void; timeout: NodeJS.Timeout }>();
 
   private monitorManager: MonitorManager | null = null;
+  private desktopController: DesktopController | null = null;
 
   setMonitorManager(mm: MonitorManager): void {
     this.monitorManager = mm;
+  }
+
+  setDesktopController(dc: DesktopController): void {
+    this.desktopController = dc;
   }
 
   constructor(
@@ -276,6 +282,10 @@ export class GatewayManager {
 
     if (classification.intent === "monitor" && this.monitorManager) {
       return this.handleMonitorIntent(messageId, taskId, session, request, pageContext, apiKey);
+    }
+
+    if (classification.intent === "desktop" && this.desktopController) {
+      return this.handleDesktopIntent(messageId, taskId, session, request);
     }
 
     // task, autofill, or navigate-without-directAction → plan and execute
@@ -552,6 +562,128 @@ export class GatewayManager {
     this.setStatus({ ...this.runtimeStatus, phase: "ready", message: "OpenClaw Gateway is running." });
 
     return { messageId, taskId };
+  }
+
+  // ── Desktop intent: plan and execute native desktop automation ───────────
+
+  private async handleDesktopIntent(
+    messageId: string,
+    taskId: string,
+    session: AuraSession,
+    request: ChatSendRequest,
+  ): Promise<{ messageId: string; taskId: string }> {
+    // When OpenClaw is connected, let the agent handle it via system_run
+    if (this.connected) {
+      return this.handleQueryIntent(messageId, taskId, session, request, null);
+    }
+
+    const planningTask: AuraTask = {
+      id: taskId,
+      command: request.message,
+      status: "planning",
+      createdAt: now(),
+      updatedAt: now(),
+      retries: 0,
+      steps: [],
+    };
+    this.emitProgress(planningTask, { type: "status", statusText: "Planning desktop task..." });
+
+    let steps: TaskStep[];
+    try {
+      steps = await this.planDesktopTask(request.message);
+    } catch {
+      console.warn("[GatewayManager] Desktop planning failed, falling back to chat.");
+      return this.handleQueryIntent(messageId, taskId, session, request, null);
+    }
+
+    if (steps.length === 0) {
+      return this.handleQueryIntent(messageId, taskId, session, request, null);
+    }
+
+    const task: AuraTask = {
+      id: taskId,
+      command: request.message,
+      status: "running",
+      createdAt: now(),
+      updatedAt: now(),
+      retries: 0,
+      steps,
+    };
+
+    this.emitProgress(task, { type: "status", statusText: "Running desktop task..." });
+
+    try {
+      const profile = this.store.getState().profile;
+      const result = await this.taskExecutor.execute({
+        task,
+        browserController: this.browserController,
+        desktopController: this.desktopController ?? undefined,
+        emit: this.emit,
+        confirmStep: (payload) => this.confirmStep(payload),
+        profile,
+      });
+
+      this.handleChatSuccess(messageId, taskId, task, session, request, result || "Desktop task complete.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.handleChatError(messageId, taskId, task, session, message);
+    }
+
+    this.activeMessageId = null;
+    this.activeTaskId = null;
+    return { messageId, taskId };
+  }
+
+  private async planDesktopTask(userMessage: string): Promise<TaskStep[]> {
+    const groqConfig = this.configManager.readConfig();
+    const apiKey = resolveGroqApiKey(groqConfig.providers?.groq?.apiKey);
+    if (!apiKey) throw new Error("No API key for desktop planning.");
+
+    const systemPrompt = [
+      "You are a Windows desktop automation planner for Aura Desktop.",
+      "Given the user request, output a JSON array of steps to automate the task.",
+      "",
+      'Each step: { "tool": <tool>, "params": {...}, "description": "one line", "requiresConfirmation": true/false }',
+      "",
+      "Available tools:",
+      '  desktop_screenshot: {} — capture full screen',
+      '  desktop_open_app: { "target": "notepad.exe"|"calc.exe"|"explorer.exe"|"code.exe"|"chrome.exe"|etc } — requiresConfirmation:true',
+      '  desktop_click: { "x": number, "y": number, "button": "left"|"right" } — requiresConfirmation:true',
+      '  desktop_type: { "text": "..." } — requiresConfirmation:true',
+      '  desktop_key: { "key": "enter"|"tab"|"escape"|"ctrl+c"|"ctrl+v"|"ctrl+s"|"win"|"alt+f4"|etc } — requiresConfirmation:true',
+      '  desktop_move: { "x": number, "y": number }',
+      '  wait: { "ms": number }',
+      "",
+      "Rules:",
+      "- requiresConfirmation MUST be true for: desktop_open_app, desktop_click, desktop_type, desktop_key",
+      "- For opening Windows apps use their .exe name (notepad.exe, calc.exe, mspaint.exe, code.exe)",
+      "- Take a screenshot first if you need to see the current state",
+      "- Output ONLY the raw JSON array, no markdown fences",
+    ].join("\n");
+
+    const result = await completeChat(apiKey, [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ], { model: "llama-3.1-8b-instant", maxTokens: 600, temperature: 0.1 });
+
+    const jsonMatch = result.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error("Desktop planner returned no JSON.");
+
+    const raw = JSON.parse(jsonMatch[0]) as Array<{
+      tool: string;
+      params: Record<string, unknown>;
+      description: string;
+      requiresConfirmation?: boolean;
+    }>;
+
+    return raw.map((s, i) => ({
+      index: i,
+      tool: s.tool as TaskStep["tool"],
+      description: s.description,
+      status: "pending" as const,
+      params: s.params,
+      requiresConfirmation: s.requiresConfirmation ?? true,
+    }));
   }
 
   // ── Task planner: Groq LLM generates step array ──────────────────────────

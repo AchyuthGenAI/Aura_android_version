@@ -1,5 +1,5 @@
 export type ThemeMode = "dark" | "light";
-export type AppRoute = "home" | "browser" | "monitors" | "skills" | "profile" | "settings" | "history";
+export type AppRoute = "home" | "browser" | "monitors" | "skills" | "profile" | "settings" | "history" | "desktop";
 export type OverlayTab = "voice" | "chat" | "history" | "tools" | "settings";
 export type ToolsSubTab = "monitors" | "macros" | "quick";
 
@@ -146,7 +146,20 @@ export type ToolName =
   | "select"
   | "hover"
   | "drag_drop"
-  | "ask_user";
+  | "ask_user"
+  | "desktop_screenshot"
+  | "desktop_click"
+  | "desktop_type"
+  | "desktop_key"
+  | "desktop_open_app"
+  | "desktop_move";
+
+export interface DesktopScreenshotResult {
+  dataUrl: string;
+  width: number;
+  height: number;
+  capturedAt: number;
+}
 
 export type TaskStatus = "pending" | "planning" | "running" | "done" | "error" | "cancelled";
 export type TaskStepStatus = "pending" | "running" | "done" | "error";

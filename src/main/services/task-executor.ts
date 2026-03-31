@@ -12,12 +12,14 @@ import type {
   UserProfile,
 } from "@shared/types";
 import type { BrowserController } from "./browser-controller";
+import type { DesktopController } from "./desktop-controller";
 
 const now = (): number => Date.now();
 
 interface ExecuteOptions {
   task: AuraTask;
   browserController: BrowserController;
+  desktopController?: DesktopController;
   emit: (message: ExtensionMessage<unknown>) => void;
   confirmStep: (payload: Omit<ConfirmActionPayload, "requestId">) => Promise<boolean>;
   profile?: UserProfile;
@@ -27,7 +29,7 @@ export class TaskExecutor {
   private runningTasks = new Map<string, { cancelled: boolean }>();
 
   async execute(options: ExecuteOptions): Promise<string> {
-    const { task, browserController, emit, confirmStep, profile } = options;
+    const { task, browserController, desktopController, emit, confirmStep, profile } = options;
     const state = { cancelled: false };
     this.runningTasks.set(task.id, state);
 
@@ -91,7 +93,7 @@ export class TaskExecutor {
         }
 
         try {
-          const output = await this.executeStep(step, browserController, profile);
+          const output = await this.executeStep(step, browserController, profile, desktopController);
           step.status = "done";
           step.completedAt = now();
           step.output = output;
@@ -155,6 +157,7 @@ export class TaskExecutor {
     step: TaskStep,
     bc: BrowserController,
     profile?: UserProfile,
+    dc?: DesktopController,
   ): Promise<unknown> {
     const p = step.params;
 
@@ -254,6 +257,57 @@ export class TaskExecutor {
       case "ask_user": {
         // This is handled by the confirmStep mechanism
         return "Waiting for user input...";
+      }
+
+      case "desktop_screenshot": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const result = await dc.captureScreenshot();
+        return `Desktop screenshot captured (${result.width}x${result.height})`;
+      }
+
+      case "desktop_click": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const x = Number(p.x ?? 0);
+        const y = Number(p.y ?? 0);
+        const button = String(p.button ?? "left") as "left" | "right" | "middle";
+        await dc.click(x, y, button);
+        await delay(200);
+        return `Clicked desktop at (${x}, ${y})`;
+      }
+
+      case "desktop_type": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const text = String(p.text ?? "");
+        await dc.typeText(text);
+        return `Typed "${text}" on desktop`;
+      }
+
+      case "desktop_key": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const key = String(p.key ?? "");
+        await dc.pressKey(key);
+        return `Pressed key: ${key}`;
+      }
+
+      case "desktop_open_app": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const target = String(p.target ?? p.app ?? p.path ?? "");
+        if (!target) throw new Error("No target for desktop_open_app.");
+        if (target.startsWith("http")) {
+          await dc.openUrl(target);
+        } else {
+          await dc.openApp(target);
+        }
+        await delay(1500);
+        return `Opened: ${target}`;
+      }
+
+      case "desktop_move": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const x = Number(p.x ?? 0);
+        const y = Number(p.y ?? 0);
+        await dc.moveMouse(x, y);
+        return `Moved mouse to (${x}, ${y})`;
       }
 
       default:

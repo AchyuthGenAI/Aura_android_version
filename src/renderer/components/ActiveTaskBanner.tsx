@@ -19,6 +19,12 @@ const TOOL_ICONS: Record<string, string> = {
   hover: "⊙",
   drag_drop: "⇱",
   ask_user: "?",
+  desktop_screenshot: "⊡",
+  desktop_click: "⊛",
+  desktop_type: "⌨",
+  desktop_key: "⌥",
+  desktop_open_app: "▶",
+  desktop_move: "⊹",
 };
 
 const formatDuration = (ms: number): string => {
