@@ -4,6 +4,7 @@ import { ActiveTaskBanner } from "../ActiveTaskBanner";
 import { ChatPanel } from "../ChatPanel";
 import { InputBar } from "../InputBar";
 import { SessionSidebar } from "../SessionSidebar";
+import { TaskActionFeed } from "../TaskActionFeed";
 import { VoicePanel } from "../VoicePanel";
 
 export const HomePage = (): JSX.Element => {
@@ -22,6 +23,7 @@ export const HomePage = (): JSX.Element => {
       {/* Main chat column */}
       <div className="flex min-w-0 flex-1 flex-col gap-3 overflow-hidden">
         <ActiveTaskBanner />
+        <TaskActionFeed />
         <div className="min-h-0 flex-1 overflow-hidden">
           <ChatPanel />
         </div>

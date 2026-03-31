@@ -46,6 +46,14 @@ type EventFrame = { type: "event"; event: string; payload: unknown; seq?: number
 type ResponseFrame = { type: "res"; id: string; ok: boolean; payload?: unknown; error?: { code?: string; message?: string } };
 
 // chat event payload shape from the gateway protocol (v3)
+interface ChatContentBlock {
+  type: string;
+  text?: string;
+  name?: string;
+  id?: string;
+  input?: Record<string, unknown>;
+}
+
 interface ChatEventPayload {
   runId?: string;
   sessionKey?: string;
@@ -53,7 +61,7 @@ interface ChatEventPayload {
   state: "delta" | "final" | "aborted" | "error";
   message?: {
     text?: string;
-    content?: string | Array<{ type: string; text?: string }>;
+    content?: string | ChatContentBlock[];
   };
   errorMessage?: string;
 }
@@ -73,6 +81,19 @@ function extractTextFromChatPayload(payload: ChatEventPayload): string {
   // Flat string content
   if (typeof msg.content === "string") return msg.content;
   return "";
+}
+
+/** Extract tool_use blocks from a delta/final content array. */
+function extractToolUseBlocks(payload: ChatEventPayload): Array<{ tool: string; toolUseId?: string; input: Record<string, unknown> }> {
+  const msg = payload.message;
+  if (!msg || !Array.isArray(msg.content)) return [];
+  return msg.content
+    .filter((b): b is ChatContentBlock & { name: string } => b.type === "tool_use" && typeof b.name === "string")
+    .map((b) => ({
+      tool: b.name,
+      toolUseId: b.id,
+      input: b.input ?? {},
+    }));
 }
 
 export class GatewayManager {
@@ -206,32 +227,41 @@ export class GatewayManager {
       message: "Starting OpenClaw Gateway process.",
     });
 
-    // Try starting the Gateway — if it fails, Aura still works via direct Groq LLM
+    // Try starting the Gateway — if it fails, Aura still works via direct Groq LLM.
+    // Hard deadline: 15s total to avoid long SplashScreen hangs.
+    const BOOTSTRAP_DEADLINE_MS = 15_000;
     try {
-      console.log(`[GatewayManager] Probing port ${port}...`);
-      const alreadyUp = await this.probePort(port);
-      if (alreadyUp) {
-        console.log(`[GatewayManager] Port ${port} already in use — connecting to existing gateway.`);
-        await this.connectWebSocket();
-      } else {
-        console.log(`[GatewayManager] Port ${port} free — spawning gateway process...`);
-        // Ensure Groq auth profile is written before starting so the agent has API access
-        this.configManager.ensureGroqAuthProfile();
-        await this.startGatewayProcess();
-        // startGatewayProcess resolves when the process prints a ready signal or times out,
-        // but the TCP port may still not be open. Poll until it accepts connections.
-        console.log("[GatewayManager] Waiting for gateway port to become available...");
-        const portOpen = await this.waitForPort(port, 20_000);
-        if (!portOpen) {
-          throw new Error(`Gateway process started but port ${port} never opened within 20s`);
-        }
-        console.log(`[GatewayManager] Port ${port} is open — connecting WebSocket...`);
-        await this.connectWebSocket();
-      }
-      console.log(`[GatewayManager] WebSocket connected! connected=${this.connected}`);
+      await Promise.race([
+        (async () => {
+          console.log(`[GatewayManager] Probing port ${port}...`);
+          const alreadyUp = await this.probePort(port);
+          if (alreadyUp) {
+            console.log(`[GatewayManager] Port ${port} already in use — connecting to existing gateway.`);
+            await this.connectWebSocket();
+          } else {
+            console.log(`[GatewayManager] Port ${port} free — spawning gateway process...`);
+            // Ensure Groq auth profile is written before starting so the agent has API access
+            this.configManager.ensureGroqAuthProfile();
+            await this.startGatewayProcess();
+            // startGatewayProcess resolves when the process prints a ready signal or times out,
+            // but the TCP port may still not be open. Poll until it accepts connections.
+            console.log("[GatewayManager] Waiting for gateway port to become available...");
+            const portOpen = await this.waitForPort(port, 8_000);
+            if (!portOpen) {
+              throw new Error(`Gateway process started but port ${port} never opened within 8s`);
+            }
+            console.log(`[GatewayManager] Port ${port} is open — connecting WebSocket...`);
+            await this.connectWebSocket();
+          }
+          console.log(`[GatewayManager] WebSocket connected! connected=${this.connected}`);
+        })(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("Gateway bootstrap deadline exceeded (15s)")), BOOTSTRAP_DEADLINE_MS)
+        ),
+      ]);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      console.warn("[GatewayManager] Gateway failed to start (chat will use direct Groq):", detail);
+      console.warn("[GatewayManager] Gateway didn't start in time — using direct Groq mode:", detail);
       // Don't block — mark as ready anyway since direct LLM works
     }
 
@@ -1028,13 +1058,13 @@ export class GatewayManager {
         }
       });
 
-      // Timeout: if gateway doesn't signal ready in 25s, resolve anyway and try connecting
+      // Timeout: if gateway doesn't signal ready in 10s, resolve anyway and try connecting
       setTimeout(() => {
         if (!resolved) {
           resolved = true;
           resolve();
         }
-      }, 25_000);
+      }, 10_000);
     });
   }
 
@@ -1244,6 +1274,7 @@ export class GatewayManager {
     const state = payload.state;
 
     if (state === "delta") {
+      // Extract and emit text tokens
       const text = extractTextFromChatPayload(payload);
       if (text) {
         this.streamedText += text;
@@ -1252,11 +1283,46 @@ export class GatewayManager {
           payload: { messageId: this.activeMessageId, token: text },
         });
       }
+
+      // Extract and emit tool_use blocks for live automation visualization
+      const toolBlocks = extractToolUseBlocks(payload);
+      for (const block of toolBlocks) {
+        const action = typeof block.input?.action === "string" ? block.input.action : "execute";
+        this.emit({
+          type: "TOOL_USE",
+          payload: {
+            tool: block.tool,
+            toolUseId: block.toolUseId,
+            action,
+            params: block.input,
+            status: "running",
+            timestamp: now(),
+          },
+        });
+      }
       return;
     }
 
     if (state === "final") {
       const finalText = extractTextFromChatPayload(payload) || this.streamedText;
+
+      // Emit final tool_use blocks (e.g. tool results)
+      const toolBlocks = extractToolUseBlocks(payload);
+      for (const block of toolBlocks) {
+        const action = typeof block.input?.action === "string" ? block.input.action : "execute";
+        this.emit({
+          type: "TOOL_USE",
+          payload: {
+            tool: block.tool,
+            toolUseId: block.toolUseId,
+            action,
+            params: block.input,
+            status: "done",
+            timestamp: now(),
+          },
+        });
+      }
+
       if (this.chatDoneResolve) {
         const resolve = this.chatDoneResolve;
         this.chatDoneResolve = null;

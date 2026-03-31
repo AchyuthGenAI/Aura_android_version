@@ -10,6 +10,7 @@ import http from "node:http";
 
 const GROQ_BASE_URL = "https://api.groq.com/openai/v1";
 const DEFAULT_MODEL = "llama-3.3-70b-versatile";
+const FALLBACK_MODEL = "llama-3.1-8b-instant";
 const REQUEST_TIMEOUT_MS = 60_000;
 
 // Pre-bundled Groq key — Aura provides all services out of the box
@@ -32,8 +33,7 @@ export interface LlmStreamCallbacks {
 export function resolveGroqApiKey(configApiKey?: string): string {
   // 1. Env vars (main process sees .env.local via loadEnvFiles)
   const envKey = process.env.GROQ_API_KEY
-    || process.env.VITE_LLM_API_KEY
-    || process.env.PLASMO_PUBLIC_LLM_API_KEY;
+    || process.env.VITE_LLM_API_KEY;
   if (envKey) return envKey;
   // 2. Config file key
   if (configApiKey && configApiKey.startsWith("gsk_") && configApiKey.length > 24) return configApiKey;
@@ -91,7 +91,14 @@ export function streamChat(
           if (res.statusCode === 401) {
             callbacks.onError(new Error(`Groq API key is invalid. ${detail}`));
           } else if (res.statusCode === 429) {
-            callbacks.onError(new Error(`Groq rate limit exceeded. Wait a moment and try again. ${detail}`));
+            // Auto-fallback to smaller model on rate limit
+            const currentModel = options?.model ?? DEFAULT_MODEL;
+            if (currentModel !== FALLBACK_MODEL) {
+              console.warn(`[LLM] Rate limited on ${currentModel} — retrying with ${FALLBACK_MODEL}`);
+              streamChat(apiKey, messages, callbacks, { ...options, model: FALLBACK_MODEL });
+            } else {
+              callbacks.onError(new Error(`Groq rate limit exceeded on all models. Wait a moment and try again. ${detail}`));
+            }
           } else {
             callbacks.onError(new Error(`Groq request failed (${res.statusCode}): ${detail}`));
           }

@@ -357,7 +357,8 @@ export type MessageType =
   | "CONTEXT_MENU_ACTION"
   | "RUNTIME_STATUS"
   | "BOOTSTRAP_STATUS"
-  | "WIDGET_VISIBILITY";
+  | "WIDGET_VISIBILITY"
+  | "TOOL_USE";
 
 export interface ExtensionMessage<T = unknown> {
   type: MessageType;
@@ -433,6 +434,16 @@ export interface WidgetVisibilityPayload {
 export interface ContextMenuActionPayload {
   action: "ask" | "summarize" | "explain" | "translate";
   text: string;
+}
+
+export interface ToolUsePayload {
+  tool: string;
+  toolUseId?: string;
+  action: string;
+  params: Record<string, unknown>;
+  status: "running" | "done" | "error";
+  output?: string;
+  timestamp: number;
 }
 
 export interface BrowserNavigationRequest {

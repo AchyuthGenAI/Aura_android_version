@@ -28,6 +28,7 @@ import type {
   TaskProgressPayload,
   ToastNotice,
   ToolsSubTab,
+  ToolUsePayload,
   UserProfile
 } from "@shared/types";
 
@@ -133,9 +134,11 @@ type AuraState = {
   macros: AuraMacro[];
   skills: SkillSummary[];
   toasts: ToastNotice[];
+  actionFeed: ToolUsePayload[];
   hydrate: () => Promise<void>;
   handleAppEvent: (message: ExtensionMessage<unknown>) => void;
   dismissToast: (id: string) => void;
+  clearActionFeed: () => void;
   setInputValue: (value: string) => void;
   setRoute: (route: AppRoute) => Promise<void>;
   setOverlayVisible: (value: boolean) => Promise<void>;
@@ -216,7 +219,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   },
   settings: {
     theme: "dark",
-    voiceEnabled: true,
+    voiceEnabled: false,
     modelPreset: "managed",
     advancedMode: false,
     privacyMode: "standard",
@@ -254,6 +257,9 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   macros: [],
   skills: [],
   toasts: [],
+  actionFeed: [],
+
+  clearActionFeed: () => set({ actionFeed: [] }),
 
   hydrate: async () => {
     set({ isHydrating: true });
@@ -434,6 +440,24 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       );
       set({ monitors });
       void window.auraDesktop.storage.set({ monitors });
+      return;
+    }
+
+    if (message.type === "TOOL_USE") {
+      const payload = message.payload as ToolUsePayload;
+      const feed = [...get().actionFeed, payload];
+      // Keep feed to max 50 entries
+      const trimmed = feed.length > 50 ? feed.slice(feed.length - 50) : feed;
+      const updates: Partial<AuraState> = { actionFeed: trimmed };
+
+      // Auto-navigate browser when OpenClaw uses the browser tool
+      if (payload.tool === "browser" && payload.action === "navigate" && typeof payload.params?.url === "string") {
+        void get().browserNavigate(payload.params.url as string);
+        updates.route = "browser";
+      }
+
+      set(updates);
+      return;
     }
   },
 

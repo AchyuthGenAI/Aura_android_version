@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "../shared";
+import { TaskActionFeed } from "../TaskActionFeed";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
 const SelectionBubble = (): JSX.Element | null => {
@@ -140,6 +141,7 @@ export const BrowserPage = (): JSX.Element => {
   const refreshPageContext = useAuraStore((state) => state.refreshPageContext);
   const route = useAuraStore((state) => state.route);
   const activeBrowserTabId = useAuraStore((state) => state.activeBrowserTabId);
+  const actionFeed = useAuraStore((state) => state.actionFeed);
 
   useEffect(() => {
     if (route !== "browser") {
@@ -181,7 +183,14 @@ export const BrowserPage = (): JSX.Element => {
       <div className="relative flex-1 bg-white">
         <div ref={hostRef} className="absolute inset-0" />
         <SelectionBubble />
+        {/* Floating automation feed overlay — visible when tasks are running */}
+        {actionFeed.length > 0 && (
+          <div className="absolute bottom-4 left-4 z-20 w-[340px] max-w-[50%]">
+            <TaskActionFeed />
+          </div>
+        )}
       </div>
     </div>
   );
 };
+
