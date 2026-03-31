@@ -22,6 +22,9 @@ Session storage       ✅  Sessions saved + sidebar sidebar
 BrowserController     ✅  Multi-tab, DOM actions, page context, screenshots
 IPC plumbing          ✅  50+ channels wired
 Main window chat UI   ✅  HomePage now renders ChatPanel + InputBar + ActiveTaskBanner + SessionSidebar
+OpenClaw integration  ✅  chat.send routing wired — when gateway connected, ALL chat/task intents
+                          route through OpenClaw agent (52+ skills, browser, web search, memory)
+                          Direct Groq streaming retained as offline fallback
 
 Task execution        ✅  Phase 1 complete — classify → plan → execute → confirm
 Intent classifier     ✅  Heuristic + LLM fallback (1500ms timeout)

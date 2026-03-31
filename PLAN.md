@@ -10,18 +10,19 @@
 
 **Primary goal:** Aura Desktop is a normie-friendly UI/UX wrapper for OpenClaw. Users open it, type or speak anything they want done, and Aura does it — zero setup, zero configuration. All API keys are pre-bundled.
 
-**Current state (as of 2026-03-30):**
-All 5 phases are functionally complete. The app can chat, execute browser tasks, confirm dangerous steps, show history, monitor pages, and use voice. The focus now is **quality, testing, and polish**.
+**Current state (as of 2026-03-31):**
+All 5 phases are functionally complete AND OpenClaw is now fully integrated as the chat/task backend. When the OpenClaw gateway is running, all user messages are routed through OpenClaw's `chat.send` API, giving the agent access to 52+ skills, browser automation, web search, memory, and multi-step planning. Direct Groq is retained as the offline fallback.
 
 **What's built and working:**
 - Build pipeline (npm run build — clean)
 - Auth (Firebase email/password + Google shell)
 - Onboarding screens (auth → consent → profile, skippable)
-- Groq streaming chat (direct API, bypasses gateway)
+- **OpenClaw gateway integration** — chat.send routing, delta streaming, runId tracking for abort
+- Groq direct streaming (fallback when OpenClaw not running)
 - BrowserController (multi-tab BrowserView, DOM actions, page context, screenshots)
 - Voice mode (Deepgram STT/TTS + AuraFace blob + WebSpeech fallback)
-  - **NOTE:** Voice was broken until 2026-03-30 fix — see "Voice Mode Fix" section below
-- All 7 routes (home, browser, monitors, skills, profile, settings, history)
+- All 7 routes (home=chat, browser, monitors, skills, profile, settings, history)
+- Main window chat UI (ChatPanel + InputBar + ActiveTaskBanner + SessionSidebar)
 - Session history storage + HistoryPage
 - IPC plumbing (50+ channels)
 - Zustand store with persistence
@@ -46,11 +47,37 @@ GatewayManager.sendChat()
   │     ├─ Heuristic regex (< 10ms)
   │     └─ LLM fallback: completeChat(llama-3.1-8b-instant, 1500ms timeout)
   │
-  ├─ 'query'     → streamViaGroq() → LLM_TOKEN/LLM_DONE events → chat thread
-  ├─ 'navigate'  → directAction → TaskExecutor.executeStep() → done
-  ├─ 'task'      → planTask() → TaskExecutor.execute() → step-by-step
-  ├─ 'autofill'  → planTask() → TaskExecutor.execute() → fill + confirm submit
+  ├─ 'query'     ─┐
+  ├─ 'navigate'  ─┤ (when OpenClaw connected)
+  ├─ 'task'      ─┤──→ streamViaOpenClaw() → chat.send RPC → OpenClaw agent
+  ├─ 'autofill'  ─┘    (52+ skills, browser tools, web search, memory, multi-step)
+  │
+  ├─ (when OpenClaw NOT connected — fallback paths):
+  │    'query'    → streamViaGroq() → LLM_TOKEN/LLM_DONE events → chat thread
+  │    'navigate' → directAction → TaskExecutor.executeStep() → done
+  │    'task'     → planTask() → TaskExecutor.execute() → step-by-step
+  │
+  ├─ 'navigate'  → directAction → TaskExecutor.executeStep() (always local for speed)
   └─ 'monitor'   → MonitorManager.scheduleMonitor() → background polling
+```
+
+### OpenClaw Chat Streaming Path (when connected)
+```
+streamViaOpenClaw(messageId, message, "main")
+  │
+  ├─ sets chatDoneResolve / chatDoneReject
+  ├─ request("chat.send", { sessionKey:"main", message, idempotencyKey })
+  │
+  ├─ ← res: { runId:"abc-123" }  → activeRunId stored (enables chat.abort)
+  │
+  ├─ ← event: { type:"event", event:"chat", payload:{ state:"delta", message:{text:"..."} } }
+  │   └─ handleChatStreamEvent() → emit LLM_TOKEN { messageId, token }
+  │
+  ├─ (more deltas...)
+  │
+  └─ ← event: { state:"final", message:{text:"...complete..."} }
+      └─ handleChatStreamEvent() → chatDoneResolve(fullText)
+          └─ handleChatSuccess() → emit LLM_DONE { messageId, fullText }
 ```
 
 ### IPC event flow (main → renderer):
@@ -119,6 +146,19 @@ This sends `Sec-WebSocket-Protocol: token, <key>` which is Deepgram's documented
 ---
 
 ## Next Work Items
+
+### 0. OpenClaw Integration — Demo Test (CRITICAL)
+After restarting dev server, verify the full OpenClaw integration works:
+1. App starts → SplashScreen → bootstrap → status shows "OpenClaw Gateway is running."
+2. Status dot in sidebar should be green/READY
+3. Type any message → console shows `[GatewayManager] connected=true → routing via OpenClaw`
+4. Response streams back with delta tokens (same UX as before, now powered by OpenClaw agent)
+5. Ask "search for latest AI news" → OpenClaw uses web search skill
+6. Ask "go to google.com" → OpenClaw navigates the built-in browser
+7. Say "set a monitor for price drops on amazon" → OpenClaw creates a PageMonitor
+
+If gateway doesn't start: check `GROQ_API_KEY` is being passed (it's injected from `VITE_LLM_API_KEY`).
+If `connected` stays false: check bootstrap logs in DevTools → look for `[GatewayManager]` entries.
 
 ### 1. Voice Mode Verification (HIGH)
 All four voice bugs are fixed. Test the full loop after restarting dev server:
