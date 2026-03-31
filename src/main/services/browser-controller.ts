@@ -338,6 +338,62 @@ export class BrowserController {
     return tab.view.webContents.executeJavaScript(buildDomActionScript(request));
   }
 
+  async highlightElement(selector: string): Promise<void> {
+    const tab = this.getActiveTab();
+    if (!tab || !selector) {
+      return;
+    }
+
+    const script = `
+      (() => {
+        try {
+          const el = document.querySelector(${JSON.stringify(selector)});
+          if (!el) return;
+          const rect = el.getBoundingClientRect();
+          const highlight = document.createElement('div');
+          
+          Object.assign(highlight.style, {
+            position: 'absolute',
+            left: (window.scrollX + rect.left - 4) + 'px',
+            top: (window.scrollY + rect.top - 4) + 'px',
+            width: (rect.width + 8) + 'px',
+            height: (rect.height + 8) + 'px',
+            backgroundColor: 'rgba(245, 158, 11, 0.2)', // amber-500/20
+            border: '2px solid rgb(245, 158, 11)', // amber-500
+            borderRadius: '8px',
+            pointerEvents: 'none',
+            zIndex: '2147483647',
+            boxShadow: '0 0 24px rgba(245, 158, 11, 0.6), inset 0 0 12px rgba(245, 158, 11, 0.4)',
+            transition: 'opacity 0.3s ease-in-out, transform 0.3s ease-out'
+          });
+
+          document.body.appendChild(highlight);
+          
+          // Animate pulse
+          let pulsing = true;
+          const pulse = () => {
+            if (!pulsing) return;
+            highlight.style.opacity = highlight.style.opacity === '1' ? '0.5' : '1';
+            setTimeout(pulse, 500);
+          };
+          pulse();
+
+          // Remove after 2 seconds
+          setTimeout(() => {
+            pulsing = false;
+            highlight.style.opacity = '0';
+            highlight.style.transform = 'scale(1.1)';
+            setTimeout(() => highlight.remove(), 300);
+          }, 2000);
+        } catch (e) {
+          // Ignore
+        }
+      })();
+    `;
+
+    tab.view.webContents.executeJavaScript(script).catch(() => {});
+  }
+
   async captureScreenshot(): Promise<string | null> {
     const tab = this.getActiveTab();
     if (!tab) {

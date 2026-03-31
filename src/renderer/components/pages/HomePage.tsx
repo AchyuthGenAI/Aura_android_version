@@ -1,4 +1,6 @@
-import { useAuraStore } from "@renderer/store/useAuraStore";
+import { useAuraStore
+
+ } from "@renderer/store/useAuraStore";
 
 import { ActiveTaskBanner } from "../ActiveTaskBanner";
 import { ChatPanel } from "../ChatPanel";

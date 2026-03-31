@@ -445,7 +445,15 @@ export const useAuraStore = create<AuraState>((set, get) => ({
 
     if (message.type === "TOOL_USE") {
       const payload = message.payload as ToolUsePayload;
-      const feed = [...get().actionFeed, payload];
+      let feed = [...get().actionFeed];
+      
+      const existing = payload.toolUseId ? feed.findIndex((f) => f.toolUseId === payload.toolUseId) : -1;
+      if (existing !== -1) {
+        feed[existing] = { ...feed[existing], ...payload, status: payload.status, output: payload.output ?? feed[existing].output };
+      } else {
+        feed.push(payload);
+      }
+      
       // Keep feed to max 50 entries
       const trimmed = feed.length > 50 ? feed.slice(feed.length - 50) : feed;
       const updates: Partial<AuraState> = { actionFeed: trimmed };

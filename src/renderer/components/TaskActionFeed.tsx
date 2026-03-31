@@ -158,13 +158,28 @@ export const TaskActionFeed: React.FC = () => {
             key={`${entry.toolUseId ?? i}-${entry.timestamp}`}
             className={`task-action-item ${entry.status}`}
           >
-            <span className="task-action-status">{getStatusIcon(entry.status)}</span>
-            <span className="task-action-icon">{getToolIcon(entry.tool)}</span>
-            <div className="task-action-content">
-              <span className="task-action-tool">{TOOL_LABELS[entry.tool] ?? entry.tool}</span>
-              <span className="task-action-desc">{describeAction(entry)}</span>
+            <div className="task-action-item-header flex items-center gap-3">
+              <span className="task-action-status">{getStatusIcon(entry.status)}</span>
+              <span className="task-action-icon text-lg leading-none">{getToolIcon(entry.tool)}</span>
+              <div className="task-action-content flex-1 min-w-0 flex flex-col justify-center">
+                <div className="flex items-center gap-1.5 leading-none mb-0.5">
+                  <span className="task-action-tool text-xs font-semibold text-aura-text">
+                    {TOOL_LABELS[entry.tool] ?? entry.tool}
+                  </span>
+                  <span className="task-action-time text-[10px] text-aura-muted">
+                    {timeAgo(entry.timestamp)}
+                  </span>
+                </div>
+                <span className="task-action-desc text-[11px] text-aura-muted truncate block w-full">
+                  {describeAction(entry)}
+                </span>
+              </div>
             </div>
-            <span className="task-action-time">{timeAgo(entry.timestamp)}</span>
+            {entry.output && entry.status !== "running" && (
+              <div className="task-action-output mt-2 ml-9 mr-2 rounded-lg bg-black/30 border border-white/5 p-2 font-mono text-[10px] text-aura-muted overflow-x-auto whitespace-pre no-scrollbar mb-1 max-h-24 overflow-y-auto">
+                {entry.output}
+              </div>
+            )}
           </div>
         ))}
       </div>

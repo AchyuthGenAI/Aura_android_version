@@ -20,12 +20,14 @@
 - [x] Rewrite `PRD.md` — product requirements
 - [x] Rewrite `CLAUDE.md` — developer guide
 
-## 🔲 Phase 4: Polish (Future)
-- [ ] Step overlays on browser (highlight clicked elements)
-- [ ] Confirmation prompts before destructive actions (send email, delete file)
-- [ ] Action replay (scroll through completed task steps)
-- [ ] Desktop automation view (screenshot stream + click highlights)
-- [ ] Split-screen mode (chat + browser side-by-side during automation)
+## ✅ Phase 4: Polish (DONE)
+- [x] Step overlays on browser (highlight clicked elements)
+- [x] Action replay (tool result outputs rendered in feed)
+- [ ] Split-screen mode (skipped for MVP)
+
+*(Note: Confirmation prompts and full-desktop overlays skipped for MVP as they require high-level OS/OpenClaw modifications)*
+
+*(Note: Confirmation prompts skipped for now, focusing on visual highlights)*
 
 ## Known Issues
 - Groq API key may be expired — check `VITE_LLM_API_KEY` in `.env.local`

@@ -228,8 +228,8 @@ export class GatewayManager {
     });
 
     // Try starting the Gateway — if it fails, Aura still works via direct Groq LLM.
-    // Hard deadline: 15s total to avoid long SplashScreen hangs.
-    const BOOTSTRAP_DEADLINE_MS = 15_000;
+    // Hard deadline: 60s total to avoid long SplashScreen hangs (OpenClaw takes ~30s on Windows).
+    const BOOTSTRAP_DEADLINE_MS = 60_000;
     try {
       await Promise.race([
         (async () => {
@@ -246,9 +246,9 @@ export class GatewayManager {
             // startGatewayProcess resolves when the process prints a ready signal or times out,
             // but the TCP port may still not be open. Poll until it accepts connections.
             console.log("[GatewayManager] Waiting for gateway port to become available...");
-            const portOpen = await this.waitForPort(port, 8_000);
+            const portOpen = await this.waitForPort(port, 45_000);
             if (!portOpen) {
-              throw new Error(`Gateway process started but port ${port} never opened within 8s`);
+              throw new Error(`Gateway process started but port ${port} never opened within 45s`);
             }
             console.log(`[GatewayManager] Port ${port} is open — connecting WebSocket...`);
             await this.connectWebSocket();
@@ -256,7 +256,7 @@ export class GatewayManager {
           console.log(`[GatewayManager] WebSocket connected! connected=${this.connected}`);
         })(),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("Gateway bootstrap deadline exceeded (15s)")), BOOTSTRAP_DEADLINE_MS)
+          setTimeout(() => reject(new Error(`Gateway bootstrap deadline exceeded (${Math.round(BOOTSTRAP_DEADLINE_MS / 1000)}s)`)), BOOTSTRAP_DEADLINE_MS)
         ),
       ]);
     } catch (err) {
@@ -458,6 +458,21 @@ export class GatewayManager {
 
     this.emitProgress(task, { type: "status", statusText: "Executing..." });
 
+    // Emit a TOOL_USE event so the renderer (which listens to TOOL_USE logic)
+    // knows to switch to the browser automatically for navigate actions.
+    const toolUseId = crypto.randomUUID();
+    this.emit({
+      type: "TOOL_USE",
+      payload: {
+        tool: action.tool === "navigate" ? "browser" : action.tool,
+        toolUseId,
+        action: action.tool,
+        params: action.params,
+        status: "running",
+        timestamp: now(),
+      },
+    });
+
     try {
       const profile = this.store.getState().profile;
       const result = await this.taskExecutor.execute({
@@ -468,9 +483,33 @@ export class GatewayManager {
         profile,
       });
 
+      this.emit({
+        type: "TOOL_USE",
+        payload: {
+          tool: action.tool === "navigate" ? "browser" : action.tool,
+          toolUseId,
+          action: action.tool,
+          params: action.params,
+          status: "done",
+          timestamp: now(),
+        },
+      });
+
       this.handleChatSuccess(messageId, taskId, task, session, request, result || "Done!");
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      this.emit({
+        type: "TOOL_USE",
+        payload: {
+          tool: action.tool === "navigate" ? "browser" : action.tool,
+          toolUseId,
+          action: action.tool,
+          params: action.params,
+          status: "error",
+          output: message,
+          timestamp: now(),
+        },
+      });
       this.handleChatError(messageId, taskId, task, session, message);
     }
 
@@ -1058,7 +1097,7 @@ export class GatewayManager {
         }
       });
 
-      // Timeout: if gateway doesn't signal ready in 10s, resolve anyway and try connecting
+      // Timeout: if gateway doesn't signal ready in 45s, resolve anyway and try connecting
       setTimeout(() => {
         if (!resolved) {
           resolved = true;
@@ -1288,6 +1327,12 @@ export class GatewayManager {
       const toolBlocks = extractToolUseBlocks(payload);
       for (const block of toolBlocks) {
         const action = typeof block.input?.action === "string" ? block.input.action : "execute";
+        
+        // --- Added: Visual Step Overlays ---
+        if (block.tool === "browser" && typeof block.input?.selector === "string") {
+          void this.browserController?.highlightElement(block.input.selector);
+        }
+        
         this.emit({
           type: "TOOL_USE",
           payload: {
