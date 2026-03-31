@@ -304,7 +304,15 @@ export class GatewayManager {
     this.emitProgress(task, { type: "step_start", statusText: "Generating response." });
 
     try {
-      const responseText = await this.streamViaGroq(messageId, prompt, request.history);
+      let responseText: string;
+      if (this.connected) {
+        // Route through OpenClaw agent (has skills, memory, browser tools, web search)
+        this.emitProgress(task, { type: "step_start", statusText: "OpenClaw agent working..." });
+        responseText = await this.streamViaOpenClaw(messageId, request.message, "main");
+      } else {
+        // Fallback: direct Groq streaming
+        responseText = await this.streamViaGroq(messageId, prompt, request.history);
+      }
       this.handleChatSuccess(messageId, taskId, task, session, request, responseText);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -378,6 +386,12 @@ export class GatewayManager {
     pageContext: PageContext | null,
     classification: Classification,
   ): Promise<{ messageId: string; taskId: string }> {
+    // When OpenClaw is connected, delegate to the OpenClaw agent — it handles
+    // full multi-step task execution with browser tools, web search, skills, etc.
+    if (this.connected) {
+      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
+    }
+
     // Emit planning status
     const planningTask: AuraTask = {
       id: taskId,
@@ -714,6 +728,41 @@ export class GatewayManager {
     });
   }
 
+  // --- Private: OpenClaw Gateway Chat ---
+
+  private streamViaOpenClaw(
+    messageId: string,
+    message: string,
+    sessionKey: string,
+  ): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      this.streamedText = "";
+      // Set callbacks before sending so streaming events don't race ahead
+      this.chatDoneResolve = resolve;
+      this.chatDoneReject = reject;
+
+      const idempotencyKey = crypto.randomUUID();
+
+      this.request<{ runId?: string }>("chat.send", {
+        sessionKey,
+        message,
+        idempotencyKey,
+      }, { timeoutMs: 120_000 })
+        .then((res) => {
+          if (res?.runId) {
+            this.activeRunId = res.runId;
+          }
+          // Response will arrive via handleChatStreamEvent()
+        })
+        .catch((err: Error) => {
+          const rej = this.chatDoneReject;
+          this.chatDoneResolve = null;
+          this.chatDoneReject = null;
+          if (rej) rej(err); else reject(err);
+        });
+    });
+  }
+
   // --- Private: Gateway Process ---
 
   private startGatewayProcess(): Promise<void> {
@@ -736,12 +785,18 @@ export class GatewayManager {
         "--auth", "token",
       ];
 
+      // Resolve the Groq API key so OpenClaw's agent can use it
+      const groqApiKey = resolveGroqApiKey(
+        this.configManager.readConfig().providers?.groq?.apiKey
+      );
+
       const child = spawn(process.execPath, args, {
         cwd: path.dirname(this.openClawEntryPath),
         env: {
           ...process.env,
           ELECTRON_RUN_AS_NODE: "1",
           OPENCLAW_HOME: this.configManager.getOpenClawHomePath(),
+          ...(groqApiKey ? { GROQ_API_KEY: groqApiKey } : {}),
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
