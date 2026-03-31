@@ -323,6 +323,16 @@ const createAppWindows = async (): Promise<void> => {
 
     activeDesktopController = new DesktopController();
     activeGatewayManager.setDesktopController(activeDesktopController);
+    activeGatewayManager.setWindowVisibilityCallbacks(
+      () => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
+        if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.minimize();
+      },
+      () => {
+        if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.restore(); mainWindow.show(); }
+        if (widgetWindow && !widgetWindow.isDestroyed()) { widgetWindow.restore(); widgetWindow.show(); }
+      },
+    );
 
     // ── Desktop IPC handlers ───────────────────────────────────────────────
     ipcMain.handle(IPC_CHANNELS.desktopScreenshot, async () =>
@@ -347,6 +357,39 @@ const createAppWindows = async (): Promise<void> => {
     );
     ipcMain.handle(IPC_CHANNELS.desktopGetScreenSize, async () =>
       activeDesktopController!.getScreenSize()
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopRightClick, async (_e, p: { x: number; y: number }) =>
+      activeDesktopController!.rightClick(p.x, p.y)
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopDoubleClick, async (_e, p: { x: number; y: number }) =>
+      activeDesktopController!.doubleClick(p.x, p.y)
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopScroll, async (_e, p: { direction: "up" | "down" | "left" | "right"; amount?: number }) =>
+      activeDesktopController!.scroll(p.direction, p.amount)
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopDrag, async (_e, p: { fromX: number; fromY: number; toX: number; toY: number }) =>
+      activeDesktopController!.drag(p.fromX, p.fromY, p.toX, p.toY)
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopClipboardRead, async () =>
+      activeDesktopController!.clipboardRead()
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopClipboardWrite, async (_e, p: { text: string }) =>
+      activeDesktopController!.clipboardWrite(p.text)
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopRunCommand, async (_e, p: { command: string; timeoutMs?: number }) =>
+      activeDesktopController!.runCommand(p.command, p.timeoutMs)
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopGetActiveWindow, async () =>
+      activeDesktopController!.getActiveWindow()
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopListWindows, async () =>
+      activeDesktopController!.listWindows()
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopFocusWindow, async (_e, p: { title: string }) =>
+      activeDesktopController!.focusWindowByTitle(p.title)
+    );
+    ipcMain.handle(IPC_CHANNELS.desktopGetCursor, async () =>
+      activeDesktopController!.getCursorPosition()
     );
 
     ipcMain.handle(IPC_CHANNELS.authGetState, async () => authService.getState());

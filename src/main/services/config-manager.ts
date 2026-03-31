@@ -13,9 +13,13 @@ export class ConfigManager {
 
   constructor(userDataPath: string) {
     this.openClawHomePath = path.join(userDataPath, "openclaw-home");
-    this.configPath = path.join(this.openClawHomePath, "openclaw.json");
-    fs.mkdirSync(this.openClawHomePath, { recursive: true });
+    // OpenClaw resolves config as $OPENCLAW_HOME/.openclaw/openclaw.json
+    const openClawDotDir = path.join(this.openClawHomePath, ".openclaw");
+    this.configPath = path.join(openClawDotDir, "openclaw.json");
+    fs.mkdirSync(openClawDotDir, { recursive: true });
     this.gatewayToken = this.ensureGatewayToken();
+    // Pre-write auth profile so it's ready before gateway spawns
+    this.ensureGroqAuthProfile();
   }
 
   getOpenClawHomePath(): string {
@@ -122,8 +126,77 @@ export class ConfigManager {
       changed = true;
     }
 
+    // Ensure the agent is configured to use Groq so OpenClaw doesn't default to Anthropic.
+    // OpenClaw reads agents.defaults.model.primary for the model selection.
+    if (!config.agents) {
+      config.agents = {};
+      changed = true;
+    }
+    if (!config.agents.defaults?.model?.primary) {
+      config.agents.defaults = {
+        model: {
+          primary: "groq/llama-3.3-70b-versatile",
+          fallbacks: [],
+        },
+        models: {
+          "groq/llama-3.3-70b-versatile": {},
+          "groq/meta-llama/llama-4-scout-17b-16e-instruct": {},
+        },
+      };
+      changed = true;
+    }
+
     if (changed) {
       this.writeConfig(config);
+    }
+
+    // Write the Groq auth profile for OpenClaw's agent so it can actually call the API.
+    // This is stored as a separate JSON file that OpenClaw reads for provider credentials.
+    this.ensureGroqAuthProfile();
+  }
+
+  /** Write/update the Groq auth-profiles.json that OpenClaw's agent reads for API keys. */
+  ensureGroqAuthProfile(): void {
+    // Resolve key from all sources that resolveGroqApiKey() uses
+    const config = this.readConfig();
+    const groqKey =
+      process.env["GROQ_API_KEY"] ||
+      process.env["VITE_LLM_API_KEY"] ||
+      process.env["PLASMO_PUBLIC_LLM_API_KEY"] ||
+      config.providers?.groq?.apiKey ||
+      "";
+    console.log(`[ConfigManager] ensureGroqAuthProfile — key found=${Boolean(groqKey)} len=${groqKey.length}`);
+    if (!groqKey) return; // nothing to write without a key
+
+    // OpenClaw stores auth profiles at:
+    // <OPENCLAW_HOME>/.openclaw/agents/main/agent/auth-profiles.json
+    const authDir = path.join(this.openClawHomePath, ".openclaw", "agents", "main", "agent");
+    const authFile = path.join(authDir, "auth-profiles.json");
+
+    try {
+      fs.mkdirSync(authDir, { recursive: true });
+
+      interface AuthProfiles {
+        version: number;
+        profiles: Record<string, { type: string; provider: string; key: string }>;
+        usageStats?: Record<string, unknown>;
+      }
+
+      let existing: AuthProfiles = { version: 1, profiles: {} };
+      if (fs.existsSync(authFile)) {
+        try { existing = JSON.parse(fs.readFileSync(authFile, "utf8")) as AuthProfiles; } catch { /* corrupt — reset */ }
+      }
+
+      // Only write if the key changed
+      if (existing.profiles?.["groq:aura"]?.key === groqKey) return;
+
+      existing.profiles = existing.profiles ?? {};
+      existing.profiles["groq:aura"] = { type: "api_key", provider: "groq", key: groqKey };
+
+      fs.writeFileSync(authFile, JSON.stringify(existing, null, 2), "utf8");
+      console.log("[ConfigManager] Wrote Groq auth profile to", authFile);
+    } catch (err) {
+      console.warn("[ConfigManager] Failed to write Groq auth profile:", err instanceof Error ? err.message : String(err));
     }
   }
 

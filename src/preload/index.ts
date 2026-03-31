@@ -72,11 +72,22 @@ const api: AuraDesktopApi = {
   desktop: {
     screenshot: () => ipcRenderer.invoke(IPC_CHANNELS.desktopScreenshot),
     click: (p: { x: number; y: number; button?: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopClick, p),
+    rightClick: (p: { x: number; y: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopRightClick, p),
+    doubleClick: (p: { x: number; y: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopDoubleClick, p),
     move: (p: { x: number; y: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopMove, p),
     type: (p: { text: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopType, p),
     key: (p: { key: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopKey, p),
     openApp: (p: { target: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopOpenApp, p),
     getScreenSize: () => ipcRenderer.invoke(IPC_CHANNELS.desktopGetScreenSize),
+    scroll: (p: { direction: "up" | "down" | "left" | "right"; amount?: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopScroll, p),
+    drag: (p: { fromX: number; fromY: number; toX: number; toY: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopDrag, p),
+    clipboardRead: () => ipcRenderer.invoke(IPC_CHANNELS.desktopClipboardRead),
+    clipboardWrite: (p: { text: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopClipboardWrite, p),
+    runCommand: (p: { command: string; timeoutMs?: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopRunCommand, p),
+    getActiveWindow: () => ipcRenderer.invoke(IPC_CHANNELS.desktopGetActiveWindow),
+    listWindows: () => ipcRenderer.invoke(IPC_CHANNELS.desktopListWindows),
+    focusWindow: (p: { title: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopFocusWindow, p),
+    getCursor: () => ipcRenderer.invoke(IPC_CHANNELS.desktopGetCursor),
   },
   onAppEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, message: Parameters<typeof listener>[0]) => {

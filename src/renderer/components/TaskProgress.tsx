@@ -17,6 +17,19 @@ const TOOL_ICONS: Record<string, string> = {
   select: "☑",
   hover: "⊙",
   ask_user: "?",
+  desktop_screenshot: "⊡",
+  desktop_click: "⊛",
+  desktop_double_click: "⊛",
+  desktop_right_click: "⊙",
+  desktop_type: "⌨",
+  desktop_key: "⌥",
+  desktop_scroll: "↕",
+  desktop_open_app: "▶",
+  desktop_move: "⊹",
+  desktop_drag: "⇱",
+  desktop_clipboard_read: "◧",
+  desktop_clipboard_write: "◨",
+  desktop_run_command: "⟩_",
 };
 
 export const TaskProgressBubble = ({ task }: { task: AuraTask }): JSX.Element => {
@@ -69,7 +82,7 @@ export const TaskProgressBubble = ({ task }: { task: AuraTask }): JSX.Element =>
                   key={i}
                   className={`flex items-center gap-2 rounded-[10px] px-2.5 py-1.5 text-xs transition-all ${
                     step.status === "running"
-                      ? "bg-aura-violet/10 text-aura-text"
+                      ? "bg-aura-violet/10 text-aura-text ring-1 ring-aura-violet/20"
                       : step.status === "done"
                         ? "text-aura-muted"
                         : step.status === "error"

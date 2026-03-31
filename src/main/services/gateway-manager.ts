@@ -45,14 +45,34 @@ const readOpenClawVersion = (rootPath: string | null): string | undefined => {
 type EventFrame = { type: "event"; event: string; payload: unknown; seq?: number };
 type ResponseFrame = { type: "res"; id: string; ok: boolean; payload?: unknown; error?: { code?: string; message?: string } };
 
-// chat event payload shape from the gateway protocol
+// chat event payload shape from the gateway protocol (v3)
 interface ChatEventPayload {
   runId?: string;
   sessionKey?: string;
   seq?: number;
   state: "delta" | "final" | "aborted" | "error";
-  message?: { text?: string; content?: string };
+  message?: {
+    text?: string;
+    content?: string | Array<{ type: string; text?: string }>;
+  };
   errorMessage?: string;
+}
+
+function extractTextFromChatPayload(payload: ChatEventPayload): string {
+  const msg = payload.message;
+  if (!msg) return "";
+  // Plain text field (legacy/simple)
+  if (typeof msg.text === "string" && msg.text) return msg.text;
+  // Content array (v3 protocol): [{type:"text", text:"..."}]
+  if (Array.isArray(msg.content)) {
+    return msg.content
+      .filter((b) => b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text ?? "")
+      .join("");
+  }
+  // Flat string content
+  if (typeof msg.content === "string") return msg.content;
+  return "";
 }
 
 export class GatewayManager {
@@ -74,8 +94,11 @@ export class GatewayManager {
   private readonly taskExecutor = new TaskExecutor();
   private readonly pendingConfirmations = new Map<string, { resolve: (v: boolean) => void; timeout: NodeJS.Timeout }>();
 
+  private reconnectTimer: NodeJS.Timeout | null = null;
   private monitorManager: MonitorManager | null = null;
   private desktopController: DesktopController | null = null;
+  private hideMainWindow: (() => void) | null = null;
+  private showMainWindow: (() => void) | null = null;
 
   setMonitorManager(mm: MonitorManager): void {
     this.monitorManager = mm;
@@ -83,6 +106,11 @@ export class GatewayManager {
 
   setDesktopController(dc: DesktopController): void {
     this.desktopController = dc;
+  }
+
+  setWindowVisibilityCallbacks(hide: () => void, show: () => void): void {
+    this.hideMainWindow = hide;
+    this.showMainWindow = show;
   }
 
   constructor(
@@ -180,8 +208,27 @@ export class GatewayManager {
 
     // Try starting the Gateway — if it fails, Aura still works via direct Groq LLM
     try {
-      await this.startGatewayProcess();
-      await this.connectWebSocket();
+      console.log(`[GatewayManager] Probing port ${port}...`);
+      const alreadyUp = await this.probePort(port);
+      if (alreadyUp) {
+        console.log(`[GatewayManager] Port ${port} already in use — connecting to existing gateway.`);
+        await this.connectWebSocket();
+      } else {
+        console.log(`[GatewayManager] Port ${port} free — spawning gateway process...`);
+        // Ensure Groq auth profile is written before starting so the agent has API access
+        this.configManager.ensureGroqAuthProfile();
+        await this.startGatewayProcess();
+        // startGatewayProcess resolves when the process prints a ready signal or times out,
+        // but the TCP port may still not be open. Poll until it accepts connections.
+        console.log("[GatewayManager] Waiting for gateway port to become available...");
+        const portOpen = await this.waitForPort(port, 20_000);
+        if (!portOpen) {
+          throw new Error(`Gateway process started but port ${port} never opened within 20s`);
+        }
+        console.log(`[GatewayManager] Port ${port} is open — connecting WebSocket...`);
+        await this.connectWebSocket();
+      }
+      console.log(`[GatewayManager] WebSocket connected! connected=${this.connected}`);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       console.warn("[GatewayManager] Gateway failed to start (chat will use direct Groq):", detail);
@@ -252,18 +299,26 @@ export class GatewayManager {
     session.messages.push(userMessage);
     this.persistCurrentSession(session);
 
+    console.log(`\n[GatewayManager] sendChat — message="${request.message.slice(0, 80)}" source=${request.source}`);
+    console.log(`[GatewayManager] connected=${this.connected} desktopController=${Boolean(this.desktopController)}`);
+
     const pageContext = await this.browserController.getPageContext();
+    console.log(`[GatewayManager] pageContext url="${pageContext?.url ?? "none"}" title="${pageContext?.title ?? "none"}"`);
+
     const groqConfig = this.configManager.readConfig();
     const configKey = groqConfig.providers?.groq?.apiKey;
     const apiKey = resolveGroqApiKey(configKey);
+    console.log(`[GatewayManager] apiKey resolved=${Boolean(apiKey)}`);
 
     // ── Classify intent ──
     let classification: Classification;
     try {
       classification = await classify(request.message, pageContext, apiKey);
-    } catch {
+    } catch (err) {
+      console.warn("[GatewayManager] classify() threw:", err instanceof Error ? err.message : String(err));
       classification = { intent: "query", confidence: 0.5 };
     }
+    console.log(`[GatewayManager] classification intent="${classification.intent}" confidence=${classification.confidence} directAction=${JSON.stringify(classification.directAction ?? null)}`);
 
     this.setStatus({
       ...this.runtimeStatus,
@@ -273,22 +328,30 @@ export class GatewayManager {
 
     // ── Route by intent ──
     if (classification.intent === "query") {
+      console.log("[GatewayManager] → handleQueryIntent");
       return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
     }
 
     if (classification.intent === "navigate" && classification.directAction) {
+      console.log("[GatewayManager] → handleDirectAction");
       return this.handleDirectAction(messageId, taskId, session, request, classification);
     }
 
     if (classification.intent === "monitor" && this.monitorManager) {
+      console.log("[GatewayManager] → handleMonitorIntent");
       return this.handleMonitorIntent(messageId, taskId, session, request, pageContext, apiKey);
     }
 
     if (classification.intent === "desktop" && this.desktopController) {
+      console.log("[GatewayManager] → handleDesktopIntent (vision agent)");
       return this.handleDesktopIntent(messageId, taskId, session, request);
+    }
+    if (classification.intent === "desktop" && !this.desktopController) {
+      console.warn("[GatewayManager] desktop intent but desktopController is null — falling back to query");
     }
 
     // task, autofill, or navigate-without-directAction → plan and execute
+    console.log("[GatewayManager] → handleTaskIntent");
     return this.handleTaskIntent(messageId, taskId, session, request, pageContext, classification);
   }
 
@@ -564,7 +627,7 @@ export class GatewayManager {
     return { messageId, taskId };
   }
 
-  // ── Desktop intent: plan and execute native desktop automation ───────────
+  // ── Desktop intent: vision-action loop ──────────────────────────────────
 
   private async handleDesktopIntent(
     messageId: string,
@@ -572,34 +635,28 @@ export class GatewayManager {
     session: AuraSession,
     request: ChatSendRequest,
   ): Promise<{ messageId: string; taskId: string }> {
-    // When OpenClaw is connected, let the agent handle it via system_run
+    console.log(`[GatewayManager] handleDesktopIntent — connected=${this.connected} dc=${Boolean(this.desktopController)}`);
+
+    // When OpenClaw is connected, let the agent handle it
     if (this.connected) {
+      console.log("[GatewayManager] OpenClaw connected — delegating desktop task to OpenClaw agent");
       return this.handleQueryIntent(messageId, taskId, session, request, null);
     }
 
-    const planningTask: AuraTask = {
-      id: taskId,
-      command: request.message,
-      status: "planning",
-      createdAt: now(),
-      updatedAt: now(),
-      retries: 0,
-      steps: [],
-    };
-    this.emitProgress(planningTask, { type: "status", statusText: "Planning desktop task..." });
-
-    let steps: TaskStep[];
-    try {
-      steps = await this.planDesktopTask(request.message);
-    } catch {
-      console.warn("[GatewayManager] Desktop planning failed, falling back to chat.");
+    if (!this.desktopController) {
+      console.warn("[GatewayManager] desktopController is null — cannot run vision agent");
       return this.handleQueryIntent(messageId, taskId, session, request, null);
     }
 
-    if (steps.length === 0) {
+    const groqConfig = this.configManager.readConfig();
+    const apiKey = resolveGroqApiKey(groqConfig.providers?.groq?.apiKey);
+    console.log(`[GatewayManager] Groq apiKey for vision: ${apiKey ? `${apiKey.slice(0, 8)}...` : "MISSING"}`);
+    if (!apiKey) {
+      console.warn("[GatewayManager] No Groq API key — cannot run vision agent, falling back to chat");
       return this.handleQueryIntent(messageId, taskId, session, request, null);
     }
 
+    // Emit a running task so the UI shows progress
     const task: AuraTask = {
       id: taskId,
       command: request.message,
@@ -607,83 +664,64 @@ export class GatewayManager {
       createdAt: now(),
       updatedAt: now(),
       retries: 0,
-      steps,
+      steps: [],
     };
-
-    this.emitProgress(task, { type: "status", statusText: "Running desktop task..." });
+    this.emitProgress(task, { type: "status", statusText: "Vision agent starting..." });
 
     try {
-      const profile = this.store.getState().profile;
-      const result = await this.taskExecutor.execute({
-        task,
-        browserController: this.browserController,
-        desktopController: this.desktopController ?? undefined,
-        emit: this.emit,
-        confirmStep: (payload) => this.confirmStep(payload),
-        profile,
+      console.log("[GatewayManager] Importing vision-agent module...");
+      const { runVisionAgent } = await import("./vision-agent");
+      console.log("[GatewayManager] Starting vision agent for goal:", request.message);
+      const result = await runVisionAgent({
+        goal: request.message,
+        apiKey,
+        dc: this.desktopController,
+        onBeforeCapture: () => {
+          console.log("[GatewayManager] onBeforeCapture — minimizing windows");
+          this.hideMainWindow?.();
+        },
+        onAfterCapture: () => {
+          console.log("[GatewayManager] onAfterCapture — restoring windows");
+          this.showMainWindow?.();
+        },
+        onToken: (text) => {
+          if (this.activeMessageId) {
+            this.emit({ type: "LLM_TOKEN", payload: { messageId: this.activeMessageId, token: text } });
+          }
+        },
+        onStep: ({ iteration, action }) => {
+          const stepText = "description" in action ? action.description : action.action;
+          const toolMap: Record<string, string> = {
+            click: "desktop_click", double_click: "desktop_double_click",
+            right_click: "desktop_right_click", type: "desktop_type",
+            key: "desktop_key", scroll: "desktop_scroll",
+            wait: "wait", done: "desktop_screenshot", error: "desktop_screenshot",
+          };
+          task.steps.push({
+            index: iteration - 1,
+            tool: (toolMap[action.action] ?? "desktop_screenshot") as import("@shared/types").ToolName,
+            description: stepText,
+            status: "done",
+            params: {},
+          });
+          task.updatedAt = now();
+          this.emitProgress(task, { type: "step_done", statusText: stepText });
+        },
       });
 
-      this.handleChatSuccess(messageId, taskId, task, session, request, result || "Desktop task complete.");
+      console.log("[GatewayManager] Vision agent finished, result:", result.slice(0, 120));
+      task.status = "done";
+      task.updatedAt = now();
+      this.handleChatSuccess(messageId, taskId, task, session, request, result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      console.error("[GatewayManager] Vision agent threw:", message);
       this.handleChatError(messageId, taskId, task, session, message);
     }
 
     this.activeMessageId = null;
     this.activeTaskId = null;
     return { messageId, taskId };
-  }
-
-  private async planDesktopTask(userMessage: string): Promise<TaskStep[]> {
-    const groqConfig = this.configManager.readConfig();
-    const apiKey = resolveGroqApiKey(groqConfig.providers?.groq?.apiKey);
-    if (!apiKey) throw new Error("No API key for desktop planning.");
-
-    const systemPrompt = [
-      "You are a Windows desktop automation planner for Aura Desktop.",
-      "Given the user request, output a JSON array of steps to automate the task.",
-      "",
-      'Each step: { "tool": <tool>, "params": {...}, "description": "one line", "requiresConfirmation": true/false }',
-      "",
-      "Available tools:",
-      '  desktop_screenshot: {} — capture full screen',
-      '  desktop_open_app: { "target": "notepad.exe"|"calc.exe"|"explorer.exe"|"code.exe"|"chrome.exe"|etc } — requiresConfirmation:true',
-      '  desktop_click: { "x": number, "y": number, "button": "left"|"right" } — requiresConfirmation:true',
-      '  desktop_type: { "text": "..." } — requiresConfirmation:true',
-      '  desktop_key: { "key": "enter"|"tab"|"escape"|"ctrl+c"|"ctrl+v"|"ctrl+s"|"win"|"alt+f4"|etc } — requiresConfirmation:true',
-      '  desktop_move: { "x": number, "y": number }',
-      '  wait: { "ms": number }',
-      "",
-      "Rules:",
-      "- requiresConfirmation MUST be true for: desktop_open_app, desktop_click, desktop_type, desktop_key",
-      "- For opening Windows apps use their .exe name (notepad.exe, calc.exe, mspaint.exe, code.exe)",
-      "- Take a screenshot first if you need to see the current state",
-      "- Output ONLY the raw JSON array, no markdown fences",
-    ].join("\n");
-
-    const result = await completeChat(apiKey, [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userMessage },
-    ], { model: "llama-3.1-8b-instant", maxTokens: 600, temperature: 0.1 });
-
-    const jsonMatch = result.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) throw new Error("Desktop planner returned no JSON.");
-
-    const raw = JSON.parse(jsonMatch[0]) as Array<{
-      tool: string;
-      params: Record<string, unknown>;
-      description: string;
-      requiresConfirmation?: boolean;
-    }>;
-
-    return raw.map((s, i) => ({
-      index: i,
-      tool: s.tool as TaskStep["tool"],
-      description: s.description,
-      status: "pending" as const,
-      params: s.params,
-      requiresConfirmation: s.requiresConfirmation ?? true,
-    }));
   }
 
   // ── Task planner: Groq LLM generates step array ──────────────────────────
@@ -915,6 +953,8 @@ export class GatewayManager {
         "--token", token,
         "--bind", "loopback",
         "--auth", "token",
+        "--allow-unconfigured",
+        "--force",
       ];
 
       // Resolve the Groq API key so OpenClaw's agent can use it
@@ -937,17 +977,30 @@ export class GatewayManager {
       let resolved = false;
       let stderr = "";
 
+      const checkReady = (text: string) => {
+        if (!resolved && (
+          text.includes("listening") ||
+          text.includes("ready") ||
+          text.includes(String(port)) ||
+          text.includes("[gateway]") ||
+          text.includes("Gateway")
+        )) {
+          resolved = true;
+          resolve();
+        }
+      };
+
       child.stderr?.on("data", (chunk: Buffer) => {
-        stderr += chunk.toString("utf8");
+        const text = chunk.toString("utf8");
+        stderr += text;
+        console.log(`[Gateway:stderr] ${text.trimEnd()}`);
+        checkReady(text);
       });
 
       child.stdout?.on("data", (chunk: Buffer) => {
         const text = chunk.toString("utf8");
-        // Gateway prints ready signal to stdout
-        if (!resolved && (text.includes("listening") || text.includes("ready") || text.includes(String(port)))) {
-          resolved = true;
-          resolve();
-        }
+        console.log(`[Gateway:stdout] ${text.trimEnd()}`);
+        checkReady(text);
       });
 
       child.on("error", (err) => {
@@ -975,13 +1028,13 @@ export class GatewayManager {
         }
       });
 
-      // Timeout: if gateway doesn't signal ready in 15s, resolve anyway and try connecting
+      // Timeout: if gateway doesn't signal ready in 25s, resolve anyway and try connecting
       setTimeout(() => {
         if (!resolved) {
           resolved = true;
           resolve();
         }
-      }, 15_000);
+      }, 25_000);
     });
   }
 
@@ -1021,6 +1074,7 @@ export class GatewayManager {
       });
 
       ws.on("close", () => {
+        const wasConnected = this.connected;
         if (this.ws === ws) {
           this.ws = null;
           this.connected = false;
@@ -1028,6 +1082,15 @@ export class GatewayManager {
         if (!resolved) {
           resolved = true;
           reject(new Error("WebSocket closed before connection established."));
+        }
+        // Auto-reconnect after a successful connection drops
+        if (wasConnected && this.gatewayProcess !== null) {
+          this.reconnectTimer = setTimeout(() => {
+            console.log("[GatewayManager] WebSocket dropped — reconnecting...");
+            this.connectWebSocket().catch((e) => {
+              console.warn("[GatewayManager] Reconnect failed:", (e as Error).message);
+            });
+          }, 3_000);
         }
       });
 
@@ -1048,7 +1111,35 @@ export class GatewayManager {
     });
   }
 
+  /** Polls the port every 500ms until it accepts a connection or the deadline passes. */
+  private async waitForPort(port: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    let attempt = 0;
+    while (Date.now() < deadline) {
+      attempt++;
+      const open = await this.probePort(port);
+      console.log(`[GatewayManager] waitForPort attempt ${attempt}: port ${port} open=${open}`);
+      if (open) return true;
+      await new Promise<void>((r) => setTimeout(r, 500));
+    }
+    return false;
+  }
+
+  /** Returns true if something is already listening on the given port. */
+  private probePort(port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const net = require("node:net") as typeof import("node:net");
+      const socket = new net.Socket();
+      socket.setTimeout(800);
+      socket.once("connect", () => { socket.destroy(); resolve(true); });
+      socket.once("error", () => { socket.destroy(); resolve(false); });
+      socket.once("timeout", () => { socket.destroy(); resolve(false); });
+      socket.connect(port, "127.0.0.1");
+    });
+  }
+
   private disconnectWebSocket(): void {
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.connected = false;
     this.onConnected = null;
     this.pending.forEach(({ reject, timeout }) => {
@@ -1111,14 +1202,14 @@ export class GatewayManager {
       id: crypto.randomUUID(),
       method: "connect",
       params: {
-        minProtocol: 5,
-        maxProtocol: 5,
+        minProtocol: 3,
+        maxProtocol: 3,
         client: {
-          id: "aura-desktop",
+          id: "gateway-client",
           displayName: "Aura Desktop",
           version: "0.1.0",
           platform: process.platform,
-          mode: "tunnel",
+          mode: "backend",
         },
         auth: { token },
         role: "operator",
@@ -1153,8 +1244,7 @@ export class GatewayManager {
     const state = payload.state;
 
     if (state === "delta") {
-      // Extract text from the delta message
-      const text = payload.message?.text ?? payload.message?.content ?? "";
+      const text = extractTextFromChatPayload(payload);
       if (text) {
         this.streamedText += text;
         this.emit({
@@ -1166,8 +1256,7 @@ export class GatewayManager {
     }
 
     if (state === "final") {
-      // Use final message text if provided, otherwise use accumulated stream
-      const finalText = payload.message?.text ?? payload.message?.content ?? this.streamedText;
+      const finalText = extractTextFromChatPayload(payload) || this.streamedText;
       if (this.chatDoneResolve) {
         const resolve = this.chatDoneResolve;
         this.chatDoneResolve = null;
@@ -1254,8 +1343,10 @@ export class GatewayManager {
     task.status = "done";
     task.updatedAt = now();
     task.result = responseText;
-    task.steps[1]!.status = "done";
-    task.steps[1]!.completedAt = now();
+    if (task.steps[1]) {
+      task.steps[1].status = "done";
+      task.steps[1].completedAt = now();
+    }
 
     this.emitProgress(task, { type: "result", output: responseText, statusText: "Task complete." });
     this.emit({

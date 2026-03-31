@@ -149,16 +149,34 @@ export type ToolName =
   | "ask_user"
   | "desktop_screenshot"
   | "desktop_click"
+  | "desktop_right_click"
+  | "desktop_double_click"
   | "desktop_type"
   | "desktop_key"
   | "desktop_open_app"
-  | "desktop_move";
+  | "desktop_move"
+  | "desktop_scroll"
+  | "desktop_drag"
+  | "desktop_clipboard_read"
+  | "desktop_clipboard_write"
+  | "desktop_run_command";
 
 export interface DesktopScreenshotResult {
   dataUrl: string;
   width: number;
   height: number;
+  scaleFactor: number;
   capturedAt: number;
+  cursorX: number;
+  cursorY: number;
+}
+
+export interface DesktopWindowInfo {
+  title: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export type TaskStatus = "pending" | "planning" | "running" | "done" | "error" | "cancelled";
@@ -275,6 +293,10 @@ export interface OpenClawConfig {
   };
   agents?: {
     main?: { model?: string; provider?: string };
+    defaults?: {
+      model?: { primary?: string; fallbacks?: string[] };
+      models?: Record<string, unknown>;
+    };
   };
   providers?: Record<string, { apiKey?: string; enabled?: boolean }>;
 }

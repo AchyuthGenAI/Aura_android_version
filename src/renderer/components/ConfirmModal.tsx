@@ -56,9 +56,22 @@ export const ConfirmModal = (): JSX.Element | null => {
           </div>
 
           {/* Countdown */}
-          <p className="mt-3 text-center text-[11px] text-aura-muted">
-            Auto-denying in <span className="font-mono text-amber-400">{countdown}s</span>
-          </p>
+          <div className="mt-3 flex items-center justify-center gap-2">
+            <svg width="20" height="20" viewBox="0 0 20 20" className="-rotate-90">
+              <circle cx="10" cy="10" r="8" fill="none" stroke="rgba(245,158,11,0.15)" strokeWidth="2" />
+              <circle
+                cx="10" cy="10" r="8" fill="none"
+                stroke="rgb(245,158,11)" strokeWidth="2"
+                strokeDasharray={`${2 * Math.PI * 8}`}
+                strokeDashoffset={`${2 * Math.PI * 8 * (1 - countdown / 30)}`}
+                strokeLinecap="round"
+                style={{ transition: "stroke-dashoffset 0.9s linear" }}
+              />
+            </svg>
+            <p className="text-[11px] text-aura-muted">
+              Auto-denying in <span className="font-mono text-amber-400">{countdown}s</span>
+            </p>
+          </div>
 
           {/* Buttons */}
           <div className="mt-4 flex gap-3">

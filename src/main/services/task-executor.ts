@@ -310,6 +310,64 @@ export class TaskExecutor {
         return `Moved mouse to (${x}, ${y})`;
       }
 
+      case "desktop_right_click": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const x = Number(p.x ?? 0);
+        const y = Number(p.y ?? 0);
+        await dc.rightClick(x, y);
+        await delay(200);
+        return `Right-clicked at (${x}, ${y})`;
+      }
+
+      case "desktop_double_click": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const x = Number(p.x ?? 0);
+        const y = Number(p.y ?? 0);
+        await dc.doubleClick(x, y);
+        await delay(200);
+        return `Double-clicked at (${x}, ${y})`;
+      }
+
+      case "desktop_scroll": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const direction = String(p.direction ?? "down") as "up" | "down" | "left" | "right";
+        const amount = Number(p.amount ?? 3);
+        await dc.scroll(direction, amount);
+        return `Scrolled ${direction} (${amount})`;
+      }
+
+      case "desktop_drag": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const fromX = Number(p.fromX ?? p.from_x ?? 0);
+        const fromY = Number(p.fromY ?? p.from_y ?? 0);
+        const toX = Number(p.toX ?? p.to_x ?? 0);
+        const toY = Number(p.toY ?? p.to_y ?? 0);
+        await dc.drag(fromX, fromY, toX, toY);
+        return `Dragged from (${fromX}, ${fromY}) to (${toX}, ${toY})`;
+      }
+
+      case "desktop_clipboard_read": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const content = await dc.clipboardRead();
+        return content || "(clipboard empty)";
+      }
+
+      case "desktop_clipboard_write": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const text = String(p.text ?? "");
+        await dc.clipboardWrite(text);
+        return `Wrote to clipboard: "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`;
+      }
+
+      case "desktop_run_command": {
+        if (!dc) throw new Error("Desktop controller not available.");
+        const command = String(p.command ?? "");
+        if (!command) throw new Error("No command for desktop_run_command.");
+        const timeoutMs = p.timeoutMs ? Number(p.timeoutMs) : undefined;
+        const { stdout, stderr } = await dc.runCommand(command, timeoutMs);
+        return (stdout || stderr || "(no output)").slice(0, 2000);
+      }
+
       default:
         throw new Error(`Unknown tool: ${step.tool}`);
     }

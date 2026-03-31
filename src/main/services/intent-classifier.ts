@@ -242,25 +242,32 @@ export async function classify(
   apiKey: string,
 ): Promise<Classification> {
   const heuristic = classifyHeuristic(message);
+  console.log(`[IntentClassifier] heuristic: intent="${heuristic.intent}" confidence=${heuristic.confidence} for message="${message.slice(0, 80)}"`);
 
   // High confidence → use heuristic result directly
-  if (heuristic.confidence >= 0.9) return heuristic;
+  if (heuristic.confidence >= 0.9) {
+    console.log(`[IntentClassifier] High confidence — using heuristic result`);
+    return heuristic;
+  }
 
   // Low confidence → try LLM with timeout
+  console.log(`[IntentClassifier] Low confidence (${heuristic.confidence}) — calling LLM classifier...`);
   try {
     const llmResult = await Promise.race([
       classifyWithLLM(message, pageContext, apiKey),
       new Promise<Classification>((resolve) =>
-        setTimeout(() => resolve(heuristic), 1500),
+        setTimeout(() => { console.warn("[IntentClassifier] LLM timeout — using heuristic"); resolve(heuristic); }, 1500),
       ),
     ]);
+    console.log(`[IntentClassifier] LLM result: intent="${llmResult.intent}" confidence=${llmResult.confidence}`);
     // If LLM returned a directAction-capable intent, try to extract it
     if (llmResult.intent === "navigate" && !llmResult.directAction) {
       const direct = tryExtractDirectAction(message);
-      if (direct) llmResult.directAction = direct;
+      if (direct) { llmResult.directAction = direct; console.log("[IntentClassifier] directAction extracted:", JSON.stringify(direct)); }
     }
     return llmResult;
-  } catch {
+  } catch (err) {
+    console.warn("[IntentClassifier] LLM classify error:", err instanceof Error ? err.message : String(err));
     // Any LLM error → use heuristic (safe default)
     return heuristic;
   }

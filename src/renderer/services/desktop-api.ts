@@ -6,6 +6,7 @@ import type {
   BrowserTabsUpdatedPayload,
   ChatSendRequest,
   DesktopScreenshotResult,
+  DesktopWindowInfo,
   ExtensionMessage,
   GatewayStatus,
   OpenClawConfig,
@@ -86,11 +87,22 @@ export interface AuraDesktopApi {
   desktop: {
     screenshot(): Promise<DesktopScreenshotResult>;
     click(p: { x: number; y: number; button?: string }): Promise<void>;
+    rightClick(p: { x: number; y: number }): Promise<void>;
+    doubleClick(p: { x: number; y: number }): Promise<void>;
     move(p: { x: number; y: number }): Promise<void>;
     type(p: { text: string }): Promise<void>;
     key(p: { key: string }): Promise<void>;
     openApp(p: { target: string }): Promise<void>;
-    getScreenSize(): Promise<{ width: number; height: number }>;
+    getScreenSize(): Promise<{ width: number; height: number; scaleFactor: number }>;
+    scroll(p: { direction: "up" | "down" | "left" | "right"; amount?: number }): Promise<void>;
+    drag(p: { fromX: number; fromY: number; toX: number; toY: number }): Promise<void>;
+    clipboardRead(): Promise<string>;
+    clipboardWrite(p: { text: string }): Promise<void>;
+    runCommand(p: { command: string; timeoutMs?: number }): Promise<{ stdout: string; stderr: string }>;
+    getActiveWindow(): Promise<DesktopWindowInfo | null>;
+    listWindows(): Promise<DesktopWindowInfo[]>;
+    focusWindow(p: { title: string }): Promise<boolean>;
+    getCursor(): Promise<{ x: number; y: number }>;
   };
   onAppEvent(listener: (message: ExtensionMessage<unknown>) => void): () => void;
 }
