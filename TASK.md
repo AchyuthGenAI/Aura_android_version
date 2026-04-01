@@ -25,7 +25,16 @@
 - [x] Action replay (tool result outputs rendered in feed)
 - [ ] Split-screen mode (skipped for MVP)
 
-*(Note: Confirmation prompts and full-desktop overlays skipped for MVP as they require high-level OS/OpenClaw modifications)*
+## 🟡 Phase 5: Native Hard Fork Integration (IN PROGRESS)
+- [x] Draft Robust Implementation Plan for the Hard Fork
+- [x] Rewrite `PRD.md` and `PLAN.md` to reflect Vision-First OS Copilot
+- [x] Clone OpenClaw upstream into `openclaw-fork`
+- [x] Wire up `aura-desktop/package.json` to locally compile the new fork
+- [x] Modify `openclaw-fork` core agent loop to enforce visual checking (See-Decide-Act)
+- [x] Inject Windows Desktop Persona into OpenClaw's system prompts
+- [x] Port `nut.js` skills into OpenClaw's native skill registry
+
+*(Note: Confirmation prompts and full-desktop overlays skipped for MVP as they require high-level OS modifications)*
 
 *(Note: Confirmation prompts skipped for now, focusing on visual highlights)*
 

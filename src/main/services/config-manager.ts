@@ -18,8 +18,9 @@ export class ConfigManager {
     this.configPath = path.join(openClawDotDir, "openclaw.json");
     fs.mkdirSync(openClawDotDir, { recursive: true });
     this.gatewayToken = this.ensureGatewayToken();
-    // Pre-write auth profile so it's ready before gateway spawns
+    // Pre-write auth profiles so they're ready before gateway spawns
     this.ensureGroqAuthProfile();
+    this.ensureGeminiAuthProfile();
   }
 
   getOpenClawHomePath(): string {
@@ -126,21 +127,22 @@ export class ConfigManager {
       changed = true;
     }
 
-    // Ensure the agent is configured to use Groq so OpenClaw doesn't default to Anthropic.
+    // Ensure the agent is configured to use Gemini 2.0 Flash (stable).
     // OpenClaw reads agents.defaults.model.primary for the model selection.
     if (!config.agents) {
       config.agents = {};
       changed = true;
     }
-    if (!config.agents.defaults?.model?.primary) {
+    const currentPrimary = config.agents.defaults?.model?.primary;
+    if (!currentPrimary || currentPrimary === "groq/llama-3.3-70b-versatile" || currentPrimary === "google/gemini-1.5-pro" || currentPrimary === "google/gemini-3.0-flash" || currentPrimary === "google/gemini-2.5-pro") {
       config.agents.defaults = {
         model: {
-          primary: "groq/llama-3.3-70b-versatile",
-          fallbacks: [],
+          primary: "google/gemini-2.0-flash",
+          fallbacks: ["groq/llama-3.3-70b-versatile"],
         },
         models: {
+          "google/gemini-2.0-flash": {},
           "groq/llama-3.3-70b-versatile": {},
-          "groq/meta-llama/llama-4-scout-17b-16e-instruct": {},
         },
       };
       changed = true;
@@ -150,9 +152,9 @@ export class ConfigManager {
       this.writeConfig(config);
     }
 
-    // Write the Groq auth profile for OpenClaw's agent so it can actually call the API.
-    // This is stored as a separate JSON file that OpenClaw reads for provider credentials.
+    // Write auth profiles for both Gemini and Groq
     this.ensureGroqAuthProfile();
+    this.ensureGeminiAuthProfile();
   }
 
   /** Write/update the Groq auth-profiles.json that OpenClaw's agent reads for API keys. */
@@ -197,6 +199,45 @@ export class ConfigManager {
       console.log("[ConfigManager] Wrote Groq auth profile to", authFile);
     } catch (err) {
       console.warn("[ConfigManager] Failed to write Groq auth profile:", err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Write/update the Gemini auth-profiles.json entry that OpenClaw's agent reads for Google API keys. */
+  ensureGeminiAuthProfile(): void {
+    const config = this.readConfig();
+    const geminiKey =
+      process.env["GOOGLE_API_KEY"] ||
+      config.providers?.google?.apiKey ||
+      "";
+    console.log(`[ConfigManager] ensureGeminiAuthProfile — key found=${Boolean(geminiKey)} len=${geminiKey.length}`);
+    if (!geminiKey) return;
+
+    const authDir = path.join(this.openClawHomePath, ".openclaw", "agents", "main", "agent");
+    const authFile = path.join(authDir, "auth-profiles.json");
+
+    try {
+      fs.mkdirSync(authDir, { recursive: true });
+
+      interface AuthProfiles {
+        version: number;
+        profiles: Record<string, { type: string; provider: string; key: string }>;
+        usageStats?: Record<string, unknown>;
+      }
+
+      let existing: AuthProfiles = { version: 1, profiles: {} };
+      if (fs.existsSync(authFile)) {
+        try { existing = JSON.parse(fs.readFileSync(authFile, "utf8")) as AuthProfiles; } catch { /* corrupt — reset */ }
+      }
+
+      if (existing.profiles?.["google:aura"]?.key === geminiKey) return;
+
+      existing.profiles = existing.profiles ?? {};
+      existing.profiles["google:aura"] = { type: "api_key", provider: "google", key: geminiKey };
+
+      fs.writeFileSync(authFile, JSON.stringify(existing, null, 2), "utf8");
+      console.log("[ConfigManager] Wrote Gemini auth profile to", authFile);
+    } catch (err) {
+      console.warn("[ConfigManager] Failed to write Gemini auth profile:", err instanceof Error ? err.message : String(err));
     }
   }
 

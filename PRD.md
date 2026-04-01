@@ -2,16 +2,16 @@
 
 ## Vision
 
-Aura Desktop is a **one-click AI assistant** that gives normal users access to OpenClaw's full automation capabilities. Users install one app and immediately get an AI that can:
+Aura Desktop is a **Native Windows AI Copilot** powered by a custom, vision-first hard fork of OpenClaw. It provides an immediate, zero-configuration local AI that can:
 
-- **Browse the web** — navigate sites, fill forms, click buttons, extract data
-- **Control their computer** — run shell commands, manage files, open apps
-- **Search the web** — find information, fetch page content
-- **Automate tasks** — schedule recurring jobs via cron
-- **Manage sessions** — spawn sub-agents for complex multi-step tasks
-- **Generate media** — create images, text-to-speech
+- **Master the Desktop** — natively read the physical screen, control the OS, and behave like a human taking actions (vision-first).
+- **Browse the web** — navigate sites, fill forms, click buttons, extract DOM data (headless HTML-first).
+- **Search the web** — find information, fetch page content.
+- **Automate tasks** — schedule recurring jobs via cron.
+- **Manage sessions** — spawn sub-agents for complex multi-step tasks.
+- **Generate media** — create images, text-to-speech.
 
-The key principle: **zero configuration**. No API keys to manage. No terminal to open. No dependencies to install. Download → Install → Chat.
+The key principle: **deep native intelligence with zero configuration**. No API keys to manage. No terminal to open. Download → Install → Chat.
 
 ## Target User
 
@@ -42,11 +42,11 @@ A floating overlay that stays on top of other windows. Accessible from the syste
 
 ## Technical Architecture
 
-### OpenClaw Integration
-- OpenClaw runs **locally** as a subprocess inside the Electron app
-- Communication via **WebSocket** (localhost:18789)
-- Protocol: JSON messages (`chat.send`, `chat.abort`)
-- Auth: Token-based (auto-generated, no user involvement)
+### Custom OpenClaw Hard Fork
+- Aura embeds a **custom-built, vision-first hard fork** of OpenClaw (compiled from `openclaw-fork`).
+- Runs **locally** as a subprocess gateway.
+- Deeply integrated Native Desktop skills (`desktop_screenshot`, `desktop_click`) embedded into the agent's core reasoning Loop.
+- Auth: Token-based (auto-generated, no user involvement).
 
 ### Fallback
 When the OpenClaw gateway isn't available (startup failure, timeout, crash):
@@ -65,7 +65,7 @@ When the OpenClaw gateway isn't available (startup failure, timeout, crash):
 |---------|-------|---------|
 | Chat | `home` | OpenClaw gateway → Groq fallback |
 | Browser automation | `browser` | OpenClaw gateway (browser tool) |
-| Desktop automation | `desktop` | DesktopController (nut.js) → OpenClaw |
+| Desktop automation | `desktop` | Custom OpenClaw Gateway (Vision-First) |
 | Page monitors | `monitors` | MonitorManager (polling) |
 | Skills catalog | `skills` | OpenClaw skills directory |
 | Session history | `history` | Local store |

@@ -2,7 +2,7 @@
 
 ## What Aura Is
 
-Aura Desktop is a **zero-configuration desktop wrapper** for [OpenClaw](https://github.com/nicepkg/openclaw). Users download one installer, launch the app, and get immediate access to OpenClaw's full AI automation capabilities through a premium chat interface. No terminal. No API key setup. No separate downloads.
+Aura Desktop is a **Native Windows PC Copilot** powered by a custom-built, vision-first hard-fork of [OpenClaw](https://github.com/nicepkg/openclaw). Users download one installer and get immediate access to an AI agent that naturally interacts with both web browsers and the native OS through a premium chat interface. No API key setup. No separate downloads.
 
 ## Architecture Overview
 
@@ -11,36 +11,28 @@ Aura Desktop is a **zero-configuration desktop wrapper** for [OpenClaw](https://
 │                        Electron Main Process                      │
 │                                                                   │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐ │
-│  │ GatewayManager   │  │ BrowserController│  │ DesktopController│ │
-│  │ (core service)   │  │ (BrowserView)    │  │ (nut.js)         │ │
-│  │                  │  │                  │  │                  │ │
-│  │ • Spawns OpenClaw│  │ • Multi-tab      │  │ • Mouse/keyboard │ │
-│  │   as subprocess  │  │ • URL navigation │  │ • Screenshots    │ │
-│  │ • WebSocket conn │  │ • DOM extraction │  │ • App launching  │ │
-│  │ • Routes chat    │  │ • Selection      │  │ • Clipboard      │ │
-│  │ • Intent classify│  │                  │  │                  │ │
-│  └───────┬──────────┘  └──────────────────┘  └──────────────────┘ │
-│          │ WebSocket (localhost:18789)                             │
-│          ▼                                                        │
-│  ┌──────────────────────────────────────────────────────────────┐ │
-│  │ OpenClaw Gateway (child process, ELECTRON_RUN_AS_NODE=1)     │ │
-│  │                                                              │ │
-│  │  Entry: openclaw-src/openclaw.mjs                            │ │
-│  │  Mode:  gateway run --port 18789 --auth token                │ │
-│  │                                                              │ │
-│  │  27 Core Tools:                                              │ │
-│  │  ├─ Files:      read, write, edit, apply_patch               │ │
-│  │  ├─ Runtime:    exec (shell), process (background)           │ │
-│  │  ├─ Web:        web_search, web_fetch                        │ │
-│  │  ├─ Browser:    browser (Playwright - navigate/click/type)   │ │
-│  │  ├─ Sessions:   spawn, send, list, history, yield            │ │
-│  │  ├─ Automation: cron, gateway                                │ │
-│  │  ├─ Media:      image, image_generate, tts                   │ │
-│  │  └─ Messaging:  message, nodes, canvas                       │ │
-│  │                                                              │ │
-│  │  + 52 bundled skills + plugin tools                          │ │
-│  └──────────────────────────────────────────────────────────────┘ │
-│                                                                   │
+│  │ GatewayManager  │  │ BrowserController│  │ Native OS Context│ │
+│  │ (core service)  │  │ (BrowserView)   │  │ (Window ID, Res) │ │
+│  │                 │  │                 │  │                  │ │
+│  │ • Spawns Custom │  │ • Multi-tab     │  │ • Syncs PC state │ │
+│  │   OpenClaw Fork │  │ • URL navigation│  │ • Stream over WS │ │
+│  │ • Routes chat   │  │ • DOM extraction│  │                  │ │
+│  │ • Intent classify│  │                 │  │                  │ │
+│  └───────┬─────────┘  └─────────────────┘  └──────────────────┘ │
+│          │ WebSocket (localhost:18789) - includes payload Context│
+│          ▼                                                      │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │ Custom OpenClaw Gateway (Vision-First Fork)                │ │
+│  │                                                            │ │
+│  │  Compiled from: openclaw-fork/dist                         │ │
+│  │                                                            │ │
+│  │  Custom Agent Features:                                    │ │
+│  │  ├─ OS State Loop: Forces Vision capture on desktop       │ │
+│  │  ├─ Native Skills: desktop_screenshot, click, type        │ │
+│  │  ├─ Web Skills: Browser (Playwright) dom parsing          │ │
+│  │  └─ Core Tools: Files, Shell, Search, Media, etc.         │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                 │
 │          │ IPC (contextBridge)                                     │
 │          ▼                                                        │
 │  ┌──────────────────────────────────────────────────────────────┐ │
@@ -121,30 +113,28 @@ App launches → SplashScreen
       └─ Timeout → "Aura is ready (direct LLM mode)" (Groq fallback)
 ```
 
-## OpenClaw Integration Details
+## OpenClaw Fork Details
 
 | Aspect | Detail |
 |--------|--------|
-| **Entry point** | `openclaw-src/openclaw.mjs` |
+| **Source** | Forked explicitly for native desktop support (`openclaw-fork`) |
 | **Child process** | `spawn(process.execPath, [entryPath, "gateway", "run", ...])` |
-| **Node version** | Electron bundles Node 22.22.0 (satisfies OpenClaw requirements) |
-| **Environment** | `ELECTRON_RUN_AS_NODE=1`, `OPENCLAW_HOME`, `GROQ_API_KEY` |
-| **Protocol** | WebSocket JSON, protocol version 3 |
-| **Auth** | Token-based (`--auth token`, token in subprotocol) |
-| **Reconnect** | Auto-reconnect after 3s if WebSocket drops |
+| **Protocol** | WebSocket JSON (+ DesktopContext payload) |
+| **Intelligence** | Modified "See-Decide-Act" loop for the OS persona |
 
 ## Build & Bundle
 
 ```bash
-npm run dev          # Development (Vite HMR + Electron)
+npm run dev          # Development (Vite HMR + Electron + OpenClaw TS)
 npm run build        # Production build
-npm run dist         # Package with electron-builder
+npm run package:win  # Package with electron-builder
 ```
 
-OpenClaw source is bundled via `extraResources` in `package.json`:
+The custom OpenClaw compiled gateway is bundled via `extraResources` in `package.json`:
 ```json
 "extraResources": [
-  { "from": "../openclaw-src", "to": "openclaw-src" }
+  { "from": "../openclaw-fork/dist", "to": "openclaw-src/dist" },
+  { "from": "../openclaw-fork/skills", "to": "openclaw-src/skills" }
 ]
 ```
 

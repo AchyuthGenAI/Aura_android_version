@@ -59,21 +59,23 @@ Critical rules:
 - NEVER guess coordinates for things not visible — scroll or wait first
 - Do not repeat an action that already failed`;
 
-function httpsPost(body: string, apiKey: string): Promise<string> {
+export type VisionProvider = "gemini" | "groq";
+
+function httpsPost(url: string, headers: Record<string, string>, body: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    console.log("[VisionAgent] POST https://api.groq.com/openai/v1/chat/completions — body", body.length, "bytes");
+    console.log(`[VisionAgent] POST ${url.slice(0, 50)}... — body ${body.length} bytes`);
 
     const req = net.request({
       method: "POST",
-      url: "https://api.groq.com/openai/v1/chat/completions",
+      url,
     });
-    req.setHeader("Content-Type", "application/json");
-    req.setHeader("Authorization", `Bearer ${apiKey.slice(0, 8)}...`);
+    for (const [key, val] of Object.entries(headers)) {
+      req.setHeader(key, val);
+    }
 
-    // Electron net.ClientRequest has no setTimeout — use a manual timer
     const timeoutId = setTimeout(() => {
       req.abort();
-      reject(new Error("Groq vision request timed out after 60s"));
+      reject(new Error("Vision request timed out after 60s"));
     }, 60_000);
 
     let data = "";
@@ -85,7 +87,7 @@ function httpsPost(body: string, apiKey: string): Promise<string> {
         console.log("[VisionAgent] Response body length:", data.length);
         if (res.statusCode !== 200) {
           console.error("[VisionAgent] API error:", data.slice(0, 300));
-          reject(new Error(`Groq vision API ${res.statusCode}: ${data.slice(0, 300)}`));
+          reject(new Error(`Vision API ${res.statusCode}: ${data.slice(0, 300)}`));
         } else {
           resolve(data);
         }
@@ -106,6 +108,70 @@ function httpsPost(body: string, apiKey: string): Promise<string> {
   });
 }
 
+function processScreenshotDataUrl(dataUrl: string): { mimeType: string, data: string } {
+  // Extract "data:image/png;base64,....." -> mimeType and base64 parts
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) throw new Error("Invalid screenshot data URL");
+  return { mimeType: match[1] ?? "image/png", data: match[2] ?? "" };
+}
+
+async function callGeminiVision(
+  apiKey: string,
+  screenshotDataUrl: string,
+  goal: string,
+  history: string[],
+  screenWidth: number,
+  screenHeight: number,
+): Promise<VisionAction> {
+  const model = "gemini-2.0-flash";
+  console.log(`[VisionAgent] callGeminiVision — goal="${goal}" history=${history.length} screen=${screenWidth}x${screenHeight}`);
+  
+  const historyText = history.length > 0
+    ? `\nActions taken so far:\n${history.map((h, i) => `${i + 1}. ${h}`).join("\n")}`
+    : "";
+  const prompt = `Goal: ${goal}${historyText}\n\nScreen resolution: ${screenWidth}x${screenHeight} logical pixels.\nWhat is the single next action?`;
+
+  const { mimeType, data } = processScreenshotDataUrl(screenshotDataUrl);
+
+  const requestBody = JSON.stringify({
+    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: prompt },
+          { inline_data: { mime_type: mimeType, data } }
+        ]
+      }
+    ],
+    generationConfig: {
+      temperature: 0.1,
+    }
+  });
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const responseText = await httpsPost(url, { "Content-Type": "application/json" }, requestBody);
+
+  const parsed = JSON.parse(responseText) as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+    error?: { message?: string };
+  };
+
+  if (parsed.error) {
+    throw new Error(`Gemini error: ${parsed.error.message}`);
+  }
+
+  const raw = parsed.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
+  console.log(`[VisionAgent] Raw LLM response: ${raw.slice(0, 100)}...`);
+
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error(`Vision LLM non-JSON response: ${raw.slice(0, 120)}`);
+  }
+
+  return JSON.parse(jsonMatch[0]) as VisionAction;
+}
+
 async function callGroqVision(
   apiKey: string,
   screenshotDataUrl: string,
@@ -114,7 +180,7 @@ async function callGroqVision(
   screenWidth: number,
   screenHeight: number,
 ): Promise<VisionAction> {
-  console.log(`[VisionAgent] callGroqVision — goal="${goal}" history=${history.length} screen=${screenWidth}x${screenHeight} screenshot=${screenshotDataUrl.length} chars`);
+  console.log(`[VisionAgent] callGroqVision — goal="${goal}" history=${history.length} screen=${screenWidth}x${screenHeight}`);
 
   const historyText = history.length > 0
     ? `\nActions taken so far:\n${history.map((h, i) => `${i + 1}. ${h}`).join("\n")}`
@@ -142,7 +208,11 @@ async function callGroqVision(
   });
 
   console.log(`[VisionAgent] Sending to Groq model=${GROQ_VISION_MODEL} payload=${requestBody.length} bytes`);
-  const responseText = await httpsPost(requestBody, apiKey);
+  const responseText = await httpsPost(
+    "https://api.groq.com/openai/v1/chat/completions",
+    { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+    requestBody
+  );
 
   const parsed = JSON.parse(responseText) as {
     choices?: Array<{ message?: { content?: string } }>;
@@ -175,6 +245,7 @@ function delay(ms: number): Promise<void> {
 
 export async function runVisionAgent(params: {
   goal: string;
+  provider: VisionProvider;
   apiKey: string;
   dc: DesktopController;
   onStep?: VisionStepCallback;
@@ -182,20 +253,20 @@ export async function runVisionAgent(params: {
   onBeforeCapture?: () => void;
   onAfterCapture?: () => void;
 }): Promise<string> {
-  const { goal, apiKey, dc, onStep, onToken, onBeforeCapture, onAfterCapture } = params;
+  const { goal, provider, apiKey, dc, onStep, onToken, onBeforeCapture, onAfterCapture } = params;
   const history: string[] = [];
+  const actionHistory: VisionAction[] = [];
   const emit = (text: string) => onToken?.(text);
 
   console.log(`\n${"═".repeat(60)}`);
   console.log(`[VisionAgent] START goal="${goal}"`);
-  console.log(`[VisionAgent] apiKey present=${Boolean(apiKey)} model=${GROQ_VISION_MODEL} maxIterations=${MAX_ITERATIONS}`);
+  console.log(`[VisionAgent] provider=${provider} apiKey present=${Boolean(apiKey)} maxIterations=${MAX_ITERATIONS}`);
   console.log(`${"═".repeat(60)}`);
   emit(`Starting: "${goal}"\n`);
 
   for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
     console.log(`\n[VisionAgent] ── Step ${iteration}/${MAX_ITERATIONS} ──────────────────`);
 
-    // Hide Aura window so the LLM sees a clean desktop
     console.log("[VisionAgent] Minimizing Aura window...");
     onBeforeCapture?.();
     await delay(300);
@@ -209,10 +280,11 @@ export async function runVisionAgent(params: {
 
     emit(`[Step ${iteration}] Analyzing screen...\n`);
 
-    // Ask vision LLM
     let action: VisionAction;
     try {
-      action = await callGroqVision(apiKey, screenshot.dataUrl, goal, history, width, height);
+      action = provider === "gemini"
+        ? await callGeminiVision(apiKey, screenshot.dataUrl, goal, history, width, height)
+        : await callGroqVision(apiKey, screenshot.dataUrl, goal, history, width, height);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[VisionAgent] Step ${iteration} LLM call failed (attempt 1):`, msg);
@@ -220,7 +292,9 @@ export async function runVisionAgent(params: {
       await delay(1500);
       try {
         console.log(`[VisionAgent] Step ${iteration} retry attempt 2...`);
-        action = await callGroqVision(apiKey, screenshot.dataUrl, goal, history, width, height);
+        action = provider === "gemini"
+          ? await callGeminiVision(apiKey, screenshot.dataUrl, goal, history, width, height)
+          : await callGroqVision(apiKey, screenshot.dataUrl, goal, history, width, height);
       } catch (err2) {
         const msg2 = err2 instanceof Error ? err2.message : String(err2);
         console.error(`[VisionAgent] Step ${iteration} LLM call failed (attempt 2):`, msg2);
@@ -230,6 +304,26 @@ export async function runVisionAgent(params: {
     }
 
     console.log(`[VisionAgent] Action decided: ${JSON.stringify(action)}`);
+
+    // --- Loop Detection ---
+    const isRepeatClick = (a: VisionAction, b: VisionAction) =>
+      a.action === "click" && b.action === "click" && a.x === b.x && a.y === b.y;
+
+    if (actionHistory.length >= 2) {
+      const prev1 = actionHistory[actionHistory.length - 1]!;
+      const prev2 = actionHistory[actionHistory.length - 2]!;
+      if (isRepeatClick(action, prev1) && isRepeatClick(action, prev2)) {
+        console.warn("[VisionAgent] Loop detected: 3rd identical click. Injecting jitter...");
+        emit(`[Step ${iteration}] Loop detected. Attempting to recover...\n`);
+        if (action.action === "click") {
+          action.x += (Math.random() - 0.5) * 10;
+          action.y += (Math.random() - 0.5) * 10;
+          action.description += " (jittered to break loop)";
+        }
+      }
+    }
+    actionHistory.push(action);
+
     onStep?.({ iteration, action });
 
     // Terminal states

@@ -69,6 +69,8 @@ const resolveOpenClawRootCandidates = (): string[] => {
 
   return Array.from(
     new Set([
+      path.join(appPath, "..", "openclaw-fork"),
+      path.join(appPath, "..", "..", "openclaw-fork"),
       path.join(process.resourcesPath, "openclaw-src"),
       path.join(appPath, "openclaw-src"),
       path.join(appPath, "..", "openclaw-src"),

@@ -8,7 +8,7 @@
  */
 
 import type { PageContext } from "@shared/types";
-import { completeChat } from "./llm-client";
+import { completeChat, resolveProvider } from "./llm-client";
 
 export type DesktopIntent = "query" | "task" | "navigate" | "autofill" | "monitor" | "desktop";
 
@@ -92,6 +92,12 @@ function normalizeOpenTarget(value: string): string | null {
 
 function tryExtractDirectAction(message: string): DirectAction | null {
   const t = message.trim();
+
+  // If the command contains continuation words, it's a multi-step task, not a single direct action.
+  // Exception: 'add to cart and checkout' etc. Let the task planner handle it.
+  if (/\b(?:and\s+(?:then\s+)?|then\s+|next\s+|after\s+that)\b/i.test(t)) {
+    return null;
+  }
 
   // Navigate — "go to youtube.com", "open amazon"
   const navMatch = t.match(/(?:go\s+to|visit|navigate\s+to|take\s+me\s+to|load|launch|open)\s+(.+)/i);
@@ -208,6 +214,7 @@ Classify the user's message into exactly one intent:
 - "navigate" — go to a URL or search for something
 - "autofill" — fill a form using the user's profile data
 - "monitor" — watch a page for changes and alert
+- "desktop" — interact with the Windows desktop, open native apps, or take screenshots
 
 Respond with ONLY the intent word, nothing else.`;
 
@@ -223,10 +230,10 @@ export async function classifyWithLLM(
   const result = await completeChat(apiKey, [
     { role: "system", content: CLASSIFIER_SYSTEM_PROMPT },
     { role: "user", content: `${message}${contextHint}` },
-  ], { model: "llama-3.1-8b-instant", maxTokens: 10, temperature: 0 });
+  ], { maxTokens: 10, temperature: 0 });
 
   const intent = result.trim().toLowerCase().replace(/[^a-z]/g, "") as DesktopIntent;
-  const valid: DesktopIntent[] = ["query", "task", "navigate", "autofill", "monitor"];
+  const valid: DesktopIntent[] = ["query", "task", "navigate", "autofill", "monitor", "desktop"];
 
   if (valid.includes(intent)) {
     return { intent, confidence: 0.8 };

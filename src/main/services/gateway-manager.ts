@@ -28,7 +28,8 @@ import type { MonitorManager } from "./monitor-manager";
 import type { DesktopController } from "./desktop-controller";
 
 import WebSocket from "ws";
-import { completeChat, resolveGroqApiKey, streamChat } from "./llm-client";
+import { completeChat, resolveGroqApiKey, resolveGeminiApiKey, resolveProvider, streamChat } from "./llm-client";
+import type { VisionProvider } from "./vision-agent";
 
 const now = (): number => Date.now();
 
@@ -194,6 +195,7 @@ export class GatewayManager {
 
     const candidates = this.openClawRootCandidates.map((c) => path.join(c, "openclaw.mjs"));
     this.openClawEntryPath = candidates.find((c) => fs.existsSync(c)) ?? null;
+    console.log(`[GatewayManager] Selected OpenClaw entry path: ${this.openClawEntryPath}`);
     this.openClawRootPath = this.openClawEntryPath ? path.dirname(this.openClawEntryPath) : null;
 
     if (!this.openClawEntryPath) {
@@ -336,9 +338,11 @@ export class GatewayManager {
     console.log(`[GatewayManager] pageContext url="${pageContext?.url ?? "none"}" title="${pageContext?.title ?? "none"}"`);
 
     const groqConfig = this.configManager.readConfig();
-    const configKey = groqConfig.providers?.groq?.apiKey;
-    const apiKey = resolveGroqApiKey(configKey);
-    console.log(`[GatewayManager] apiKey resolved=${Boolean(apiKey)}`);
+    const { provider: llmProvider, apiKey } = resolveProvider(
+      groqConfig.providers?.google?.apiKey,
+      groqConfig.providers?.groq?.apiKey,
+    );
+    console.log(`[GatewayManager] LLM provider=${llmProvider} apiKey resolved=${Boolean(apiKey)}`);
 
     // ── Classify intent ──
     let classification: Classification;
@@ -372,14 +376,10 @@ export class GatewayManager {
       return this.handleMonitorIntent(messageId, taskId, session, request, pageContext, apiKey);
     }
 
-    if (classification.intent === "desktop" && this.desktopController) {
+    if (classification.intent === "desktop") {
       console.log("[GatewayManager] → handleDesktopIntent (vision agent)");
       return this.handleDesktopIntent(messageId, taskId, session, request);
     }
-    if (classification.intent === "desktop" && !this.desktopController) {
-      console.warn("[GatewayManager] desktop intent but desktopController is null — falling back to query");
-    }
-
     // task, autofill, or navigate-without-directAction → plan and execute
     console.log("[GatewayManager] → handleTaskIntent");
     return this.handleTaskIntent(messageId, taskId, session, request, pageContext, classification);
@@ -393,6 +393,7 @@ export class GatewayManager {
     session: AuraSession,
     request: ChatSendRequest,
     pageContext: PageContext | null,
+    extraSystemPrompt?: string
   ): Promise<{ messageId: string; taskId: string }> {
     const task = this.createLegacyTask(taskId, request.message);
     this.emitProgress(task, { type: "status", statusText: "Thinking..." });
@@ -411,10 +412,10 @@ export class GatewayManager {
       if (this.connected) {
         // Route through OpenClaw agent (has skills, memory, browser tools, web search)
         this.emitProgress(task, { type: "step_start", statusText: "OpenClaw agent working..." });
-        responseText = await this.streamViaOpenClaw(messageId, request.message, "main");
+        responseText = await this.streamViaOpenClaw(messageId, request.message, "main", extraSystemPrompt);
       } else {
         // Fallback: direct Groq streaming
-        responseText = await this.streamViaGroq(messageId, prompt, request.history);
+        responseText = await this.streamViaDirectLLM(messageId, prompt, request.history);
       }
       this.handleChatSuccess(messageId, taskId, task, session, request, responseText);
     } catch (err) {
@@ -437,6 +438,11 @@ export class GatewayManager {
     request: ChatSendRequest,
     classification: Classification,
   ): Promise<{ messageId: string; taskId: string }> {
+    // If we are connected to OpenClaw and it's a desktop action, prefer the agent for better pacing/vision
+    if (this.connected && classification.intent === "desktop") {
+      return this.handleQueryIntent(messageId, taskId, session, request, null, "desktop");
+    }
+
     const action = classification.directAction!;
     const step: TaskStep = {
       index: 0,
@@ -709,7 +715,8 @@ export class GatewayManager {
     // When OpenClaw is connected, let the agent handle it
     if (this.connected) {
       console.log("[GatewayManager] OpenClaw connected — delegating desktop task to OpenClaw agent");
-      return this.handleQueryIntent(messageId, taskId, session, request, null);
+      const desktopPersona = "You are currently operating in NATIVE WINDOWS DESKTOP mode. You do not have DOM access. You must use `desktop_screenshot` and `desktop_click`/`desktop_type` to visually analyze and interact with the screen. CRITICAL: AFTER EVERY SINGLE desktop_click OR desktop_type ACTION, YOU MUST YIELD AND CALL `desktop_screenshot` AGAIN to verify the OS responded before proceeding.";
+      return this.handleQueryIntent(messageId, taskId, session, request, null, desktopPersona);
     }
 
     if (!this.desktopController) {
@@ -717,11 +724,17 @@ export class GatewayManager {
       return this.handleQueryIntent(messageId, taskId, session, request, null);
     }
 
-    const groqConfig = this.configManager.readConfig();
-    const apiKey = resolveGroqApiKey(groqConfig.providers?.groq?.apiKey);
-    console.log(`[GatewayManager] Groq apiKey for vision: ${apiKey ? `${apiKey.slice(0, 8)}...` : "MISSING"}`);
+    // Resolve provider: prioritize Gemini for vision as Groq keys are currently prone to 401s
+    const config = this.configManager.readConfig();
+    let geminiKey = resolveGeminiApiKey(config.providers?.google?.apiKey);
+    let groqKey = resolveGroqApiKey(config.providers?.groq?.apiKey);
+
+    let visionProvider: VisionProvider = geminiKey ? "gemini" : "groq";
+    let apiKey = (visionProvider === "gemini" ? geminiKey : groqKey) as string;
+
+    console.log(`[GatewayManager] LLM for vision: provider=${visionProvider} key=${apiKey ? `${apiKey.slice(0, 8)}...` : "MISSING"}`);
     if (!apiKey) {
-      console.warn("[GatewayManager] No Groq API key — cannot run vision agent, falling back to chat");
+      console.warn("[GatewayManager] No LLM API key — cannot run vision agent, falling back to chat");
       return this.handleQueryIntent(messageId, taskId, session, request, null);
     }
 
@@ -743,6 +756,7 @@ export class GatewayManager {
       console.log("[GatewayManager] Starting vision agent for goal:", request.message);
       const result = await runVisionAgent({
         goal: request.message,
+        provider: visionProvider,
         apiKey,
         dc: this.desktopController,
         onBeforeCapture: () => {
@@ -793,16 +807,18 @@ export class GatewayManager {
     return { messageId, taskId };
   }
 
-  // ── Task planner: Groq LLM generates step array ──────────────────────────
+  // ── Task planner: LLM generates step array ──────────────────────────────
 
   private async planTask(
     userMessage: string,
     pageContext: PageContext | null,
     classification: Classification,
   ): Promise<TaskStep[]> {
-    const groqConfig = this.configManager.readConfig();
-    const configKey = groqConfig.providers?.groq?.apiKey;
-    const apiKey = resolveGroqApiKey(configKey);
+    const config = this.configManager.readConfig();
+    const { provider, apiKey } = resolveProvider(
+      config.providers?.google?.apiKey,
+      config.providers?.groq?.apiKey,
+    );
 
     const profile = this.store.getState().profile;
     const systemPrompt = this.buildPlannerPrompt(pageContext, profile, classification);
@@ -810,7 +826,7 @@ export class GatewayManager {
     const result = await completeChat(apiKey, [
       { role: "system", content: systemPrompt },
       { role: "user", content: userMessage },
-    ], { model: "llama-3.1-8b-instant", maxTokens: 800, temperature: 0.1 });
+    ], { maxTokens: 800, temperature: 0.1, provider });
 
     // Extract JSON array from response (handle markdown fences)
     const jsonMatch = result.match(/\[[\s\S]*\]/);
@@ -907,29 +923,32 @@ export class GatewayManager {
   }
 
   /**
-   * Stream chat via direct Groq API call.
+   * Stream chat via direct LLM API call (Gemini primary, Groq fallback).
    * Emits LLM_TOKEN events in real-time as tokens arrive.
    */
-  private streamViaGroq(
+  private streamViaDirectLLM(
     messageId: string,
     prompt: string,
     history?: Array<{ role: string; content: string }>,
   ): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      const groqConfig = this.configManager.readConfig();
-      const configKey = groqConfig.providers?.groq?.apiKey;
-      const apiKey = resolveGroqApiKey(configKey);
+      const config = this.configManager.readConfig();
+      const { provider, apiKey } = resolveProvider(
+        config.providers?.google?.apiKey,
+        config.providers?.groq?.apiKey,
+      );
 
       if (!apiKey) {
-        reject(new Error("No Groq API key configured. Add one in Settings or set GROQ_API_KEY env var."));
+        reject(new Error("No LLM API key configured. Add a Gemini or Groq key in Settings."));
         return;
       }
+
+      console.log(`[GatewayManager] streamViaDirectLLM — provider=${provider}`);
 
       const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
         { role: "system", content: "You are Aura, a helpful AI assistant running inside Aura Desktop. Be concise, friendly, and helpful. Use markdown for formatting when appropriate." },
       ];
 
-      // Add conversation history for context
       if (history && history.length > 0) {
         for (const msg of history.slice(-10)) {
           messages.push({
@@ -941,7 +960,6 @@ export class GatewayManager {
 
       messages.push({ role: "user", content: prompt });
 
-      const model = groqConfig.agents?.main?.model ?? "llama-3.3-70b-versatile";
       let resolved = false;
 
       streamChat(apiKey, messages, {
@@ -963,7 +981,7 @@ export class GatewayManager {
             reject(err);
           }
         },
-      }, { model });
+      }, { provider });
     });
   }
 
@@ -973,6 +991,7 @@ export class GatewayManager {
     messageId: string,
     message: string,
     sessionKey: string,
+    extraSystemPrompt?: string
   ): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       this.streamedText = "";
@@ -986,6 +1005,7 @@ export class GatewayManager {
         sessionKey,
         message,
         idempotencyKey,
+        ...(extraSystemPrompt ? { extraSystemPrompt } : {})
       }, { timeoutMs: 120_000 })
         .then((res) => {
           if (res?.runId) {
@@ -1026,10 +1046,10 @@ export class GatewayManager {
         "--force",
       ];
 
-      // Resolve the Groq API key so OpenClaw's agent can use it
-      const groqApiKey = resolveGroqApiKey(
-        this.configManager.readConfig().providers?.groq?.apiKey
-      );
+      // Resolve API keys so OpenClaw's agent can use them
+      const config = this.configManager.readConfig();
+      const groqApiKey = resolveGroqApiKey(config.providers?.groq?.apiKey);
+      const geminiApiKey = resolveGeminiApiKey(config.providers?.google?.apiKey);
 
       const child = spawn(process.execPath, args, {
         cwd: path.dirname(this.openClawEntryPath),
@@ -1038,6 +1058,7 @@ export class GatewayManager {
           ELECTRON_RUN_AS_NODE: "1",
           OPENCLAW_HOME: this.configManager.getOpenClawHomePath(),
           ...(groqApiKey ? { GROQ_API_KEY: groqApiKey } : {}),
+          ...(geminiApiKey ? { GOOGLE_API_KEY: geminiApiKey } : {}),
         },
         stdio: ["ignore", "pipe", "pipe"],
       });

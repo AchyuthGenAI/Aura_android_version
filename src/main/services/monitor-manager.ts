@@ -3,7 +3,7 @@ import { Notification } from "electron";
 import type { ExtensionMessage, PageMonitor } from "@shared/types";
 
 import type { BrowserController } from "./browser-controller";
-import { completeChat, resolveGroqApiKey } from "./llm-client";
+import { completeChat, resolveProvider } from "./llm-client";
 import type { AuraStore } from "./store";
 
 type EmitFn = (message: ExtensionMessage<unknown>) => void;
@@ -128,7 +128,7 @@ export class MonitorManager {
 
     // For complex conditions, use LLM evaluation
     try {
-      const apiKey = resolveGroqApiKey();
+      const { apiKey } = resolveProvider();
       const result = await completeChat(
         apiKey,
         [
@@ -142,7 +142,7 @@ export class MonitorManager {
             content: `Condition: ${condition}\n\nPage content (first 1500 chars):\n${visibleText.slice(0, 1500)}\n\nIs the condition met?`,
           },
         ],
-        { model: "llama-3.1-8b-instant", maxTokens: 5, temperature: 0 }
+        { maxTokens: 5, temperature: 0 }
       );
       return result.trim().toLowerCase().startsWith("yes");
     } catch {

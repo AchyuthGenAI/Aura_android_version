@@ -12,7 +12,8 @@
     "dev:main": "tsup --watch",
     "dev:electron": "wait-on http-get://127.0.0.1:5173 file:dist/main.cjs && node scripts/dev-electron.cjs",
     "dev:electron:debug": "wait-on http-get://127.0.0.1:5173 file:dist/main.cjs && AURA_OPEN_DEVTOOLS=1 node scripts/dev-electron.cjs",
-    "build": "npm run build:main && npm run build:renderer",
+    "build:openclaw": "cd ../openclaw-fork && pnpm install && pnpm build",
+    "build": "npm run build:openclaw && npm run build:main && npm run build:renderer",
     "build:main": "tsup",
     "build:renderer": "vite build",
     "generate:icons": "powershell -ExecutionPolicy Bypass -File .\\scripts\\generate-windows-icon.ps1",
@@ -34,29 +35,29 @@
     },
     "extraResources": [
       {
-        "from": "../openclaw-src/openclaw.mjs",
+        "from": "../openclaw-fork/openclaw.mjs",
         "to": "openclaw-src/openclaw.mjs"
       },
       {
-        "from": "../openclaw-src/package.json",
+        "from": "../openclaw-fork/package.json",
         "to": "openclaw-src/package.json"
       },
       {
-        "from": "../openclaw-src/dist",
+        "from": "../openclaw-fork/dist",
         "to": "openclaw-src/dist",
         "filter": [
           "**/*"
         ]
       },
       {
-        "from": "../openclaw-src/assets",
+        "from": "../openclaw-fork/assets",
         "to": "openclaw-src/assets",
         "filter": [
           "**/*"
         ]
       },
       {
-        "from": "../openclaw-src/skills",
+        "from": "../openclaw-fork/skills",
         "to": "openclaw-src/skills",
         "filter": [
           "**/*"

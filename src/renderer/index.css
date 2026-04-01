@@ -553,6 +553,7 @@ select:focus-visible {
   background: #7c3aed;
   animation: glow-pulse 2s ease-in-out infinite;
   box-shadow: 0 0 8px rgba(124, 58, 237, 0.5);
+  will-change: transform, opacity, box-shadow;
 }
 
 .task-action-feed-clear {
@@ -584,6 +585,7 @@ select:focus-visible {
   padding: 6px 14px;
   transition: background 150ms;
   animation: step-enter 0.25s ease-out both;
+  will-change: transform, opacity;
 }
 
 .task-action-item:hover {
@@ -618,6 +620,7 @@ select:focus-visible {
   border: 2px solid rgba(124, 58, 237, 0.4);
   border-top-color: #7c3aed;
   animation: spin 0.8s linear infinite;
+  will-change: transform;
 }
 
 .action-status-done {
@@ -625,6 +628,7 @@ select:focus-visible {
   color: #10b981;
   font-weight: 700;
   animation: check-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  will-change: transform, opacity;
 }
 
 .action-status-error {
