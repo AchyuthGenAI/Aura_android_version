@@ -1,4 +1,5 @@
 import type {
+  ApprovalDecision,
   AuraStorageShape,
   BootstrapState,
   BrowserDomActionRequest,
@@ -47,7 +48,7 @@ export interface AuraDesktopApi {
   chat: {
     send(payload: ChatSendRequest): Promise<{ messageId: string; taskId: string }>;
     stop(): Promise<void>;
-    confirmAction(payload: { requestId: string; confirmed: boolean }): Promise<void>;
+    confirmAction(payload: { requestId: string; decision: ApprovalDecision }): Promise<void>;
   };
   automation: {
     start(job: AutomationJob): Promise<void>;

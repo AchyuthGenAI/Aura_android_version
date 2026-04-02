@@ -4,7 +4,7 @@ import path from "node:path";
 import { app, BrowserWindow, ipcMain, screen } from "electron";
 
 import { IPC_CHANNELS } from "@shared/ipc";
-import type { AuraStorageShape, ExtensionMessage, SkillSummary, WidgetBounds } from "@shared/types";
+import type { ApprovalDecision, AuraStorageShape, ExtensionMessage, SkillSummary, WidgetBounds } from "@shared/types";
 
 import { AuthService } from "./services/auth-service";
 import { BrowserController } from "./services/browser-controller";
@@ -424,8 +424,13 @@ const createAppWindows = async (): Promise<void> => {
     });
     ipcMain.handle(IPC_CHANNELS.chatSend, async (_event, payload) => activeGatewayManager!.sendChat(payload));
     ipcMain.handle(IPC_CHANNELS.chatStop, async () => activeGatewayManager!.stopResponse());
-    ipcMain.handle(IPC_CHANNELS.chatConfirmAction, async (_event, payload: { requestId: string; confirmed: boolean }) => {
-      await activeGatewayManager!.resolveChatConfirmation(payload.requestId, payload.confirmed);
+    ipcMain.handle(IPC_CHANNELS.chatConfirmAction, async (_event, payload: {
+      requestId: string;
+      decision?: ApprovalDecision;
+      confirmed?: boolean;
+    }) => {
+      const decision = payload.decision ?? (payload.confirmed ? "allow-once" : "deny");
+      await activeGatewayManager!.resolveChatConfirmation(payload.requestId, decision);
     });
     ipcMain.handle(IPC_CHANNELS.automationStart, async (_event, job) => {
       activeMonitorManager!.scheduleJob(job as import("@shared/types").AutomationJob);

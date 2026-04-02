@@ -77,15 +77,21 @@ export const ConfirmModal = (): JSX.Element | null => {
           <div className="mt-4 flex gap-3">
             <button
               className="flex-1 rounded-[16px] border border-white/10 bg-white/6 px-4 py-2.5 text-sm font-medium text-aura-text transition hover:bg-white/10"
-              onClick={() => void confirmChatAction(requestId, false)}
+              onClick={() => void confirmChatAction(requestId, "deny")}
             >
               Cancel
             </button>
             <button
-              className="flex-1 rounded-[16px] bg-amber-500 px-4 py-2.5 text-sm font-semibold text-black transition hover:bg-amber-400"
-              onClick={() => void confirmChatAction(requestId, true)}
+              className="flex-1 rounded-[16px] border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm font-semibold text-amber-300 transition hover:bg-amber-500/20"
+              onClick={() => void confirmChatAction(requestId, "allow-once")}
             >
               Allow
+            </button>
+            <button
+              className="flex-1 rounded-[16px] bg-amber-500 px-4 py-2.5 text-sm font-semibold text-black transition hover:bg-amber-400"
+              onClick={() => void confirmChatAction(requestId, "allow-always")}
+            >
+              Always allow
             </button>
           </div>
         </div>

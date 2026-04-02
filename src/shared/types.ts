@@ -459,6 +459,8 @@ export interface ConfirmActionPayload {
   step: TaskStep;
 }
 
+export type ApprovalDecision = "allow-once" | "allow-always" | "deny";
+
 export interface ConfirmActionResolvedPayload {
   requestId: string;
   decision?: string;

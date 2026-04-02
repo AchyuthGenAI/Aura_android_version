@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 
 import type {
+  ApprovalDecision,
   AuraSession,
   AuraSessionMessage,
   ConfirmActionPayload,
@@ -302,10 +303,9 @@ export class GatewayManager {
     };
   }
 
-  async resolveChatConfirmation(requestId: string, confirmed: boolean): Promise<void> {
+  async resolveChatConfirmation(requestId: string, decision: ApprovalDecision): Promise<void> {
     const normalizedId = requestId.trim();
     if (!normalizedId) return;
-    const decision = confirmed ? "allow-once" : "deny";
     const approval = this.pendingApprovals.get(normalizedId);
 
     try {

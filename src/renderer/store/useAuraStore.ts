@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import type {
+  ApprovalDecision,
   AppRoute,
   AutomationJob,
   AutomationJobUpdatedPayload,
@@ -220,7 +221,7 @@ type AuraState = {
   saveMacros: (value: AuraMacro[]) => Promise<void>;
   sendMessage: (source: ChatSendRequest["source"], override?: string) => Promise<void>;
   stopMessage: () => Promise<void>;
-  confirmChatAction: (requestId: string, confirmed: boolean) => Promise<void>;
+  confirmChatAction: (requestId: string, decision: ApprovalDecision) => Promise<void>;
   startNewSession: () => Promise<void>;
   loadSession: (sessionId: string) => Promise<void>;
   browserNewTab: (url?: string) => Promise<void>;
@@ -781,9 +782,9 @@ export const useAuraStore = create<AuraState>((set, get) => ({
     set({ isLoading: false });
   },
 
-  confirmChatAction: async (requestId, confirmed) => {
+  confirmChatAction: async (requestId, decision) => {
     set({ pendingConfirmation: null });
-    await window.auraDesktop.chat.confirmAction({ requestId, confirmed });
+    await window.auraDesktop.chat.confirmAction({ requestId, decision });
   },
 
   startNewSession: async () => {
