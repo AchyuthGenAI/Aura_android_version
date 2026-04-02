@@ -19,6 +19,8 @@ export const AppSidebar = (): JSX.Element => {
   const route = useAuraStore((state) => state.route);
   const setRoute = useAuraStore((state) => state.setRoute);
   const runtimeStatus = useAuraStore((state) => state.runtimeStatus);
+  const activeRun = useAuraStore((state) => state.activeRun);
+  const recentRuns = useAuraStore((state) => state.recentRuns);
   const profile = useAuraStore((state) => state.profile);
 
   const initials =
@@ -68,6 +70,15 @@ export const AppSidebar = (): JSX.Element => {
       </nav>
 
       <div className="mt-6 flex flex-col gap-4">
+        <div className="rounded-[20px] border border-white/8 bg-black/20 p-4">
+          <p className="text-[10px] uppercase tracking-[0.22em] text-aura-muted">OpenClaw</p>
+          <p className="mt-2 text-sm font-semibold text-aura-text">
+            {activeRun ? activeRun.prompt : "No live run"}
+          </p>
+          <p className="mt-1 text-xs text-aura-muted">
+            {activeRun ? `${activeRun.surface} · ${activeRun.toolCount} tool events` : `${recentRuns.length} recent runs available in History`}
+          </p>
+        </div>
         <div className="flex items-center justify-between rounded-[20px] border border-white/5 bg-black/20 p-4">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[14px] bg-aura-gradient text-[13px] font-bold text-white shadow-inner">

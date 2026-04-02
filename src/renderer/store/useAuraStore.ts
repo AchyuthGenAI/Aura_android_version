@@ -104,6 +104,17 @@ const mergeRun = (current: OpenClawRun | null, incoming: OpenClawRun): OpenClawR
   };
 };
 
+const runMatches = (left: OpenClawRun, right: OpenClawRun): boolean =>
+  left.id === right.id
+  || left.taskId === right.taskId
+  || left.messageId === right.messageId
+  || (Boolean(left.runId) && left.runId === right.runId);
+
+const upsertRecentRuns = (runs: OpenClawRun[], incoming: OpenClawRun): OpenClawRun[] => {
+  const filtered = runs.filter((entry) => !runMatches(entry, incoming));
+  return [incoming, ...filtered].slice(0, 30);
+};
+
 const mapContextActionToPrompt = (payload: ContextMenuActionPayload): string => {
   switch (payload.action) {
     case "ask":
@@ -154,6 +165,7 @@ type AuraState = {
   messages: ChatThreadMessage[];
   history: HistoryEntry[];
   activeRun: OpenClawRun | null;
+  recentRuns: OpenClawRun[];
   activeTask: AuraTask | null;
   pendingConfirmation: ConfirmActionPayload | null;
   lastError: TaskErrorPayload | null;
@@ -284,6 +296,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   messages: [],
   history: [],
   activeRun: null,
+  recentRuns: [],
   activeTask: null,
   pendingConfirmation: null,
   lastError: null,
@@ -391,6 +404,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       const nextRun = mergeRun(get().activeRun, payload.run);
       set({
         activeRun: isTerminalRunStatus(nextRun.status) ? null : nextRun,
+        recentRuns: isTerminalRunStatus(nextRun.status) ? upsertRecentRuns(get().recentRuns, nextRun) : get().recentRuns,
         isLoading: !isTerminalRunStatus(nextRun.status),
       });
       return;

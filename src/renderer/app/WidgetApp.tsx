@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 
 import { AuraLogoBlob, MessageBubble, StatusPill, ToastViewport } from "@renderer/components/primitives";
+import { RunHistoryList } from "@renderer/components/RunHistoryList";
+import { RunTimelineBubble } from "@renderer/components/RunTimelineBubble";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 import type { AuraStorageShape, WidgetBounds, WidgetVisibilityPayload, OverlayTab } from "@shared/types";
 import { VoicePanel } from "@renderer/components/VoicePanel";
@@ -31,6 +33,9 @@ const WidgetApp = (): JSX.Element => {
   const stopMessage = useAuraStore((state) => state.stopMessage);
   const startNewSession = useAuraStore((state) => state.startNewSession);
   const profile = useAuraStore((state) => state.profile);
+  const activeRun = useAuraStore((state) => state.activeRun);
+  const recentRuns = useAuraStore((state) => state.recentRuns);
+  const actionFeed = useAuraStore((state) => state.actionFeed);
   const activeTask = useAuraStore((state) => state.activeTask);
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [expanded, setExpanded] = useState(false);
@@ -192,7 +197,11 @@ const WidgetApp = (): JSX.Element => {
   const onboardingNeeded = !authState.authenticated || !consentAccepted || !profileComplete;
   const isBootstrapping = !hydrated || isHydrating || (bootstrapState.stage !== "ready" && bootstrapState.stage !== "error");
 
-  const isTaskActive = activeTask?.status === "planning" || activeTask?.status === "running";
+  const isTaskActive =
+    activeTask?.status === "planning"
+    || activeTask?.status === "running"
+    || activeRun?.status === "queued"
+    || activeRun?.status === "running";
 
   if (!expanded) {
     return (
@@ -300,9 +309,42 @@ const WidgetApp = (): JSX.Element => {
                 <div className="flex-1 flex flex-col justify-center min-h-0">
                   <VoicePanel active={activeTab === "voice"} />
                 </div>
-              ) : activeTab === "history" || activeTab === "tools" ? (
-                <div className="flex-1 flex flex-col items-center justify-center min-h-0 text-aura-muted">
-                    <p className="text-sm font-medium">Coming soon in Desktop...</p>
+              ) : activeTab === "history" ? (
+                <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
+                  <div className="rounded-[22px] border border-white/8 bg-white/[0.03] px-4 py-4">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-aura-muted">Recent runs</p>
+                    <p className="mt-2 text-sm text-aura-text">Completed OpenClaw runs stay here so you can quickly reopen the main shell and continue from context.</p>
+                  </div>
+                  <RunHistoryList
+                    runs={recentRuns}
+                    compact
+                    emptyMessage="No finished runs yet. Start a chat or automation and the results will appear here."
+                  />
+                </div>
+              ) : activeTab === "tools" ? (
+                <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
+                  <div className="rounded-[22px] border border-white/8 bg-white/[0.03] px-4 py-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-[11px] uppercase tracking-[0.2em] text-aura-muted">Live runtime</p>
+                        <p className="mt-2 text-sm font-semibold text-aura-text">{activeRun ? activeRun.prompt : "No live OpenClaw run"}</p>
+                        <p className="mt-1 text-xs text-aura-muted">{runtimeStatus.message}</p>
+                      </div>
+                      <StatusPill label={activeRun?.status ?? runtimeStatus.phase} tone={runtimeStatus.phase === "ready" ? "success" : runtimeStatus.phase === "error" ? "error" : "warning"} />
+                    </div>
+                  </div>
+                  {activeRun ? (
+                    <RunTimelineBubble />
+                  ) : (
+                    <div className="rounded-[22px] border border-dashed border-white/10 bg-white/[0.03] px-4 py-5 text-sm text-aura-muted">
+                      Tool activity will appear here while OpenClaw is working.
+                    </div>
+                  )}
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <ToolMetric label="Tool events" value={String(actionFeed.length)} />
+                    <ToolMetric label="Runs" value={String(recentRuns.length)} />
+                    <ToolMetric label="Mode" value={runtimeStatus.phase} />
+                  </div>
                 </div>
               ) : (
                 <div ref={messagesRef} className="custom-scroll min-h-0 flex-1 space-y-4 overflow-y-auto pr-2 pb-4">
@@ -319,6 +361,7 @@ const WidgetApp = (): JSX.Element => {
                       <MessageBubble key={message.id} message={message} theme={settings.theme} />
                     ))
                   )}
+                  {activeRun && <RunTimelineBubble />}
                 </div>
               )}
 
@@ -419,5 +462,12 @@ const WidgetApp = (): JSX.Element => {
     </div>
   );
 };
+
+const ToolMetric = ({ label, value }: { label: string; value: string }): JSX.Element => (
+  <div className="rounded-[18px] border border-white/8 bg-black/20 px-4 py-3">
+    <p className="text-[10px] uppercase tracking-[0.16em] text-aura-muted">{label}</p>
+    <p className="mt-2 truncate text-sm font-semibold text-aura-text capitalize">{value}</p>
+  </div>
+);
 
 export default WidgetApp;

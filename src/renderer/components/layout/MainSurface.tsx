@@ -67,6 +67,8 @@ const MainHeader = (): JSX.Element => {
   const route = useAuraStore((state) => state.route);
   const runtimeStatus = useAuraStore((state) => state.runtimeStatus);
   const automationJobs = useAuraStore((state) => state.automationJobs);
+  const activeRun = useAuraStore((state) => state.activeRun);
+  const recentRuns = useAuraStore((state) => state.recentRuns);
   const skills = useAuraStore((state) => state.skills);
   const sessions = useAuraStore((state) => state.sessions);
 
@@ -86,7 +88,7 @@ const MainHeader = (): JSX.Element => {
         <div className="grid gap-3 sm:grid-cols-3 xl:min-w-[460px]">
           <TopMetric label="Runtime" value={runtimeStatus.phase} detail={runtimeStatus.gatewayConnected ? "Gateway connected" : runtimeStatus.message} />
           <TopMetric label="Automations" value={String(activeJobs)} detail={`${automationJobs.length} saved jobs`} />
-          <TopMetric label="Sessions" value={String(sessions.length)} detail={`${skills.length} bundled skills`} />
+          <TopMetric label="Runs" value={String(recentRuns.length)} detail={activeRun ? `${activeRun.surface} run live` : `${sessions.length} sessions · ${skills.length} skills`} />
         </div>
       </div>
 
