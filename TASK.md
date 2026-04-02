@@ -39,6 +39,7 @@
 - [ ] Reduce leftover prototype comments and dead-path code
 - [x] Remove `TASK_PROGRESS` emission from `GatewayManager` query flow
 - [x] Remove dormant `task-executor` + `TASK_PROGRESS` contract surface
+- [x] Migrate confirmation IPC from `task.confirmResponse` to `chat.confirmAction`
 
 ### Automation depth
 - [ ] Add richer scheduled/cron-like job semantics

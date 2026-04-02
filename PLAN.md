@@ -61,6 +61,7 @@ Key state:
 - exposed automation IPC through main process, preload, and renderer API
 - removed legacy `TASK_PROGRESS`/`AuraTask` contracts and dropped dormant `task-executor`
 - removed unused `taskCancel` IPC path in favor of run-level `chat.stop`
+- moved confirmation IPC to `chat.confirmAction` (retiring `task.confirmResponse` naming)
 
 ### Main Process
 - improved managed runtime bootstrap/status reporting

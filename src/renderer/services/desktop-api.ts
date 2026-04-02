@@ -47,9 +47,7 @@ export interface AuraDesktopApi {
   chat: {
     send(payload: ChatSendRequest): Promise<{ messageId: string; taskId: string }>;
     stop(): Promise<void>;
-  };
-  task: {
-    confirmResponse(payload: { requestId: string; confirmed: boolean }): Promise<void>;
+    confirmAction(payload: { requestId: string; confirmed: boolean }): Promise<void>;
   };
   automation: {
     start(job: AutomationJob): Promise<void>;

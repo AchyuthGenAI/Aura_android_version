@@ -6,7 +6,7 @@ const TIMEOUT_SECONDS = 30;
 
 export const ConfirmModal = (): JSX.Element | null => {
   const pendingConfirmation = useAuraStore((s) => s.pendingConfirmation);
-  const taskConfirmResponse = useAuraStore((s) => s.taskConfirmResponse);
+  const confirmChatAction = useAuraStore((s) => s.confirmChatAction);
   const [countdown, setCountdown] = useState(TIMEOUT_SECONDS);
 
   useEffect(() => {
@@ -77,13 +77,13 @@ export const ConfirmModal = (): JSX.Element | null => {
           <div className="mt-4 flex gap-3">
             <button
               className="flex-1 rounded-[16px] border border-white/10 bg-white/6 px-4 py-2.5 text-sm font-medium text-aura-text transition hover:bg-white/10"
-              onClick={() => void taskConfirmResponse(requestId, false)}
+              onClick={() => void confirmChatAction(requestId, false)}
             >
               Cancel
             </button>
             <button
               className="flex-1 rounded-[16px] bg-amber-500 px-4 py-2.5 text-sm font-semibold text-black transition hover:bg-amber-400"
-              onClick={() => void taskConfirmResponse(requestId, true)}
+              onClick={() => void confirmChatAction(requestId, true)}
             >
               Allow
             </button>

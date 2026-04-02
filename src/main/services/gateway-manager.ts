@@ -206,8 +206,8 @@ export class GatewayManager {
     };
   }
 
-  resolveConfirmation(_requestId: string, _confirmed: boolean): void {
-    // Kept as a compatibility bridge while the renderer still sends this IPC.
+  resolveChatConfirmation(_requestId: string, _confirmed: boolean): void {
+    // Compatibility bridge until gateway confirmation wiring is fully implemented.
   }
 
   async bootstrap(): Promise<BootstrapState> {

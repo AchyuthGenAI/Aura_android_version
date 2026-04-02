@@ -30,10 +30,8 @@ const api: AuraDesktopApi = {
   },
   chat: {
     send: (payload) => ipcRenderer.invoke(IPC_CHANNELS.chatSend, payload),
-    stop: () => ipcRenderer.invoke(IPC_CHANNELS.chatStop)
-  },
-  task: {
-    confirmResponse: (payload) => ipcRenderer.invoke(IPC_CHANNELS.taskConfirmResponse, payload)
+    stop: () => ipcRenderer.invoke(IPC_CHANNELS.chatStop),
+    confirmAction: (payload) => ipcRenderer.invoke(IPC_CHANNELS.chatConfirmAction, payload)
   },
   automation: {
     start: (job) => ipcRenderer.invoke(IPC_CHANNELS.automationStart, job),
