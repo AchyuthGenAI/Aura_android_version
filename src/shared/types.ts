@@ -193,7 +193,6 @@ export interface DesktopWindowInfo {
   height: number;
 }
 
-export type TaskStatus = "pending" | "planning" | "running" | "done" | "error" | "cancelled";
 export type TaskStepStatus = "pending" | "running" | "done" | "error";
 
 export interface TaskStep {
@@ -206,25 +205,6 @@ export interface TaskStep {
   requiresConfirmation?: boolean;
   startedAt?: number;
   completedAt?: number;
-}
-
-export interface AuraTask {
-  id: string;
-  command: string;
-  status: TaskStatus;
-  steps: TaskStep[];
-  result?: string;
-  error?: string;
-  createdAt: number;
-  updatedAt: number;
-  retries: number;
-  currentUrl?: string;
-  currentTitle?: string;
-  runId?: string;
-  sessionKey?: string;
-  skillName?: string;
-  surface?: "chat" | "browser" | "desktop" | "mixed";
-  statusSource?: "openclaw-gateway" | "aura-local";
 }
 
 export type OpenClawRunStatus = "queued" | "running" | "done" | "error" | "cancelled";
@@ -418,7 +398,6 @@ export type MessageType =
   | "LLM_TOKEN"
   | "LLM_DONE"
   | "RUN_STATUS"
-  | "TASK_PROGRESS"
   | "TASK_RESULT"
   | "TASK_ERROR"
   | "CONFIRM_ACTION"
@@ -459,15 +438,6 @@ export interface LLMDonePayload {
 
 export interface RunStatusPayload {
   run: OpenClawRun;
-}
-
-export interface TaskProgressPayload {
-  task: AuraTask;
-  event: {
-    type: "step_start" | "step_done" | "result" | "error" | "status";
-    statusText?: string;
-    output?: unknown;
-  };
 }
 
 export interface TaskErrorPayload {

@@ -1,5 +1,8 @@
 import type { ReactNode } from "react";
 
+const FIELD_CLASS =
+  "w-full rounded-[18px] border border-white/[0.08] bg-black/20 px-4 py-3.5 text-[14px] text-aura-text outline-none transition-all placeholder:text-aura-muted/85 hover:border-white/[0.12] hover:bg-black/30 focus:border-transparent focus:bg-black/40 focus:ring-2 focus:ring-aura-violet/45 focus:shadow-[0_0_24px_rgba(124,58,237,0.14)]";
+
 export const Card = ({
   className = "",
   children,
@@ -8,9 +11,9 @@ export const Card = ({
   children: ReactNode;
 }): JSX.Element => (
   <div
-    className={`relative overflow-hidden rounded-[32px] border border-white/[0.08] bg-[#1a1926]/50 p-6 shadow-[0_8px_32px_rgba(0,0,0,0.24)] backdrop-blur-3xl transition-all shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ${className}`}
+    className={`relative overflow-hidden rounded-[30px] border border-white/[0.09] bg-[linear-gradient(160deg,rgba(26,25,38,0.82),rgba(16,17,28,0.78))] p-6 backdrop-blur-[28px] shadow-[0_20px_60px_rgba(3,6,20,0.34),inset_0_1px_0_rgba(255,255,255,0.06)] transition-[transform,box-shadow,border-color] duration-300 hover:-translate-y-0.5 hover:border-white/[0.14] hover:shadow-[0_26px_80px_rgba(3,6,20,0.4),inset_0_1px_0_rgba(255,255,255,0.08)] ${className}`}
   >
-    <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-white/[0.04] to-transparent mix-blend-overlay" />
+    <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(34,211,238,0.14),transparent_44%),radial-gradient(circle_at_bottom_left,rgba(244,114,182,0.08),transparent_46%)]" />
     <div className="relative z-10">{children}</div>
   </div>
 );
@@ -32,7 +35,7 @@ export const Button = ({
     type={type}
     disabled={disabled}
     onClick={onClick}
-    className={`rounded-2xl px-5 py-3 text-[14px] font-semibold tracking-wide shadow-sm transition-all duration-300 hover:scale-[1.02] hover:shadow-lg hover:shadow-aura-violet/20 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:scale-100 ${className}`}
+    className={`inline-flex items-center justify-center gap-2 rounded-2xl border border-white/[0.1] bg-white/[0.06] px-5 py-3 text-[14px] font-semibold tracking-wide text-aura-text shadow-[0_10px_24px_rgba(3,6,20,0.25)] transition-all duration-200 hover:-translate-y-0.5 hover:border-white/[0.16] hover:bg-white/[0.1] hover:shadow-[0_14px_34px_rgba(3,6,20,0.32)] active:translate-y-0 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-aura-violet/45 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:bg-white/[0.06] ${className}`}
   >
     {children}
   </button>
@@ -54,7 +57,7 @@ export const TextInput = ({
     value={value}
     onChange={(e) => onChange(e.target.value)}
     placeholder={placeholder}
-    className="w-full rounded-[20px] border border-white/[0.06] bg-black/20 px-5 py-3.5 text-[14px] text-aura-text outline-none transition-all placeholder:text-aura-muted hover:bg-black/30 focus:bg-black/40 focus:ring-2 focus:ring-aura-violet/50 focus:border-transparent focus:shadow-[0_0_24px_rgba(124,58,237,0.15)]"
+    className={FIELD_CLASS}
   />
 );
 
@@ -74,7 +77,7 @@ export const TextArea = ({
     onChange={(e) => onChange(e.target.value)}
     placeholder={placeholder}
     rows={rows}
-    className="w-full resize-none rounded-[20px] border border-white/[0.06] bg-black/20 px-5 py-4 text-[14px] text-aura-text outline-none transition-all placeholder:text-aura-muted hover:bg-black/30 focus:bg-black/40 focus:ring-2 focus:ring-aura-violet/50 focus:border-transparent focus:shadow-[0_0_24px_rgba(124,58,237,0.15)]"
+    className={`${FIELD_CLASS} resize-none py-4`}
   />
 );
 
@@ -116,7 +119,7 @@ export const SettingRow = ({
   detail?: string;
   control: ReactNode;
 }): JSX.Element => (
-  <label className="group flex cursor-pointer items-center justify-between gap-5 rounded-[24px] border border-white/[0.04] bg-white/[0.02] px-5 py-4 transition-all hover:border-white/[0.08] hover:bg-white/[0.04]">
+  <label className="group flex cursor-pointer items-center justify-between gap-5 rounded-[24px] border border-white/[0.05] bg-white/[0.02] px-5 py-4 transition-all hover:border-white/[0.1] hover:bg-white/[0.04]">
     <div className="min-w-0 flex-1">
       <p className="text-[15px] font-semibold text-aura-text transition-colors group-hover:text-white">{label}</p>
       {detail && <p className="mt-1.5 text-[13px] leading-relaxed text-aura-muted">{detail}</p>}
@@ -137,12 +140,12 @@ export const Switch = ({
     role="switch"
     aria-checked={checked}
     onClick={() => onChange(!checked)}
-    className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-aura-violet/50 ${
-      checked ? "bg-aura-violet" : "bg-white/10"
+    className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border border-white/12 transition-colors duration-200 ease-in-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-aura-violet/50 ${
+      checked ? "bg-[linear-gradient(120deg,#7c3aed,#22d3ee)]" : "bg-white/10"
     }`}
   >
     <span
-      className={`pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+      className={`pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-[0_6px_16px_rgba(0,0,0,0.35)] ring-0 transition duration-200 ease-in-out ${
         checked ? "translate-x-5" : "translate-x-0"
       }`}
     />

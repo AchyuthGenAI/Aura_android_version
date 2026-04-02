@@ -210,10 +210,6 @@ export class GatewayManager {
     // Kept as a compatibility bridge while the renderer still sends this IPC.
   }
 
-  cancelTask(_taskId: string): void {
-    void this.stopResponse();
-  }
-
   async bootstrap(): Promise<BootstrapState> {
     this.setBootstrap({ stage: "checking-runtime", progress: 15, message: "Checking local OpenClaw runtime." });
     this.setStatus({

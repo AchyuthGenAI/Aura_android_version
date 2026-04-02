@@ -36,7 +36,6 @@ export const IPC_CHANNELS = {
   gatewayGetStatus: "aura:gateway:get-status",
   gatewayRestart: "aura:gateway:restart",
   taskConfirmResponse: "aura:task:confirm-response",
-  taskCancel: "aura:task:cancel",
   automationStart: "aura:automation:start",
   automationStop: "aura:automation:stop",
   automationList: "aura:automation:list",

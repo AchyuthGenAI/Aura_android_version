@@ -427,9 +427,6 @@ const createAppWindows = async (): Promise<void> => {
     ipcMain.handle(IPC_CHANNELS.taskConfirmResponse, async (_event, payload: { requestId: string; confirmed: boolean }) => {
       activeGatewayManager!.resolveConfirmation(payload.requestId, payload.confirmed);
     });
-    ipcMain.handle(IPC_CHANNELS.taskCancel, async (_event, payload: { taskId: string }) => {
-      activeGatewayManager!.cancelTask(payload.taskId);
-    });
     ipcMain.handle(IPC_CHANNELS.automationStart, async (_event, job) => {
       activeMonitorManager!.scheduleJob(job as import("@shared/types").AutomationJob);
     });

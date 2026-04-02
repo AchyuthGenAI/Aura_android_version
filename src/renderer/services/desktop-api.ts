@@ -50,7 +50,6 @@ export interface AuraDesktopApi {
   };
   task: {
     confirmResponse(payload: { requestId: string; confirmed: boolean }): Promise<void>;
-    cancel(payload: { taskId: string }): Promise<void>;
   };
   automation: {
     start(job: AutomationJob): Promise<void>;

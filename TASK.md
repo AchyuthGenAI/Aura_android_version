@@ -26,6 +26,7 @@
 - [x] Migrated chat, widget, and active-run banner UI to run-native OpenClaw timeline/events
 - [x] Removed legacy `TaskProgress` bubble/component from renderer surfaces
 - [x] Updated voice lifecycle handling to use `RUN_STATUS` + `TOOL_USE` events
+- [x] Polished shared shell primitives (`Card`, `Button`, inputs, switches) and splash loading states
 
 ### Copy and product framing
 - [x] Updated consent/chat/runtime copy to use OpenClaw-first language
@@ -37,7 +38,7 @@
 - [ ] Remove dormant legacy planner/direct-executor branches from `GatewayManager`
 - [ ] Reduce leftover prototype comments and dead-path code
 - [x] Remove `TASK_PROGRESS` emission from `GatewayManager` query flow
-- [ ] Retire remaining `TASK_PROGRESS` contract usage from dormant `task-executor` paths
+- [x] Remove dormant `task-executor` + `TASK_PROGRESS` contract surface
 
 ### Automation depth
 - [ ] Add richer scheduled/cron-like job semantics

@@ -59,6 +59,8 @@ Key state:
 - extended shared runtime diagnostics and status types
 - added automation job types and compatibility mapping from legacy monitor data
 - exposed automation IPC through main process, preload, and renderer API
+- removed legacy `TASK_PROGRESS`/`AuraTask` contracts and dropped dormant `task-executor`
+- removed unused `taskCancel` IPC path in favor of run-level `chat.stop`
 
 ### Main Process
 - improved managed runtime bootstrap/status reporting
@@ -75,6 +77,7 @@ Key state:
 - aligned consent/chat copy with the OpenClaw-first product model
 - shifted chat/widget/live banner UI from legacy task progress to run-native timeline events
 - aligned voice mode lifecycle with OpenClaw run/tool events and removed duplicate renderer event forwarding
+- refreshed shared UI primitives and Splash screen loading presentation for stronger visual consistency
 
 ## Remaining Work
 
