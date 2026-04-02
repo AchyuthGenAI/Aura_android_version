@@ -17,6 +17,7 @@ import type {
   ProviderInfo,
   RuntimeStatus,
   SkillSummary,
+  SupportBundleExport,
   WidgetBounds
 } from "@shared/types";
 
@@ -36,6 +37,7 @@ export interface AuraDesktopApi {
     getStatus(): Promise<RuntimeStatus>;
     bootstrap(): Promise<BootstrapState>;
     restart(): Promise<RuntimeStatus>;
+    exportSupportBundle(): Promise<SupportBundleExport>;
   };
   app: {
     showMainWindow(): Promise<void>;

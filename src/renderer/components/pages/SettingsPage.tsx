@@ -24,6 +24,7 @@ export const SettingsPage = (): JSX.Element => {
   const saveSettings = useAuraStore((state) => state.saveSettings);
   const savePermissions = useAuraStore((state) => state.savePermissions);
   const [isRestarting, setIsRestarting] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
   const handleRestart = async (): Promise<void> => {
@@ -36,6 +37,19 @@ export const SettingsPage = (): JSX.Element => {
       setNotice(error instanceof Error ? error.message : "Could not restart the managed runtime.");
     } finally {
       setIsRestarting(false);
+    }
+  };
+
+  const handleExportSupportBundle = async (): Promise<void> => {
+    setIsExporting(true);
+    setNotice(null);
+    try {
+      const result = await window.auraDesktop.runtime.exportSupportBundle();
+      setNotice(`Support bundle exported to ${result.path} (${Math.ceil(result.bytes / 1024)} KB).`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not export support bundle.");
+    } finally {
+      setIsExporting(false);
     }
   };
 
@@ -91,6 +105,13 @@ export const SettingsPage = (): JSX.Element => {
                     disabled={isRestarting}
                   >
                     {isRestarting ? "Restarting..." : "Restart Managed Runtime"}
+                  </Button>
+                  <Button
+                    className="border border-white/10 bg-white/5 text-aura-text hover:bg-white/10"
+                    onClick={() => void handleExportSupportBundle()}
+                    disabled={isExporting}
+                  >
+                    {isExporting ? "Exporting..." : "Export Support Bundle"}
                   </Button>
                 </div>
               </div>

@@ -18,7 +18,8 @@ const api: AuraDesktopApi = {
   runtime: {
     getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.runtimeGetStatus),
     bootstrap: () => ipcRenderer.invoke(IPC_CHANNELS.runtimeBootstrap),
-    restart: () => ipcRenderer.invoke(IPC_CHANNELS.runtimeRestart)
+    restart: () => ipcRenderer.invoke(IPC_CHANNELS.runtimeRestart),
+    exportSupportBundle: () => ipcRenderer.invoke(IPC_CHANNELS.runtimeExportSupport),
   },
   app: {
     showMainWindow: () => ipcRenderer.invoke(IPC_CHANNELS.appShowMainWindow),

@@ -4,7 +4,7 @@ import path from "node:path";
 import { app, BrowserWindow, ipcMain, screen } from "electron";
 
 import { IPC_CHANNELS } from "@shared/ipc";
-import type { ApprovalDecision, AuraStorageShape, ExtensionMessage, SkillSummary, WidgetBounds } from "@shared/types";
+import type { ApprovalDecision, AuraStorageShape, ExtensionMessage, SkillSummary, SupportBundleExport, WidgetBounds } from "@shared/types";
 
 import { AuthService } from "./services/auth-service";
 import { BrowserController } from "./services/browser-controller";
@@ -230,6 +230,26 @@ const showWidgetWindow = (store: AuraStore, expand = true, forceCenter = false):
   });
 };
 
+const SECRET_KEY_PATTERN = /(api[_-]?key|token|password|secret|auth)/i;
+
+const redactSecrets = (value: unknown): unknown => {
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactSecrets(entry));
+  }
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (SECRET_KEY_PATTERN.test(key)) {
+        result[key] = "<redacted>";
+      } else {
+        result[key] = redactSecrets(nested);
+      }
+    }
+    return result;
+  }
+  return value;
+};
+
 const createAppWindows = async (): Promise<void> => {
   if (isCreatingWindows || (mainWindow && !mainWindow.isDestroyed()) || (widgetWindow && !widgetWindow.isDestroyed())) {
     return;
@@ -339,6 +359,88 @@ const createAppWindows = async (): Promise<void> => {
 
     activeDesktopController = new DesktopController();
 
+    const exportSupportBundle = async (): Promise<SupportBundleExport> => {
+      const createdAt = Date.now();
+      const createdIso = new Date(createdAt).toISOString();
+      const userDataPath = app.getPath("userData");
+      const supportDir = path.join(userDataPath, "support");
+      fs.mkdirSync(supportDir, { recursive: true });
+
+      const runtimeStatus = activeGatewayManager?.getStatus() ?? null;
+      const bootstrapState = activeGatewayManager?.getBootstrap() ?? null;
+      const gatewayStatus = activeGatewayManager?.getGatewayStatus() ?? null;
+      const storageState = store.getState();
+      const openClawRootCandidates = resolveOpenClawRootCandidates().map((candidate) => ({
+        path: candidate,
+        rootExists: fs.existsSync(candidate),
+        entryExists: fs.existsSync(path.join(candidate, "openclaw.mjs")),
+      }));
+
+      const bundle = {
+        meta: {
+          exportedAt: createdIso,
+          platform: process.platform,
+          arch: process.arch,
+          nodeVersion: process.version,
+          electronVersion: process.versions.electron,
+          appVersion: app.getVersion(),
+          isPackaged: app.isPackaged,
+        },
+        runtime: {
+          status: runtimeStatus,
+          bootstrap: bootstrapState,
+          gateway: gatewayStatus,
+          openClawRootCandidates,
+          selectedOpenClawRoot: findOpenClawRoot(),
+        },
+        storage: {
+          authState: storageState.authState,
+          settings: storageState.settings,
+          permissions: storageState.permissions,
+          activeRoute: storageState.activeRoute,
+          sessionCount: storageState.sessionHistory.length + (storageState.currentSession ? 1 : 0),
+          currentSession: storageState.currentSession
+            ? {
+                id: storageState.currentSession.id,
+                title: storageState.currentSession.title,
+                startedAt: storageState.currentSession.startedAt,
+                endedAt: storageState.currentSession.endedAt,
+                messageCount: storageState.currentSession.messages.length,
+              }
+            : null,
+          recentSessions: storageState.sessionHistory.slice(0, 20).map((session) => ({
+            id: session.id,
+            title: session.title,
+            startedAt: session.startedAt,
+            endedAt: session.endedAt,
+            messageCount: session.messages.length,
+          })),
+          history: storageState.history.slice(0, 50),
+          automationJobs: storageState.automationJobs.slice(0, 50),
+        },
+        config: redactSecrets(configManager.readConfig()),
+        paths: {
+          userDataPath,
+          storePath: path.join(userDataPath, "aura-desktop.storage.json"),
+          usersPath: path.join(userDataPath, "aura-desktop.users.json"),
+          openClawHomePath: configManager.getOpenClawHomePath(),
+          openClawConfigPath: path.join(configManager.getOpenClawHomePath(), ".openclaw", "openclaw.json"),
+          supportDir,
+        },
+      };
+
+      const fileName = `aura-support-${createdIso.replace(/[:.]/g, "-")}.json`;
+      const filePath = path.join(supportDir, fileName);
+      const text = JSON.stringify(bundle, null, 2);
+      fs.writeFileSync(filePath, text, "utf8");
+
+      return {
+        path: filePath,
+        createdAt,
+        bytes: Buffer.byteLength(text, "utf8"),
+      };
+    };
+
     // ── Desktop IPC handlers ───────────────────────────────────────────────
     ipcMain.handle(IPC_CHANNELS.desktopScreenshot, async () =>
       activeDesktopController!.captureScreenshot()
@@ -419,6 +521,7 @@ const createAppWindows = async (): Promise<void> => {
     ipcMain.handle(IPC_CHANNELS.runtimeGetStatus, async () => activeGatewayManager!.getStatus());
     ipcMain.handle(IPC_CHANNELS.runtimeBootstrap, async () => activeGatewayManager!.bootstrap());
     ipcMain.handle(IPC_CHANNELS.runtimeRestart, async () => activeGatewayManager!.restart());
+    ipcMain.handle(IPC_CHANNELS.runtimeExportSupport, async () => exportSupportBundle());
     ipcMain.handle(IPC_CHANNELS.appShowMainWindow, async () => {
       showMainWindow();
     });

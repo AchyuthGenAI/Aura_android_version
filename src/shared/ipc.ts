@@ -9,6 +9,7 @@ export const IPC_CHANNELS = {
   runtimeGetStatus: "aura:runtime:get-status",
   runtimeBootstrap: "aura:runtime:bootstrap",
   runtimeRestart: "aura:runtime:restart",
+  runtimeExportSupport: "aura:runtime:export-support",
   appShowMainWindow: "aura:app:show-main-window",
   appShowWidgetWindow: "aura:app:show-widget-window",
   appQuit: "aura:app:quit",

@@ -88,6 +88,12 @@ export interface RuntimeStatus {
   diagnostics?: RuntimeDiagnostics;
 }
 
+export interface SupportBundleExport {
+  path: string;
+  createdAt: number;
+  bytes: number;
+}
+
 export interface BootstrapState {
   stage: "idle" | "checking-runtime" | "installing-runtime" | "starting-runtime" | "ready" | "error";
   progress: number;
