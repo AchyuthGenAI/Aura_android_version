@@ -2,7 +2,6 @@ import { useEffect, useRef } from "react";
 
 import { AuraLogoBlob, MessageBubble } from "./primitives";
 import { RunTimelineBubble } from "./RunTimelineBubble";
-import { TaskProgressBubble } from "./TaskProgress";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
 const EXAMPLE_COMMANDS = [
@@ -15,7 +14,6 @@ const EXAMPLE_COMMANDS = [
 export const ChatPanel = (): JSX.Element => {
   const messages = useAuraStore((s) => s.messages);
   const activeRun = useAuraStore((s) => s.activeRun);
-  const activeTask = useAuraStore((s) => s.activeTask);
   const sendMessage = useAuraStore((s) => s.sendMessage);
   const settings = useAuraStore((s) => s.settings);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -25,7 +23,7 @@ export const ChatPanel = (): JSX.Element => {
     if (node) {
       node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
     }
-  }, [messages, activeTask?.updatedAt]);
+  }, [messages, activeRun?.updatedAt]);
 
   if (messages.length === 0) {
     return (
@@ -55,17 +53,12 @@ export const ChatPanel = (): JSX.Element => {
     );
   }
 
-  // Show task progress bubble if there's an active task with real steps (not the legacy 2-step query task)
-  const showTaskBubble = activeTask && activeTask.steps.length > 0 &&
-    activeTask.status !== "done" && activeTask.steps[0]?.tool !== "read";
-
   return (
     <div ref={containerRef} className="flex h-full flex-col gap-4 overflow-y-auto px-2 py-2">
       {messages.map((message) => (
         <MessageBubble key={message.id} message={message} theme={settings.theme} />
       ))}
       {activeRun && <RunTimelineBubble />}
-      {showTaskBubble && <TaskProgressBubble task={activeTask} />}
     </div>
   );
 };

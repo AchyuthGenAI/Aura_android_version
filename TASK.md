@@ -23,6 +23,9 @@
 - [x] Rebuilt Desktop as a cleaner control surface
 - [x] Rebuilt Skills into a searchable categorized catalog
 - [x] Added a route-aware shell header in `MainSurface`
+- [x] Migrated chat, widget, and active-run banner UI to run-native OpenClaw timeline/events
+- [x] Removed legacy `TaskProgress` bubble/component from renderer surfaces
+- [x] Updated voice lifecycle handling to use `RUN_STATUS` + `TOOL_USE` events
 
 ### Copy and product framing
 - [x] Updated consent/chat/runtime copy to use OpenClaw-first language
@@ -33,6 +36,7 @@
 ### Main-process simplification
 - [ ] Remove dormant legacy planner/direct-executor branches from `GatewayManager`
 - [ ] Reduce leftover prototype comments and dead-path code
+- [ ] Retire renderer-facing dependency on `TASK_PROGRESS` events from main-process flows
 
 ### Automation depth
 - [ ] Add richer scheduled/cron-like job semantics

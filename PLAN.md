@@ -47,7 +47,9 @@ Key state:
 - `runtimeStatus`
 - `bootstrapState`
 - `messages`
-- `activeTask`
+- `activeRun`
+- `recentRuns`
+- `recentRunEvents`
 - `automationJobs`
 - `actionFeed`
 
@@ -70,6 +72,8 @@ Key state:
 - rebuilt Skills into a searchable categorized catalog
 - upgraded Home, Browser, Desktop, and main shell layout
 - aligned consent/chat copy with the OpenClaw-first product model
+- shifted chat/widget/live banner UI from legacy task progress to run-native timeline events
+- aligned voice mode lifecycle with OpenClaw run/tool events and removed duplicate renderer event forwarding
 
 ## Remaining Work
 

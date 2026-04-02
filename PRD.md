@@ -112,6 +112,9 @@ Implemented in the codebase:
 - upgraded browser and desktop surfaces
 - skill catalog UI
 - main shell/header UX refresh
+- run-native chat/widget/live banner execution timeline
+- voice mode aligned to OpenClaw run and tool lifecycle events (single conversation model)
+- managed voice key behavior with no user-facing key editing path
 
 Still to deepen:
 - remove more dormant legacy execution code in the main process

@@ -3,10 +3,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 import { DeepgramClient } from "@renderer/services/deepgram";
 import { WebSpeechClient } from "@renderer/services/web-speech";
-import { speakStreaming, stopSpeaking } from "@renderer/services/tts";
+import { resolveDeepgramKey, speakStreaming, stopSpeaking } from "@renderer/services/tts";
 import { AuraFace } from "./AuraFace";
 
-import type { OpenClawRun, TaskProgressPayload, TaskErrorPayload } from "@shared/types";
+import type { OpenClawRun, TaskErrorPayload, ToolUsePayload } from "@shared/types";
 
 type VoiceClient = DeepgramClient | WebSpeechClient;
 type Phase = "idle" | "listening" | "thinking" | "task" | "speaking";
@@ -70,8 +70,6 @@ function MicLevelBars({ stream }: { stream: MediaStream | null }): JSX.Element {
 export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
   const sendMessage = useAuraStore((s) => s.sendMessage);
   const stopMessage = useAuraStore((s) => s.stopMessage);
-  const settings = useAuraStore((s) => s.settings);
-  const handleAppEvent = useAuraStore((s) => s.handleAppEvent);
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [caption, setCaption] = useState("");
@@ -91,12 +89,7 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
   const abortCtrlRef = useRef<AbortController | null>(null);
   const isActiveRef = useRef(active);
 
-  // Pre-bundled Deepgram key
-  const deepgramKey = settings.deepgramKey
-    || (import.meta.env.VITE_DEEPGRAM_API_KEY as string | undefined)
-    || undefined;
-  const dgKeyRef = useRef(deepgramKey);
-  useEffect(() => { dgKeyRef.current = deepgramKey; }, [deepgramKey]);
+  const dgKeyRef = useRef(resolveDeepgramKey());
 
   const transitionPhase = (p: Phase) => { phaseRef.current = p; setPhase(p); };
   useEffect(() => { isActiveRef.current = active; }, [active]);
@@ -220,7 +213,7 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
       console.warn("[VoicePanel] WebSpeech NOT supported in this environment. Voice mode unavailable.");
       transitionPhase("idle");
       inVoiceModeRef.current = false;
-      setVoiceError("Voice not available — add VITE_DEEPGRAM_API_KEY to .env.local");
+      setVoiceError("Voice mode is unavailable in this build.");
       return;
     }
     await client.start();
@@ -232,34 +225,46 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
   const startListeningCycleRef = useRef(startListeningCycle);
   useEffect(() => { startListeningCycleRef.current = startListeningCycle; }, [startListeningCycle]);
 
-  // ── Listen for LLM_DONE, TASK_PROGRESS, TASK_ERROR from IPC ────────────
+  // Listen for run lifecycle events from IPC.
 
   useEffect(() => {
     const listener = (msg: { type?: string; payload?: unknown }) => {
-      // Also forward to store so chat thread updates
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      handleAppEvent(msg as any);
-
-      if (msg.type === "TASK_PROGRESS") {
-        const p = msg.payload as TaskProgressPayload;
-        if (phaseRef.current === "thinking" || phaseRef.current === "task") {
-          transitionPhase("task");
-          const runningStep = p.task?.steps?.find((s) => s.status === "running");
-          setTaskStatus(runningStep?.tool ? `${runningStep.tool.replace(/_/g, " ")}...` : "Working...");
-        }
-        return;
-      }
 
       if (msg.type === "RUN_STATUS") {
         const p = msg.payload as { run: OpenClawRun };
-        if ((phaseRef.current === "thinking" || phaseRef.current === "task") && p.run.status === "running") {
+        if (
+          (phaseRef.current === "thinking" || phaseRef.current === "task")
+          && (p.run.status === "queued" || p.run.status === "running")
+        ) {
           transitionPhase("task");
           setTaskStatus(
             p.run.lastTool
               ? p.run.lastTool.replace(":", " ").replace(/_/g, " ")
               : `${p.run.surface} tools active`,
           );
+          return;
         }
+
+        if (waitingForRef.current && (p.run.status === "error" || p.run.status === "cancelled")) {
+          waitingForRef.current = false;
+          setTaskStatus("");
+          setTimeout(() => {
+            if (inVoiceModeRef.current && isActiveRef.current) void startListeningCycleRef.current();
+            else transitionPhase("idle");
+          }, 500);
+        }
+        return;
+      }
+
+      if (msg.type === "TOOL_USE") {
+        if (!(phaseRef.current === "thinking" || phaseRef.current === "task")) {
+          return;
+        }
+
+        const payload = msg.payload as ToolUsePayload;
+        transitionPhase("task");
+        const label = `${payload.tool} ${payload.action}`.replace(/_/g, " ").trim();
+        setTaskStatus(payload.status === "error" ? `${label} failed` : `${label}...`);
         return;
       }
 
@@ -324,7 +329,7 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
 
     const unsubscribe = window.auraDesktop.onAppEvent(listener);
     return unsubscribe;
-  }, [handleAppEvent]);
+  }, []);
 
   // ── Pause/resume on tab visibility ──────────────────────────────────────
 

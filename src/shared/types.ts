@@ -23,7 +23,6 @@ export interface UserProfile {
 export interface AuraSettings {
   theme: ThemeMode;
   voiceEnabled: boolean;
-  deepgramKey?: string;
   modelPreset: "managed" | "balanced" | "fast" | "quality";
   advancedMode: boolean;
   privacyMode: "standard" | "strict";

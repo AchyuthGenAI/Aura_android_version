@@ -36,7 +36,6 @@ const WidgetApp = (): JSX.Element => {
   const activeRun = useAuraStore((state) => state.activeRun);
   const recentRuns = useAuraStore((state) => state.recentRuns);
   const actionFeed = useAuraStore((state) => state.actionFeed);
-  const activeTask = useAuraStore((state) => state.activeTask);
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [expanded, setExpanded] = useState(false);
   const [size, setSize] = useState(DEFAULT_WIDGET_SIZE);
@@ -199,9 +198,7 @@ const WidgetApp = (): JSX.Element => {
   const latestRun = activeRun ?? recentRuns[0] ?? null;
 
   const isTaskActive =
-    activeTask?.status === "planning"
-    || activeTask?.status === "running"
-    || activeRun?.status === "queued"
+    activeRun?.status === "queued"
     || activeRun?.status === "running";
 
   if (!expanded) {

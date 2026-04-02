@@ -9,7 +9,6 @@ import type {
   AuraSessionMessage,
   AuraSettings,
   AuraStorageShape,
-  AuraTask,
   BootstrapState,
   BrowserLayoutBounds,
   BrowserSelection,
@@ -28,7 +27,6 @@ import type {
   RuntimeStatus,
   SkillSummary,
   TaskErrorPayload,
-  TaskProgressPayload,
   ToastNotice,
   ToolsSubTab,
   ToolUsePayload,
@@ -185,7 +183,6 @@ type AuraState = {
   activeRun: OpenClawRun | null;
   recentRuns: OpenClawRun[];
   recentRunEvents: Record<string, ToolUsePayload[]>;
-  activeTask: AuraTask | null;
   pendingConfirmation: ConfirmActionPayload | null;
   lastError: TaskErrorPayload | null;
   inputValue: string;
@@ -223,7 +220,6 @@ type AuraState = {
   sendMessage: (source: ChatSendRequest["source"], override?: string) => Promise<void>;
   stopMessage: () => Promise<void>;
   taskConfirmResponse: (requestId: string, confirmed: boolean) => Promise<void>;
-  cancelTask: (taskId: string) => Promise<void>;
   startNewSession: () => Promise<void>;
   loadSession: (sessionId: string) => Promise<void>;
   browserNewTab: (url?: string) => Promise<void>;
@@ -317,7 +313,6 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   activeRun: null,
   recentRuns: [],
   recentRunEvents: {},
-  activeTask: null,
   pendingConfirmation: null,
   lastError: null,
   inputValue: "",
@@ -440,20 +435,6 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       return;
     }
 
-    if (message.type === "TASK_PROGRESS") {
-      const payload = message.payload as TaskProgressPayload;
-      const updates: Partial<AuraState> = { activeTask: payload.task };
-
-      // Clear pending confirmation when task completes/errors/cancels
-      const status = payload.task.status;
-      if (status === "done" || status === "error" || status === "cancelled") {
-        updates.pendingConfirmation = null;
-      }
-
-      set(updates);
-      return;
-    }
-
     if (message.type === "TASK_ERROR") {
       const payload = message.payload as TaskErrorPayload;
       const nextMessages = [...get().messages];
@@ -468,7 +449,6 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       set((state) => ({
         isLoading: false,
         activeRun: null,
-        activeTask: null,
         lastError: payload,
         messages: nextMessages,
         toasts: [...state.toasts, createToast("error", "Task failed", payload.message)]
@@ -744,7 +724,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       inputValue: override ? state.inputValue : "",
       isLoading: true,
       lastError: null,
-      route: source === "voice" ? "browser" : state.route
+      route: state.route
     });
 
     await window.auraDesktop.storage.set({
@@ -797,18 +777,12 @@ export const useAuraStore = create<AuraState>((set, get) => ({
     await window.auraDesktop.task.confirmResponse({ requestId, confirmed });
   },
 
-  cancelTask: async (taskId) => {
-    set({ pendingConfirmation: null });
-    await window.auraDesktop.task.cancel({ taskId });
-  },
-
   startNewSession: async () => {
     set({
       currentSessionId: null,
       messages: [],
       inputValue: "",
       activeRun: null,
-      activeTask: null,
       actionFeed: [],
       lastError: null,
       isLoading: false
@@ -827,7 +801,6 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       messages: mapSessionMessages(session.messages),
       route: "home",
       activeRun: null,
-      activeTask: null,
       actionFeed: [],
       lastError: null
     });
