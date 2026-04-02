@@ -7,7 +7,7 @@ import { useAuraStore } from "@renderer/store/useAuraStore";
 const EXAMPLE_COMMANDS = [
   "Summarize this page and tell me what matters most.",
   "Research this topic and extract the key takeaways.",
-  "Draft a polished reply from the context on this page.",
+  "Turn this workflow into a reusable automation job.",
   "Use my profile to help me complete this form.",
 ];
 
@@ -152,7 +152,7 @@ export const ChatThread = ({
             {emptyContext === "home" ? "Aura Home" : "What can I do for you?"}
           </h3>
           <p className="mt-2 max-w-[420px] text-sm leading-6 text-aura-muted">
-            Aura wraps local OpenClaw so users can chat, browse, automate, summarize, and monitor pages without manual setup.
+            Aura wraps a managed local OpenClaw runtime so you can chat, automate the browser and desktop, use bundled skills, and schedule jobs without manual setup.
           </p>
         </div>
         <div className="grid w-full max-w-[760px] gap-3 md:grid-cols-2">

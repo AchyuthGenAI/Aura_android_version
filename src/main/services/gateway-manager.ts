@@ -13,6 +13,7 @@ import type {
   ExtensionMessage,
   GatewayStatus,
   PageContext,
+  RuntimeDiagnostics,
   RuntimeStatus,
   TaskProgressPayload,
   TaskStep,
@@ -146,7 +147,12 @@ export class GatewayManager {
       phase: "idle",
       running: false,
       openClawDetected: false,
-      message: "OpenClaw has not been checked yet.",
+      bundleDetected: false,
+      gatewayConnected: false,
+      degraded: false,
+      lastCheckedAt: Date.now(),
+      message: "Managed OpenClaw runtime has not been checked yet.",
+      diagnostics: this.buildDiagnostics(),
     };
     this.bootstrapState = {
       stage: "idle",
@@ -186,12 +192,23 @@ export class GatewayManager {
   }
 
   cancelTask(taskId: string): void {
+    void this.stopResponse();
     this.taskExecutor.cancel(taskId);
   }
 
   async bootstrap(): Promise<BootstrapState> {
     this.setBootstrap({ stage: "checking-runtime", progress: 15, message: "Checking local OpenClaw runtime." });
-    this.setStatus({ phase: "checking", running: false, openClawDetected: false, message: "Checking local runtime." });
+    this.setStatus({
+      phase: "checking",
+      running: false,
+      openClawDetected: false,
+      bundleDetected: false,
+      gatewayConnected: false,
+      degraded: false,
+      lastCheckedAt: Date.now(),
+      message: "Checking managed OpenClaw runtime.",
+      diagnostics: this.buildDiagnostics(),
+    });
 
     const candidates = this.openClawRootCandidates.map((c) => path.join(c, "openclaw.mjs"));
     this.openClawEntryPath = candidates.find((c) => fs.existsSync(c)) ?? null;
@@ -209,8 +226,16 @@ export class GatewayManager {
         phase: "install-required",
         running: false,
         openClawDetected: false,
-        message: "OpenClaw was not detected.",
+        bundleDetected: false,
+        gatewayConnected: false,
+        degraded: true,
+        lastCheckedAt: Date.now(),
+        message: "OpenClaw bundle was not detected.",
         error: `Local OpenClaw entrypoint not found in ${this.openClawRootCandidates.join(", ")}.`,
+        diagnostics: this.buildDiagnostics({
+          bundleRootPath: this.openClawRootCandidates.join(", "),
+          supportNote: "Bundle OpenClaw with Aura or place the app beside a compatible checkout.",
+        }),
       });
       return this.getBootstrap();
     }
@@ -224,14 +249,23 @@ export class GatewayManager {
       phase: "starting",
       running: false,
       openClawDetected: true,
+      bundleDetected: true,
       version,
       port,
-      message: "Starting OpenClaw Gateway process.",
+      gatewayConnected: false,
+      degraded: false,
+      lastCheckedAt: Date.now(),
+      message: "Starting managed OpenClaw gateway.",
+      diagnostics: this.buildDiagnostics({
+        bundleRootPath: this.openClawRootPath ?? undefined,
+        processRunning: false,
+      }),
     });
 
     // Try starting the Gateway — if it fails, Aura still works via direct Groq LLM.
     // Hard deadline: 60s total to avoid long SplashScreen hangs (OpenClaw takes ~30s on Windows).
     const BOOTSTRAP_DEADLINE_MS = 60_000;
+    let bootstrapError: string | undefined;
     try {
       await Promise.race([
         (async () => {
@@ -263,19 +297,46 @@ export class GatewayManager {
       ]);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      console.warn("[GatewayManager] Gateway didn't start in time — using direct Groq mode:", detail);
-      // Don't block — mark as ready anyway since direct LLM works
+      bootstrapError = detail;
+      console.warn("[GatewayManager] Managed gateway bootstrap failed:", detail);
     }
 
-    this.setBootstrap({ stage: "ready", progress: 100, message: "Aura is ready." });
+    if (!bootstrapError && !this.connected) {
+      bootstrapError = "OpenClaw gateway bootstrap failed.";
+    }
+
+    const bootstrapSucceeded = this.connected;
+
+    this.setBootstrap(
+      bootstrapSucceeded
+        ? { stage: "ready", progress: 100, message: "Managed OpenClaw runtime is online." }
+        : {
+            stage: "error",
+            progress: 100,
+            message: "Managed OpenClaw runtime is unavailable.",
+            detail: bootstrapError ?? "Aura could not connect to the packaged OpenClaw gateway.",
+          },
+    );
     this.setStatus({
-      phase: "ready",
-      running: true,
+      phase: bootstrapSucceeded ? "ready" : "error",
+      running: bootstrapSucceeded,
       openClawDetected: true,
+      bundleDetected: true,
       version,
       port,
+      gatewayConnected: this.connected,
+      degraded: !this.connected,
+      lastCheckedAt: Date.now(),
       workspacePath: path.join(this.configManager.getOpenClawHomePath(), ".openclaw", "workspace"),
-      message: this.connected ? "OpenClaw Gateway is running." : "Aura is ready (direct LLM mode).",
+      message: bootstrapSucceeded ? "Managed OpenClaw runtime is online." : "Managed OpenClaw runtime is unavailable.",
+      error: bootstrapSucceeded ? undefined : bootstrapError ?? "OpenClaw gateway bootstrap failed.",
+      diagnostics: this.buildDiagnostics({
+        bundleRootPath: this.openClawRootPath ?? undefined,
+        processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
+        supportNote: bootstrapSucceeded
+          ? "Aura is connected to the managed OpenClaw gateway."
+          : "Restart the runtime from Settings after checking the bundled OpenClaw assets.",
+      }),
     });
 
     return this.getBootstrap();
@@ -293,6 +354,19 @@ export class GatewayManager {
       this.gatewayProcess.kill();
       this.gatewayProcess = null;
     }
+    this.setStatus({
+      ...this.runtimeStatus,
+      phase: "idle",
+      running: false,
+      gatewayConnected: false,
+      degraded: false,
+      lastCheckedAt: Date.now(),
+      message: "Managed OpenClaw runtime is stopped.",
+      diagnostics: this.buildDiagnostics({
+        bundleRootPath: this.openClawRootPath ?? undefined,
+        processRunning: false,
+      }),
+    });
   }
 
   async stopResponse(): Promise<void> {
@@ -359,6 +433,18 @@ export class GatewayManager {
       phase: "running",
       message: "Processing your request.",
     });
+    if (classification.intent === "monitor" && this.monitorManager) {
+      console.log("[GatewayManager] -> handleMonitorIntent");
+      return this.handleMonitorIntent(messageId, taskId, session, request, pageContext, apiKey);
+    }
+
+    if (classification.intent === "desktop") {
+      console.log("[GatewayManager] -> handleDesktopIntent");
+      return this.handleDesktopIntent(messageId, taskId, session, request);
+    }
+
+    console.log("[GatewayManager] -> handleQueryIntent (managed OpenClaw)");
+    return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
 
     // ── Route by intent ──
     if (classification.intent === "query") {
@@ -398,7 +484,6 @@ export class GatewayManager {
     const task = this.createLegacyTask(taskId, request.message);
     this.emitProgress(task, { type: "status", statusText: "Thinking..." });
 
-    const prompt = this.composePrompt(request, pageContext);
     task.status = "running";
     task.updatedAt = now();
     task.steps[0]!.status = "done";
@@ -408,17 +493,14 @@ export class GatewayManager {
     this.emitProgress(task, { type: "step_start", statusText: "Generating response." });
 
     try {
-      let responseText: string;
-      if (this.connected) {
-        // Route through OpenClaw agent (has skills, memory, browser tools, web search)
-        this.emitProgress(task, { type: "step_start", statusText: "OpenClaw agent working..." });
-        responseText = await this.streamViaOpenClaw(messageId, request.message, "main", extraSystemPrompt);
-      } else {
-        // Fallback: direct Groq streaming
-        responseText = await this.streamViaDirectLLM(messageId, prompt, request.history);
+      if (!this.connected) {
+        throw new Error("Managed OpenClaw runtime is unavailable. Restart the runtime from Settings and try again.");
       }
+      // Route through OpenClaw agent (has skills, memory, browser tools, web search)
+      this.emitProgress(task, { type: "step_start", statusText: "OpenClaw agent working..." });
+      const responseText = await this.streamViaOpenClaw(messageId, request.message, "main", extraSystemPrompt);
       this.handleChatSuccess(messageId, taskId, task, session, request, responseText);
-    } catch (err) {
+    } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       this.handleChatError(messageId, taskId, task, session, message);
     }
@@ -438,90 +520,11 @@ export class GatewayManager {
     request: ChatSendRequest,
     classification: Classification,
   ): Promise<{ messageId: string; taskId: string }> {
-    // If we are connected to OpenClaw and it's a desktop action, prefer the agent for better pacing/vision
-    if (this.connected && classification.intent === "desktop") {
-      return this.handleQueryIntent(messageId, taskId, session, request, null, "desktop");
-    }
-
-    const action = classification.directAction!;
-    const step: TaskStep = {
-      index: 0,
-      tool: action.tool as ToolName,
-      description: `${action.tool}: ${JSON.stringify(action.params)}`,
-      status: "pending",
-      params: action.params,
-    };
-
-    const task: AuraTask = {
-      id: taskId,
-      command: request.message,
-      status: "running",
-      createdAt: now(),
-      updatedAt: now(),
-      retries: 0,
-      steps: [step],
-    };
-
-    this.emitProgress(task, { type: "status", statusText: "Executing..." });
-
-    // Emit a TOOL_USE event so the renderer (which listens to TOOL_USE logic)
-    // knows to switch to the browser automatically for navigate actions.
-    const toolUseId = crypto.randomUUID();
-    this.emit({
-      type: "TOOL_USE",
-      payload: {
-        tool: action.tool === "navigate" ? "browser" : action.tool,
-        toolUseId,
-        action: action.tool,
-        params: action.params,
-        status: "running",
-        timestamp: now(),
-      },
-    });
-
-    try {
-      const profile = this.store.getState().profile;
-      const result = await this.taskExecutor.execute({
-        task,
-        browserController: this.browserController,
-        emit: this.emit,
-        confirmStep: (payload) => this.confirmStep(payload),
-        profile,
-      });
-
-      this.emit({
-        type: "TOOL_USE",
-        payload: {
-          tool: action.tool === "navigate" ? "browser" : action.tool,
-          toolUseId,
-          action: action.tool,
-          params: action.params,
-          status: "done",
-          timestamp: now(),
-        },
-      });
-
-      this.handleChatSuccess(messageId, taskId, task, session, request, result || "Done!");
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.emit({
-        type: "TOOL_USE",
-        payload: {
-          tool: action.tool === "navigate" ? "browser" : action.tool,
-          toolUseId,
-          action: action.tool,
-          params: action.params,
-          status: "error",
-          output: message,
-          timestamp: now(),
-        },
-      });
-      this.handleChatError(messageId, taskId, task, session, message);
-    }
-
-    this.activeMessageId = null;
-    this.activeTaskId = null;
-    return { messageId, taskId };
+    const extraSystemPrompt =
+      classification.intent === "navigate"
+        ? "Prefer OpenClaw browser tools and narrate the page transitions clearly."
+        : undefined;
+    return this.handleQueryIntent(messageId, taskId, session, request, null, extraSystemPrompt);
   }
 
   // ── Task intent: plan steps → execute ─────────────────────────────────────
@@ -534,6 +537,9 @@ export class GatewayManager {
     pageContext: PageContext | null,
     classification: Classification,
   ): Promise<{ messageId: string; taskId: string }> {
+    void classification;
+    return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
+
     // When OpenClaw is connected, delegate to the OpenClaw agent — it handles
     // full multi-step task execution with browser tools, web search, skills, etc.
     if (this.connected) {
@@ -590,7 +596,7 @@ export class GatewayManager {
       });
 
       this.handleChatSuccess(messageId, taskId, task, session, request, result || "Task completed.");
-    } catch (err) {
+    } catch (err: any) {
       const message = err instanceof Error ? err.message : String(err);
       this.handleChatError(messageId, taskId, task, session, message);
     }
@@ -645,7 +651,7 @@ export class GatewayManager {
     }
 
     if (!url) {
-      const responseText = "I need a URL to monitor. Please open the page you want to watch first, or tell me the URL.";
+      const responseText = "I need a URL for this watch automation. Open the page you want to track first, or tell me the URL.";
       const noUrlMsg: AuraSessionMessage = {
         id: crypto.randomUUID(), role: "assistant", content: responseText, timestamp: now(), source: request.source,
       };
@@ -653,33 +659,39 @@ export class GatewayManager {
       session.endedAt = now();
       this.persistCurrentSession(session);
       this.emit({ type: "LLM_DONE", payload: { messageId, fullText: responseText, cleanText: responseText } });
-      this.setStatus({ ...this.runtimeStatus, phase: "ready", message: "OpenClaw Gateway is running." });
+      this.setStatus({ ...this.runtimeStatus, phase: "ready", gatewayConnected: this.connected, degraded: !this.connected, lastCheckedAt: Date.now(), message: "Managed OpenClaw runtime is online." });
       return { messageId, taskId };
     }
 
     const monitor = {
       id: crypto.randomUUID(),
       title: condition.slice(0, 60),
+      kind: "watch" as const,
+      sourcePrompt: request.message,
       url,
       condition,
       intervalMinutes,
+      schedule: {
+        mode: "interval" as const,
+        intervalMinutes,
+      },
       createdAt: now(),
+      updatedAt: now(),
       lastCheckedAt: 0,
+      nextRunAt: now() + intervalMinutes * 60 * 1000,
       status: "active" as const,
       triggerCount: 0,
     };
 
-    // Persist to store and start polling
-    const monitors = [...this.store.getState().monitors, monitor];
-    this.store.patch({ monitors });
-    this.monitorManager!.scheduleMonitor(monitor);
+    // Persist to store and schedule the job through the shared automation layer.
+    this.monitorManager!.scheduleJob(monitor);
 
     const intervalLabel = intervalMinutes >= 60
       ? `every ${intervalMinutes / 60} hour${intervalMinutes / 60 !== 1 ? "s" : ""}`
       : `every ${intervalMinutes} minutes`;
     const responseText =
-      `Monitor created! I'll check "${url}" ${intervalLabel} and notify you when: ${condition}. ` +
-      `You can manage it in the Monitors tab.`;
+      `Automation created. I'll check "${url}" ${intervalLabel} and notify you when: ${condition}. ` +
+      `You can manage it in the Automations tab.`;
 
     // Persist the response as a chat message
     const assistantMessage: AuraSessionMessage = {
@@ -697,7 +709,7 @@ export class GatewayManager {
       type: "LLM_DONE",
       payload: { messageId, fullText: responseText, cleanText: responseText },
     });
-    this.setStatus({ ...this.runtimeStatus, phase: "ready", message: "OpenClaw Gateway is running." });
+    this.setStatus({ ...this.runtimeStatus, phase: "ready", gatewayConnected: this.connected, degraded: !this.connected, lastCheckedAt: Date.now(), message: "Managed OpenClaw runtime is online." });
 
     return { messageId, taskId };
   }
@@ -710,6 +722,9 @@ export class GatewayManager {
     session: AuraSession,
     request: ChatSendRequest,
   ): Promise<{ messageId: string; taskId: string }> {
+    const desktopPersona = "You are currently operating in native Windows desktop mode. Use OpenClaw desktop tools, verify the screen after meaningful actions, and narrate progress clearly.";
+    return this.handleQueryIntent(messageId, taskId, session, request, null, desktopPersona);
+
     console.log(`[GatewayManager] handleDesktopIntent — connected=${this.connected} dc=${Boolean(this.desktopController)}`);
 
     // When OpenClaw is connected, let the agent handle it
@@ -758,7 +773,7 @@ export class GatewayManager {
         goal: request.message,
         provider: visionProvider,
         apiKey,
-        dc: this.desktopController,
+        dc: this.desktopController!,
         onBeforeCapture: () => {
           console.log("[GatewayManager] onBeforeCapture — minimizing windows");
           this.hideMainWindow?.();
@@ -796,7 +811,7 @@ export class GatewayManager {
       task.status = "done";
       task.updatedAt = now();
       this.handleChatSuccess(messageId, taskId, task, session, request, result);
-    } catch (err) {
+    } catch (err: any) {
       const message = err instanceof Error ? err.message : String(err);
       console.error("[GatewayManager] Vision agent threw:", message);
       this.handleChatError(messageId, taskId, task, session, message);
@@ -1112,8 +1127,16 @@ export class GatewayManager {
             ...this.runtimeStatus,
             phase: "error",
             running: false,
-            message: "Gateway process exited unexpectedly.",
+            gatewayConnected: false,
+            degraded: true,
+            lastCheckedAt: Date.now(),
+            message: "Managed OpenClaw gateway exited unexpectedly.",
             error: `Exit code: ${code}`,
+            diagnostics: this.buildDiagnostics({
+              bundleRootPath: this.openClawRootPath ?? undefined,
+              processRunning: false,
+              supportNote: "Aura could not keep the bundled OpenClaw gateway alive.",
+            }),
           });
         }
       });
@@ -1142,6 +1165,21 @@ export class GatewayManager {
         if (!resolved) {
           resolved = true;
           this.connected = true;
+          this.setStatus({
+            ...this.runtimeStatus,
+            phase: "ready",
+            running: true,
+            gatewayConnected: true,
+            degraded: false,
+            lastCheckedAt: Date.now(),
+            message: "Managed OpenClaw runtime is online.",
+            error: undefined,
+            diagnostics: this.buildDiagnostics({
+              bundleRootPath: this.openClawRootPath ?? undefined,
+              processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
+              supportNote: "Aura is connected to the managed OpenClaw gateway.",
+            }),
+          });
           resolve();
         }
       };
@@ -1173,6 +1211,23 @@ export class GatewayManager {
           resolved = true;
           reject(new Error("WebSocket closed before connection established."));
         }
+        this.setStatus({
+          ...this.runtimeStatus,
+          phase: wasConnected ? "starting" : "error",
+          running: false,
+          gatewayConnected: false,
+          degraded: true,
+          lastCheckedAt: Date.now(),
+          message: wasConnected ? "Reconnecting to the managed OpenClaw gateway." : "Managed OpenClaw gateway is unavailable.",
+          error: wasConnected ? undefined : "WebSocket closed before the gateway finished connecting.",
+          diagnostics: this.buildDiagnostics({
+            bundleRootPath: this.openClawRootPath ?? undefined,
+            processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
+            supportNote: wasConnected
+              ? "Aura will retry the OpenClaw gateway connection automatically."
+              : "The managed OpenClaw gateway could not complete its startup handshake.",
+          }),
+        });
         // Auto-reconnect after a successful connection drops
         if (wasConnected && this.gatewayProcess !== null) {
           this.reconnectTimer = setTimeout(() => {
@@ -1489,7 +1544,10 @@ export class GatewayManager {
     this.setStatus({
       ...this.runtimeStatus,
       phase: "ready",
-      message: "OpenClaw Gateway is running.",
+      gatewayConnected: this.connected,
+      degraded: !this.connected,
+      lastCheckedAt: Date.now(),
+      message: "Managed OpenClaw runtime is online.",
     });
   }
 
@@ -1598,6 +1656,16 @@ export class GatewayManager {
   private setStatus(next: RuntimeStatus): void {
     this.runtimeStatus = next;
     this.emit({ type: "RUNTIME_STATUS", payload: { status: this.runtimeStatus } });
+  }
+
+  private buildDiagnostics(overrides: Partial<RuntimeDiagnostics> = {}): RuntimeDiagnostics {
+    return {
+      managedMode: "openclaw-first",
+      gatewayTokenConfigured: Boolean(this.configManager.getGatewayToken()),
+      gatewayUrl: `ws://127.0.0.1:${this.configManager.getGatewayPort()}`,
+      sessionKey: "main",
+      ...overrides,
+    };
   }
 
   private setBootstrap(next: BootstrapState): void {

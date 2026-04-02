@@ -36,6 +36,11 @@ const api: AuraDesktopApi = {
     confirmResponse: (payload) => ipcRenderer.invoke(IPC_CHANNELS.taskConfirmResponse, payload),
     cancel: (payload) => ipcRenderer.invoke(IPC_CHANNELS.taskCancel, payload)
   },
+  automation: {
+    start: (job) => ipcRenderer.invoke(IPC_CHANNELS.automationStart, job),
+    stop: (payload) => ipcRenderer.invoke(IPC_CHANNELS.automationStop, payload),
+    list: () => ipcRenderer.invoke(IPC_CHANNELS.automationList)
+  },
   monitor: {
     start: (monitor) => ipcRenderer.invoke(IPC_CHANNELS.monitorStart, monitor),
     stop: (payload) => ipcRenderer.invoke(IPC_CHANNELS.monitorStop, payload),

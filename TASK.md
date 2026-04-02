@@ -1,44 +1,53 @@
-# Aura Desktop — Task Tracker
+# Aura Desktop Task Tracker
 
-## ✅ Phase 1: Fix Critical Blockers (DONE)
-- [x] Delete `runtime-manager.ts` (557 lines dead code)
-- [x] Default `voiceEnabled` to `false` (new users see ChatPanel)
-- [x] Gateway bootstrap hard timeout (15s max, was 55s)
-- [x] Clean `.env.local` (removed PLASMO_PUBLIC_, remote URLs, server-side keys)
+## Completed
 
-## ✅ Phase 2: Live Automation Experience (DONE)
-- [x] Add `TOOL_USE` message type + `ToolUsePayload` interface
-- [x] Parse `tool_use` blocks from gateway delta events in `handleChatStreamEvent()`
-- [x] Build `TaskActionFeed` component (27 tool labels, emoji icons, animated status)
-- [x] Integrate TaskActionFeed into `HomePage` and `BrowserPage`
-- [x] Wire browser auto-navigation on `browser.navigate` tool events
-- [x] CSS styles for TaskActionFeed (glassmorphic, light mode, step animations)
+### OpenClaw-first product shift
+- [x] Reframed Aura as a managed OpenClaw shell instead of a user-configured runtime switcher
+- [x] Expanded shared contracts for runtime diagnostics, OpenClaw-backed task metadata, and automation jobs
+- [x] Added automation IPC and renderer API support
 
-## ✅ Phase 3: Rewrite Documentation (DONE)
-- [x] Rewrite `PLAN.md` — architecture, chat flow, bootstrap, build
-- [x] Rewrite `TASK.md` — current status tracker (this file)
-- [x] Rewrite `PRD.md` — product requirements
-- [x] Rewrite `CLAUDE.md` — developer guide
+### Managed runtime UX
+- [x] Rebuilt Settings into a runtime health dashboard
+- [x] Added clearer runtime states and diagnostics in the main process
+- [x] Improved runtime reconnect/stop/error messaging
 
-## ✅ Phase 4: Polish (DONE)
-- [x] Step overlays on browser (highlight clicked elements)
-- [x] Action replay (tool result outputs rendered in feed)
-- [ ] Split-screen mode (skipped for MVP)
+### Automation model
+- [x] Added `AutomationJob` storage and compatibility mapping from legacy monitors
+- [x] Reworked the Monitors route into an Automations workspace
+- [x] Unified scheduling through `MonitorManager.scheduleJob`
 
-## 🟡 Phase 5: Native Hard Fork Integration (IN PROGRESS)
-- [x] Draft Robust Implementation Plan for the Hard Fork
-- [x] Rewrite `PRD.md` and `PLAN.md` to reflect Vision-First OS Copilot
-- [x] Clone OpenClaw upstream into `openclaw-fork`
-- [x] Wire up `aura-desktop/package.json` to locally compile the new fork
-- [x] Modify `openclaw-fork` core agent loop to enforce visual checking (See-Decide-Act)
-- [x] Inject Windows Desktop Persona into OpenClaw's system prompts
-- [x] Port `nut.js` skills into OpenClaw's native skill registry
+### Renderer refresh
+- [x] Upgraded Home into an OpenClaw-first command center
+- [x] Rebuilt Browser as a live workspace surface
+- [x] Rebuilt Desktop as a cleaner control surface
+- [x] Rebuilt Skills into a searchable categorized catalog
+- [x] Added a route-aware shell header in `MainSurface`
 
-*(Note: Confirmation prompts and full-desktop overlays skipped for MVP as they require high-level OS modifications)*
+### Copy and product framing
+- [x] Updated consent/chat/runtime copy to use OpenClaw-first language
+- [x] Replaced monitor-only phrasing in key user-facing surfaces
 
-*(Note: Confirmation prompts skipped for now, focusing on visual highlights)*
+## In Progress
 
-## Known Issues
-- Groq API key may be expired — check `VITE_LLM_API_KEY` in `.env.local`
-- OpenClaw gateway startup depends on `openclaw.mjs` existing in `openclaw-src/`
-- Deepgram STT requires valid API key for voice mode
+### Main-process simplification
+- [ ] Remove dormant legacy planner/direct-executor branches from `GatewayManager`
+- [ ] Reduce leftover prototype comments and dead-path code
+
+### Automation depth
+- [ ] Add richer scheduled/cron-like job semantics
+- [ ] Expose more run history and triggered-job detail in UI
+
+### Reliability and packaging
+- [ ] Harden packaged runtime validation
+- [ ] Add support export for logs/traces
+- [ ] Verify packaged Windows bootstrap on a clean machine
+
+## Current Verification
+
+- [x] `npm run typecheck`
+
+## Notes
+
+- Stage and commit only the intentional source/doc changes.
+- Do not include unrelated generated items such as `output.log`, `pnpm-lock.yaml`, or `test-home/.openclaw/workspace/` unless explicitly requested.

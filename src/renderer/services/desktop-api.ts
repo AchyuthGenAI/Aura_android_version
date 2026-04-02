@@ -5,6 +5,7 @@ import type {
   BrowserLayoutBounds,
   BrowserTabsUpdatedPayload,
   ChatSendRequest,
+  AutomationJob,
   DesktopScreenshotResult,
   DesktopWindowInfo,
   ExtensionMessage,
@@ -50,6 +51,11 @@ export interface AuraDesktopApi {
   task: {
     confirmResponse(payload: { requestId: string; confirmed: boolean }): Promise<void>;
     cancel(payload: { taskId: string }): Promise<void>;
+  };
+  automation: {
+    start(job: AutomationJob): Promise<void>;
+    stop(payload: { id: string }): Promise<void>;
+    list(): Promise<AutomationJob[]>;
   };
   monitor: {
     start(monitor: PageMonitor): Promise<void>;

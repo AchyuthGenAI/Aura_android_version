@@ -1,8 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 
-import { Button } from "../shared";
-import { TaskActionFeed } from "../TaskActionFeed";
 import { useAuraStore } from "@renderer/store/useAuraStore";
+
+import { Button, Card, SectionHeading } from "../shared";
+import { TaskActionFeed } from "../TaskActionFeed";
+
+const WORKSPACE_ACTIONS = [
+  {
+    label: "Summarize page",
+    prompt: "Summarize the current page, call out the important details, and suggest what to do next.",
+  },
+  {
+    label: "Create automation",
+    prompt: "Turn the current page into a reusable OpenClaw automation and explain the steps before you run it.",
+  },
+  {
+    label: "Extract data",
+    prompt: "Read the current page, extract the key structured information, and format it clearly.",
+  },
+];
 
 const SelectionBubble = (): JSX.Element | null => {
   const selection = useAuraStore((state) => state.selection);
@@ -38,7 +54,7 @@ const SelectionBubble = (): JSX.Element | null => {
           </button>
         ))}
       </div>
-      <div className="h-2 w-2 rotate-45 border-b border-r border-white/10 bg-[#12111d]/95 -translate-y-1"></div>
+      <div className="h-2 w-2 rotate-45 border-b border-r border-white/10 bg-[#12111d]/95 -translate-y-1" />
     </div>
   );
 };
@@ -65,18 +81,18 @@ const BrowserToolbar = (): JSX.Element => {
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-1">
           <button className="flex h-8 w-8 items-center justify-center rounded-full text-aura-text transition hover:bg-white/10" onClick={() => void browserBack()}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
           </button>
           <button className="flex h-8 w-8 items-center justify-center rounded-full text-aura-text transition hover:bg-white/10" onClick={() => void browserForward()}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6" /></svg>
           </button>
           <button className="flex h-8 w-8 items-center justify-center rounded-full text-aura-text transition hover:bg-white/10" onClick={() => void browserReload()}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></svg>
           </button>
         </div>
-        
+
         <div className="group relative flex-1 max-w-[800px] flex items-center rounded-[20px] bg-black/20 border border-white/10 px-4 py-1.5 transition focus-within:border-white/20 focus-within:bg-black/30">
-          <svg className="text-aura-muted group-focus-within:text-aura-text" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
+          <svg className="text-aura-muted group-focus-within:text-aura-text" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="11" cy="11" r="8" /><path d="M21 21l-4.3-4.3" /></svg>
           <input
             value={localUrl}
             onChange={(event) => setLocalUrl(event.target.value)}
@@ -89,11 +105,11 @@ const BrowserToolbar = (): JSX.Element => {
             className="w-full ml-3 bg-transparent text-sm text-aura-text outline-none placeholder:text-aura-muted"
           />
         </div>
-        
+
         <div className="flex items-center">
-           <Button className="bg-aura-gradient text-white shadow-aura-glow transition hover:scale-105" onClick={() => void window.auraDesktop.app.showWidgetWindow()}>
-             Send to Aura
-           </Button>
+          <Button className="bg-aura-gradient text-white shadow-aura-glow transition hover:scale-105" onClick={() => void window.auraDesktop.app.showWidgetWindow()}>
+            Open chat
+          </Button>
         </div>
       </div>
 
@@ -114,12 +130,12 @@ const BrowserToolbar = (): JSX.Element => {
             {browserTabs.length > 1 && (
               <button
                 className="flex h-5 w-5 items-center justify-center rounded-full opacity-0 transition hover:bg-white/10 group-hover:opacity-100"
-                onClick={(e) => {
-                  e.stopPropagation();
+                onClick={(event) => {
+                  event.stopPropagation();
                   void browserCloseTab(tab.id);
                 }}
               >
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
               </button>
             )}
           </div>
@@ -128,10 +144,64 @@ const BrowserToolbar = (): JSX.Element => {
           className="ml-1 flex h-9 w-9 items-center justify-center rounded-full text-aura-muted transition hover:bg-white/10 hover:text-aura-text"
           onClick={() => void browserNewTab()}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
         </button>
       </div>
     </div>
+  );
+};
+
+const WorkspaceSummary = (): JSX.Element => {
+  const pageContext = useAuraStore((state) => state.pageContext);
+  const runtimeStatus = useAuraStore((state) => state.runtimeStatus);
+  const actionFeed = useAuraStore((state) => state.actionFeed);
+  const sendMessage = useAuraStore((state) => state.sendMessage);
+
+  const activityLabel =
+    actionFeed.length > 0
+      ? `${actionFeed.length} live tool event${actionFeed.length === 1 ? "" : "s"}`
+      : "No live tool activity";
+
+  return (
+    <Card className="rounded-[28px] border-white/8 bg-[radial-gradient(circle_at_top_left,rgba(234,179,8,0.12),transparent_36%),rgba(26,25,38,0.84)] px-6 py-6">
+      <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+        <div className="max-w-2xl">
+          <p className="text-[11px] uppercase tracking-[0.26em] text-[#f4d47c]">Workspace</p>
+          <h1 className="mt-3 text-[30px] font-semibold tracking-tight text-white">Use the embedded browser as OpenClaw context, not as a dead-end tab strip.</h1>
+          <p className="mt-3 text-sm leading-6 text-aura-muted">
+            Aura keeps the page visible while the managed OpenClaw runtime reads, automates, and reports progress in the same conversation.
+          </p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-3 lg:min-w-[420px]">
+          <div className="rounded-[22px] border border-white/8 bg-black/20 px-4 py-4">
+            <p className="text-[11px] uppercase tracking-[0.22em] text-aura-muted">Runtime</p>
+            <p className="mt-2 text-sm font-semibold text-aura-text">{runtimeStatus.gatewayConnected ? "Connected" : "Attention needed"}</p>
+            <p className="mt-1 text-xs leading-5 text-aura-muted">{runtimeStatus.message}</p>
+          </div>
+          <div className="rounded-[22px] border border-white/8 bg-black/20 px-4 py-4">
+            <p className="text-[11px] uppercase tracking-[0.22em] text-aura-muted">Current page</p>
+            <p className="mt-2 line-clamp-2 text-sm font-semibold text-aura-text">{pageContext?.title || "No page selected yet"}</p>
+            <p className="mt-1 line-clamp-2 text-xs leading-5 text-aura-muted">{pageContext?.url || "Navigate anywhere and Aura will keep the context fresh."}</p>
+          </div>
+          <div className="rounded-[22px] border border-white/8 bg-black/20 px-4 py-4">
+            <p className="text-[11px] uppercase tracking-[0.22em] text-aura-muted">Automation feed</p>
+            <p className="mt-2 text-sm font-semibold text-aura-text">{activityLabel}</p>
+            <p className="mt-1 text-xs leading-5 text-aura-muted">Tool events from OpenClaw show up here while tasks are running.</p>
+          </div>
+        </div>
+      </div>
+      <div className="mt-5 flex flex-wrap gap-3">
+        {WORKSPACE_ACTIONS.map((action) => (
+          <Button
+            key={action.label}
+            className="border border-white/10 bg-white/6 text-aura-text hover:bg-white/12"
+            onClick={() => void sendMessage("text", action.prompt)}
+          >
+            {action.label}
+          </Button>
+        ))}
+      </div>
+    </Card>
   );
 };
 
@@ -178,19 +248,28 @@ export const BrowserPage = (): JSX.Element => {
   }, [activeBrowserTabId, browserSyncBounds, refreshPageContext, route]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[32px] border border-white/5 bg-[#0c0b14] shadow-2xl">
-      <BrowserToolbar />
-      <div className="relative flex-1 bg-white">
-        <div ref={hostRef} className="absolute inset-0" />
-        <SelectionBubble />
-        {/* Floating automation feed overlay — visible when tasks are running */}
-        {actionFeed.length > 0 && (
-          <div className="absolute bottom-4 left-4 z-20 w-[340px] max-w-[50%]">
-            <TaskActionFeed />
-          </div>
-        )}
+    <div className="flex h-full min-h-0 flex-col gap-5 overflow-y-auto pb-8">
+      <WorkspaceSummary />
+
+      <div>
+        <SectionHeading
+          title="Live Browser Surface"
+          detail="Keep the site visible while OpenClaw reads the page, executes browser tools, and streams progress into chat."
+        />
+      </div>
+
+      <div className="flex min-h-[620px] flex-1 flex-col overflow-hidden rounded-[32px] border border-white/5 bg-[#0c0b14] shadow-2xl">
+        <BrowserToolbar />
+        <div className="relative flex-1 bg-white">
+          <div ref={hostRef} className="absolute inset-0" />
+          <SelectionBubble />
+          {actionFeed.length > 0 && (
+            <div className="absolute bottom-4 left-4 z-20 w-[340px] max-w-[50%]">
+              <TaskActionFeed />
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
 };
-

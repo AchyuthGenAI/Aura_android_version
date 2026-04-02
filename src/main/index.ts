@@ -441,6 +441,13 @@ const createAppWindows = async (): Promise<void> => {
     ipcMain.handle(IPC_CHANNELS.taskCancel, async (_event, payload: { taskId: string }) => {
       activeGatewayManager!.cancelTask(payload.taskId);
     });
+    ipcMain.handle(IPC_CHANNELS.automationStart, async (_event, job) => {
+      activeMonitorManager!.scheduleJob(job as import("@shared/types").AutomationJob);
+    });
+    ipcMain.handle(IPC_CHANNELS.automationStop, async (_event, payload: { id: string }) => {
+      activeMonitorManager!.unscheduleJob(payload.id);
+    });
+    ipcMain.handle(IPC_CHANNELS.automationList, async () => activeMonitorManager!.listJobs());
     ipcMain.handle(IPC_CHANNELS.monitorStart, async (_event, monitor) => {
       activeMonitorManager!.scheduleMonitor(monitor as import("@shared/types").PageMonitor);
     });

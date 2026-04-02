@@ -55,6 +55,16 @@ export interface ManagedProviderState {
   message: string;
 }
 
+export interface RuntimeDiagnostics {
+  bundleRootPath?: string;
+  gatewayUrl?: string;
+  gatewayTokenConfigured?: boolean;
+  sessionKey?: string;
+  processRunning?: boolean;
+  managedMode: "openclaw-first";
+  supportNote?: string;
+}
+
 export interface RuntimeStatus {
   phase:
     | "idle"
@@ -65,13 +75,18 @@ export interface RuntimeStatus {
     | "ready"
     | "running"
     | "error";
+  bundleDetected?: boolean;
   version?: string;
   port?: number;
   running: boolean;
   openClawDetected: boolean;
+  gatewayConnected?: boolean;
+  degraded?: boolean;
+  lastCheckedAt?: number;
   workspacePath?: string;
   message: string;
   error?: string;
+  diagnostics?: RuntimeDiagnostics;
 }
 
 export interface BootstrapState {
@@ -206,6 +221,11 @@ export interface AuraTask {
   retries: number;
   currentUrl?: string;
   currentTitle?: string;
+  runId?: string;
+  sessionKey?: string;
+  skillName?: string;
+  surface?: "chat" | "browser" | "desktop" | "mixed";
+  statusSource?: "openclaw-gateway" | "aura-local";
 }
 
 export interface DesktopBrowserTab {
@@ -250,17 +270,48 @@ export interface PageContext {
   activeTabs: Array<{ id?: string; title?: string; url?: string }>;
 }
 
-export interface PageMonitor {
+export type AutomationJobKind = "watch" | "scheduled" | "recurring" | "cron";
+export type AutomationJobStatus = "active" | "paused" | "triggered" | "idle" | "running" | "error";
+export type AutomationScheduleMode = "interval" | "once" | "cron";
+
+export interface AutomationSchedule {
+  mode: AutomationScheduleMode;
+  intervalMinutes?: number;
+  cron?: string;
+  runAt?: number;
+  timezone?: string;
+}
+
+export interface AutomationJobRun {
+  runId?: string;
+  status: "idle" | "running" | "done" | "error" | "cancelled" | "triggered";
+  startedAt?: number;
+  finishedAt?: number;
+  summary?: string;
+  error?: string;
+}
+
+export interface AutomationJob {
   id: string;
   title: string;
-  url: string;
-  condition: string;
-  intervalMinutes: number;
+  kind: AutomationJobKind;
+  sourcePrompt: string;
+  url?: string;
+  condition?: string;
+  intervalMinutes?: number;
+  schedule: AutomationSchedule;
   createdAt: number;
+  updatedAt: number;
   lastCheckedAt: number;
-  status: "active" | "paused" | "triggered";
+  nextRunAt?: number;
+  status: AutomationJobStatus;
   triggerCount: number;
+  skillId?: string;
+  skillName?: string;
+  lastRun?: AutomationJobRun;
 }
+
+export type PageMonitor = AutomationJob;
 
 export interface AuraMacro {
   id: string;
@@ -336,6 +387,7 @@ export interface AuraStorageShape {
   widgetPosition: BubblePosition;
   widgetExpanded: boolean;
   widgetSize: OverlaySize;
+  automationJobs: AutomationJob[];
   monitors: PageMonitor[];
   macros: AuraMacro[];
   activeRoute: AppRoute;
@@ -358,7 +410,8 @@ export type MessageType =
   | "RUNTIME_STATUS"
   | "BOOTSTRAP_STATUS"
   | "WIDGET_VISIBILITY"
-  | "TOOL_USE";
+  | "TOOL_USE"
+  | "AUTOMATION_JOB_UPDATED";
 
 export interface ExtensionMessage<T = unknown> {
   type: MessageType;
@@ -444,6 +497,10 @@ export interface ToolUsePayload {
   status: "running" | "done" | "error";
   output?: string;
   timestamp: number;
+}
+
+export interface AutomationJobUpdatedPayload {
+  job: AutomationJob;
 }
 
 export interface BrowserNavigationRequest {

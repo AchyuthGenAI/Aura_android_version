@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { AuraStorageShape, AuraMacro, PageMonitor, PermissionState } from "@shared/types";
+import type { AuraStorageShape, AuraMacro, AutomationJob, PageMonitor, PermissionState } from "@shared/types";
 
 const defaultPermissions = (): PermissionState[] => [
   {
@@ -55,11 +55,18 @@ const defaultMonitors = (): PageMonitor[] => [
   {
     id: "monitor-example",
     title: "Pricing Change Watch",
+    kind: "watch",
+    sourcePrompt: "Watch this page and notify me when the primary price block changes.",
     url: "https://example.com/pricing",
     condition: "Notify me when the primary price block changes.",
-    intervalMinutes: 30,
+    schedule: {
+      mode: "interval",
+      intervalMinutes: 30,
+    },
     createdAt: Date.now(),
+    updatedAt: Date.now(),
     lastCheckedAt: 0,
+    nextRunAt: Date.now() + 30 * 60 * 1000,
     status: "paused",
     triggerCount: 0
   }
@@ -103,6 +110,7 @@ export const createDefaultStorage = (): AuraStorageShape => ({
   widgetPosition: { x: 0, y: 0 },
   widgetExpanded: false,
   widgetSize: { w: 420, h: 580 },
+  automationJobs: defaultMonitors(),
   monitors: defaultMonitors(),
   macros: defaultMacros(),
   activeRoute: "home"
@@ -116,17 +124,26 @@ const safeReadJson = <T>(filePath: string, fallback: T): T => {
     const raw = fs.readFileSync(filePath, "utf8");
     const parsed = JSON.parse(raw) as Partial<AuraStorageShape>;
     if ("settings" in (fallback as object)) {
+      const storageFallback = fallback as AuraStorageShape;
+      const parsedStorage = parsed as Partial<AuraStorageShape>;
+      const parsedJobs = normalizeAutomationJobs(
+        parsedStorage.automationJobs,
+        parsedStorage.monitors,
+        storageFallback.automationJobs,
+      );
       return {
-        ...(fallback as AuraStorageShape),
-        ...parsed,
+        ...storageFallback,
+        ...parsedStorage,
         settings: {
-          ...(fallback as AuraStorageShape).settings,
-          ...(parsed.settings ?? {})
+          ...storageFallback.settings,
+          ...(parsedStorage.settings ?? {})
         },
         profile: {
-          ...(fallback as AuraStorageShape).profile,
-          ...(parsed.profile ?? {})
-        }
+          ...storageFallback.profile,
+          ...(parsedStorage.profile ?? {})
+        },
+        automationJobs: parsedJobs,
+        monitors: parsedJobs,
       } as T;
     }
     return { ...fallback, ...parsed } as T;
@@ -163,18 +180,20 @@ export class AuraStore {
   }
 
   patch(partial: Partial<AuraStorageShape>): AuraStorageShape {
+    const normalizedPartial = normalizeAutomationPatch(this.state, partial);
     this.state = {
       ...this.state,
-      ...partial
+      ...normalizedPartial
     };
     this.persist();
     return this.getState();
   }
 
   set<K extends keyof AuraStorageShape>(key: K, value: AuraStorageShape[K]): AuraStorageShape {
+    const normalizedPartial = normalizeAutomationPatch(this.state, { [key]: value } as Partial<AuraStorageShape>);
     this.state = {
       ...this.state,
-      [key]: value
+      ...normalizedPartial
     };
     this.persist();
     return this.getState();
@@ -183,4 +202,51 @@ export class AuraStore {
   private persist(): void {
     fs.writeFileSync(this.filePath, JSON.stringify(this.state, null, 2), "utf8");
   }
+}
+
+function normalizeAutomationPatch(
+  current: AuraStorageShape,
+  partial: Partial<AuraStorageShape>,
+): Partial<AuraStorageShape> {
+  if (partial.automationJobs) {
+    return {
+      ...partial,
+      automationJobs: normalizeAutomationJobs(partial.automationJobs, undefined, current.automationJobs),
+      monitors: normalizeAutomationJobs(partial.automationJobs, undefined, current.automationJobs),
+    };
+  }
+
+  if (partial.monitors) {
+    return {
+      ...partial,
+      automationJobs: normalizeAutomationJobs(undefined, partial.monitors, current.automationJobs),
+      monitors: normalizeAutomationJobs(undefined, partial.monitors, current.automationJobs),
+    };
+  }
+
+  return partial;
+}
+
+function normalizeAutomationJobs(
+  jobs: AutomationJob[] | undefined,
+  legacyMonitors: PageMonitor[] | undefined,
+  fallback: AutomationJob[],
+): AutomationJob[] {
+  const source = jobs ?? legacyMonitors ?? fallback;
+  return source.map((job) => {
+    const intervalMinutes = "intervalMinutes" in job && typeof job.intervalMinutes === "number"
+      ? job.intervalMinutes
+      : job.schedule?.intervalMinutes;
+    return {
+      ...job,
+      kind: job.kind ?? "watch",
+      sourcePrompt: job.sourcePrompt ?? job.condition ?? job.title,
+      schedule: job.schedule ?? {
+        mode: "interval",
+        intervalMinutes: intervalMinutes ?? 30,
+      },
+      updatedAt: job.updatedAt ?? job.createdAt ?? Date.now(),
+      nextRunAt: job.nextRunAt ?? (intervalMinutes ? Date.now() + intervalMinutes * 60 * 1000 : undefined),
+    };
+  });
 }

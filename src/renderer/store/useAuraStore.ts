@@ -2,6 +2,8 @@ import { create } from "zustand";
 
 import type {
   AppRoute,
+  AutomationJob,
+  AutomationJobUpdatedPayload,
   AuraMacro,
   AuraSession,
   AuraSessionMessage,
@@ -130,6 +132,7 @@ type AuraState = {
   lastError: TaskErrorPayload | null;
   inputValue: string;
   isLoading: boolean;
+  automationJobs: AutomationJob[];
   monitors: PageMonitor[];
   macros: AuraMacro[];
   skills: SkillSummary[];
@@ -151,6 +154,10 @@ type AuraState = {
   saveSettings: (value: AuraSettings) => Promise<void>;
   savePermissions: (value: PermissionState[]) => Promise<void>;
   saveMonitors: (value: PageMonitor[]) => Promise<void>;
+  saveAutomationJobs: (value: AutomationJob[]) => Promise<void>;
+  startAutomationJob: (job: AutomationJob) => Promise<void>;
+  stopAutomationJob: (id: string) => Promise<void>;
+  deleteAutomationJob: (id: string) => Promise<void>;
   startMonitor: (monitor: PageMonitor) => Promise<void>;
   stopMonitor: (id: string) => Promise<void>;
   deleteMonitor: (id: string) => Promise<void>;
@@ -195,6 +202,7 @@ const applyStorageState = (set: (partial: Partial<AuraState>) => void, storage: 
     currentSessionId: currentSession?.id ?? null,
     messages: currentSession ? mapSessionMessages(currentSession.messages) : [],
     history: storage.history,
+    automationJobs: storage.automationJobs?.length ? storage.automationJobs : storage.monitors,
     monitors: storage.monitors,
     macros: storage.macros
   });
@@ -253,6 +261,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   lastError: null,
   inputValue: "",
   isLoading: false,
+  automationJobs: [],
   monitors: [],
   macros: [],
   skills: [],
@@ -280,7 +289,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
     // BOOTSTRAP_STATUS events were emitted before the event listener was registered.
     const derivedBootstrap: BootstrapState =
       runtimeStatus.phase === "ready"
-        ? { stage: "ready", progress: 100, message: "OpenClaw Gateway is running." }
+        ? { stage: "ready", progress: 100, message: "Managed OpenClaw runtime is online." }
         : runtimeStatus.phase === "error"
           ? { stage: "error", progress: 100, message: runtimeStatus.error ?? "Gateway error." }
           : get().bootstrapState;
@@ -438,8 +447,24 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       const monitors = get().monitors.map((m) =>
         m.id === payload.monitor.id ? payload.monitor : m
       );
-      set({ monitors });
-      void window.auraDesktop.storage.set({ monitors });
+      const automationJobs = get().automationJobs.map((job) =>
+        job.id === payload.monitor.id ? payload.monitor : job
+      );
+      set({ monitors, automationJobs });
+      void window.auraDesktop.storage.set({ monitors, automationJobs });
+      return;
+    }
+
+    if (message.type === "AUTOMATION_JOB_UPDATED") {
+      const payload = message.payload as AutomationJobUpdatedPayload;
+      const automationJobs = get().automationJobs.map((job) =>
+        job.id === payload.job.id ? payload.job : job
+      );
+      const monitors = get().monitors.map((job) =>
+        job.id === payload.job.id ? payload.job : job
+      );
+      set({ automationJobs, monitors });
+      void window.auraDesktop.storage.set({ automationJobs, monitors });
       return;
     }
 
@@ -522,34 +547,50 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   },
 
   saveMonitors: async (value) => {
-    const nextState = await window.auraDesktop.storage.set({ monitors: value });
+    const nextState = await window.auraDesktop.storage.set({ monitors: value, automationJobs: value });
+    applyStorageState(set, nextState);
+  },
+
+  saveAutomationJobs: async (value) => {
+    const nextState = await window.auraDesktop.storage.set({ automationJobs: value, monitors: value });
+    applyStorageState(set, nextState);
+  },
+
+  startAutomationJob: async (job) => {
+    const automationJobs = get().automationJobs.map((item) =>
+      item.id === job.id ? { ...item, status: "active" as const } : item
+    );
+    const nextState = await window.auraDesktop.storage.set({ automationJobs, monitors: automationJobs });
+    applyStorageState(set, nextState);
+    await window.auraDesktop.automation.start(job);
+  },
+
+  stopAutomationJob: async (id) => {
+    const automationJobs = get().automationJobs.map((item) =>
+      item.id === id ? { ...item, status: "paused" as const } : item
+    );
+    const nextState = await window.auraDesktop.storage.set({ automationJobs, monitors: automationJobs });
+    applyStorageState(set, nextState);
+    await window.auraDesktop.automation.stop({ id });
+  },
+
+  deleteAutomationJob: async (id) => {
+    await window.auraDesktop.automation.stop({ id });
+    const automationJobs = get().automationJobs.filter((item) => item.id !== id);
+    const nextState = await window.auraDesktop.storage.set({ automationJobs, monitors: automationJobs });
     applyStorageState(set, nextState);
   },
 
   startMonitor: async (monitor) => {
-    // Persist active status first
-    const monitors = get().monitors.map((m) =>
-      m.id === monitor.id ? { ...m, status: "active" as const } : m
-    );
-    const nextState = await window.auraDesktop.storage.set({ monitors });
-    applyStorageState(set, nextState);
-    await window.auraDesktop.monitor.start(monitor);
+    await get().startAutomationJob(monitor);
   },
 
   stopMonitor: async (id) => {
-    const monitors = get().monitors.map((m) =>
-      m.id === id ? { ...m, status: "paused" as const } : m
-    );
-    const nextState = await window.auraDesktop.storage.set({ monitors });
-    applyStorageState(set, nextState);
-    await window.auraDesktop.monitor.stop({ id });
+    await get().stopAutomationJob(id);
   },
 
   deleteMonitor: async (id) => {
-    await window.auraDesktop.monitor.stop({ id });
-    const monitors = get().monitors.filter((m) => m.id !== id);
-    const nextState = await window.auraDesktop.storage.set({ monitors });
-    applyStorageState(set, nextState);
+    await get().deleteAutomationJob(id);
   },
 
   saveMacros: async (value) => {

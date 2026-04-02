@@ -1,6 +1,11 @@
 import { Notification } from "electron";
 
-import type { ExtensionMessage, PageMonitor } from "@shared/types";
+import type {
+  AutomationJob,
+  AutomationJobUpdatedPayload,
+  ExtensionMessage,
+  PageMonitor,
+} from "@shared/types";
 
 import type { BrowserController } from "./browser-controller";
 import { completeChat, resolveProvider } from "./llm-client";
@@ -17,116 +22,161 @@ export class MonitorManager {
     private readonly emit: EmitFn
   ) {}
 
-  /** Restore all active monitors at startup */
   start(): void {
-    const { monitors } = this.store.getState();
-    for (const monitor of monitors) {
-      if (monitor.status === "active") {
-        this.scheduleMonitor(monitor);
+    const { automationJobs } = this.store.getState();
+    for (const job of automationJobs) {
+      if (job.status === "active") {
+        this.scheduleJob(job);
       }
     }
   }
 
-  /** Clear all intervals on shutdown */
   stop(): void {
     for (const id of this.intervals.keys()) {
-      this.unscheduleMonitor(id);
+      this.unscheduleJob(id);
     }
   }
 
-  scheduleMonitor(monitor: PageMonitor): void {
-    this.unscheduleMonitor(monitor.id);
+  scheduleJob(job: AutomationJob): void {
+    this.unscheduleJob(job.id);
 
-    const intervalMs = monitor.intervalMinutes * 60 * 1000;
+    const jobs = this.store.getState().automationJobs;
+    if (!jobs.some((entry) => entry.id === job.id)) {
+      this.store.patch({
+        automationJobs: [job, ...jobs],
+        monitors: [job, ...jobs],
+      });
+    }
+
+    const intervalMinutes = job.schedule.intervalMinutes ?? 30;
+    const intervalMs = intervalMinutes * 60 * 1000;
     const timeout = setInterval(() => {
-      void this.checkMonitor(monitor.id);
+      void this.checkJob(job.id);
     }, intervalMs);
 
-    this.intervals.set(monitor.id, timeout);
-
-    // Update status to active in store
-    this.patchMonitor(monitor.id, { status: "active" });
+    this.intervals.set(job.id, timeout);
+    this.patchJob(job.id, {
+      status: "active",
+      updatedAt: Date.now(),
+      nextRunAt: Date.now() + intervalMs,
+    });
   }
 
-  unscheduleMonitor(id: string): void {
+  scheduleMonitor(monitor: PageMonitor): void {
+    this.scheduleJob(monitor);
+  }
+
+  unscheduleJob(id: string): void {
     const existing = this.intervals.get(id);
     if (existing) {
       clearInterval(existing);
       this.intervals.delete(id);
     }
-    // Only update status if monitor still exists and was active
-    const monitors = this.store.getState().monitors;
-    const monitor = monitors.find((m) => m.id === id);
-    if (monitor && monitor.status === "active") {
-      this.patchMonitor(id, { status: "paused" });
+
+    const jobs = this.store.getState().automationJobs;
+    const job = jobs.find((item) => item.id === id);
+    if (job && job.status === "active") {
+      this.patchJob(id, { status: "paused", updatedAt: Date.now() });
     }
   }
 
-  async checkMonitor(id: string): Promise<void> {
-    const monitors = this.store.getState().monitors;
-    const monitor = monitors.find((m) => m.id === id);
-    if (!monitor) return;
+  unscheduleMonitor(id: string): void {
+    this.unscheduleJob(id);
+  }
+
+  listJobs(): AutomationJob[] {
+    return this.store.getState().automationJobs;
+  }
+
+  async checkJob(id: string): Promise<void> {
+    const jobs = this.store.getState().automationJobs;
+    const job = jobs.find((item) => item.id === id);
+    if (!job) return;
 
     let visibleText = "";
     try {
-      // Navigate to monitor URL and get page context
-      await this.browserController.navigate({ url: monitor.url });
-      // Wait for page load
+      if (!job.url) {
+        return;
+      }
+      await this.browserController.navigate({ url: job.url });
       await new Promise<void>((resolve) => setTimeout(resolve, 2000));
       const ctx = await this.browserController.getPageContext();
       visibleText = ctx?.visibleText ?? "";
     } catch {
-      // Navigation failed — skip this check
-      this.patchMonitor(id, { lastCheckedAt: Date.now() });
+      this.patchJob(id, { lastCheckedAt: Date.now(), updatedAt: Date.now() });
       return;
     }
 
-    const triggered = await this.evaluateCondition(monitor.condition, visibleText);
+    const triggered = await this.evaluateCondition(job.condition ?? job.sourcePrompt, visibleText);
     const now = Date.now();
+    const nextRunAt = job.schedule.intervalMinutes
+      ? now + job.schedule.intervalMinutes * 60 * 1000
+      : undefined;
 
     if (triggered) {
-      const updated = this.patchMonitor(id, {
+      const updated = this.patchJob(id, {
         status: "triggered",
         lastCheckedAt: now,
-        triggerCount: (monitor.triggerCount ?? 0) + 1,
+        updatedAt: now,
+        nextRunAt,
+        triggerCount: (job.triggerCount ?? 0) + 1,
+        lastRun: {
+          runId: `${job.id}:${now}`,
+          status: "triggered",
+          startedAt: now,
+          finishedAt: now,
+          summary: job.condition ?? job.sourcePrompt,
+        },
       });
 
-      // Send Electron notification
       try {
         const notif = new Notification({
-          title: "Aura Monitor",
-          body: `${monitor.title} triggered`,
+          title: "Aura Automation",
+          body: `${job.title} triggered`,
         });
         notif.on("click", () => {
-          void this.browserController.navigate({ url: monitor.url });
+          if (job.url) {
+            void this.browserController.navigate({ url: job.url });
+          }
         });
         notif.show();
       } catch {
-        // Notifications may not be supported in all environments
+        // Notifications may not be supported in all environments.
       }
 
-      // Emit event to renderer
+      this.emit({
+        type: "AUTOMATION_JOB_UPDATED",
+        payload: { job: updated } satisfies AutomationJobUpdatedPayload,
+      });
       this.emit({
         type: "MONITOR_TRIGGERED",
         payload: { monitor: updated },
       });
     } else {
-      this.patchMonitor(id, { lastCheckedAt: now });
+      this.patchJob(id, {
+        lastCheckedAt: now,
+        updatedAt: now,
+        nextRunAt,
+        lastRun: {
+          runId: `${job.id}:${now}`,
+          status: "done",
+          startedAt: now,
+          finishedAt: now,
+          summary: "Condition not met",
+        },
+      });
     }
   }
 
   private async evaluateCondition(condition: string, visibleText: string): Promise<boolean> {
-    // Simple keyword check first (fast path)
     const keywords = condition.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
     const textLower = visibleText.toLowerCase();
     const keywordMatch = keywords.some((kw) => textLower.includes(kw));
 
-    // Short conditions (likely keywords) — use direct match
     if (condition.length < 50) {
       return keywordMatch;
     }
 
-    // For complex conditions, use LLM evaluation
     try {
       const { apiKey } = resolveProvider();
       const result = await completeChat(
@@ -146,15 +196,14 @@ export class MonitorManager {
       );
       return result.trim().toLowerCase().startsWith("yes");
     } catch {
-      // LLM fallback failed — use keyword match
       return keywordMatch;
     }
   }
 
-  private patchMonitor(id: string, patch: Partial<PageMonitor>): PageMonitor {
-    const monitors = this.store.getState().monitors;
-    const updated = monitors.map((m) => (m.id === id ? { ...m, ...patch } : m));
-    this.store.patch({ monitors: updated });
-    return updated.find((m) => m.id === id) ?? ({ id, ...patch } as PageMonitor);
+  private patchJob(id: string, patch: Partial<AutomationJob>): AutomationJob {
+    const jobs = this.store.getState().automationJobs;
+    const updated = jobs.map((job) => (job.id === id ? { ...job, ...patch } : job));
+    this.store.patch({ automationJobs: updated, monitors: updated });
+    return updated.find((job) => job.id === id) ?? ({ id, ...patch } as AutomationJob);
   }
 }

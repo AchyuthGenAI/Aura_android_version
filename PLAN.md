@@ -1,147 +1,110 @@
-# Aura Desktop — Architecture & Plan
+# Aura Desktop Architecture And Delivery Plan
 
-## What Aura Is
+## Current Direction
 
-Aura Desktop is a **Native Windows PC Copilot** powered by a custom-built, vision-first hard-fork of [OpenClaw](https://github.com/nicepkg/openclaw). Users download one installer and get immediate access to an AI agent that naturally interacts with both web browsers and the native OS through a premium chat interface. No API key setup. No separate downloads.
+Aura Desktop is being upgraded from a mixed prototype into a managed OpenClaw desktop client.
 
-## Architecture Overview
+The current architecture target is:
+- OpenClaw as the primary execution engine
+- Electron main process as runtime/bootstrap/orchestration shell
+- React renderer as the managed control surface
+- local persistence for sessions, profile, settings, and automation jobs
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                        Electron Main Process                      │
-│                                                                   │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐ │
-│  │ GatewayManager  │  │ BrowserController│  │ Native OS Context│ │
-│  │ (core service)  │  │ (BrowserView)   │  │ (Window ID, Res) │ │
-│  │                 │  │                 │  │                  │ │
-│  │ • Spawns Custom │  │ • Multi-tab     │  │ • Syncs PC state │ │
-│  │   OpenClaw Fork │  │ • URL navigation│  │ • Stream over WS │ │
-│  │ • Routes chat   │  │ • DOM extraction│  │                  │ │
-│  │ • Intent classify│  │                 │  │                  │ │
-│  └───────┬─────────┘  └─────────────────┘  └──────────────────┘ │
-│          │ WebSocket (localhost:18789) - includes payload Context│
-│          ▼                                                      │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │ Custom OpenClaw Gateway (Vision-First Fork)                │ │
-│  │                                                            │ │
-│  │  Compiled from: openclaw-fork/dist                         │ │
-│  │                                                            │ │
-│  │  Custom Agent Features:                                    │ │
-│  │  ├─ OS State Loop: Forces Vision capture on desktop       │ │
-│  │  ├─ Native Skills: desktop_screenshot, click, type        │ │
-│  │  ├─ Web Skills: Browser (Playwright) dom parsing          │ │
-│  │  └─ Core Tools: Files, Shell, Search, Media, etc.         │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                                                                 │
-│          │ IPC (contextBridge)                                     │
-│          ▼                                                        │
-│  ┌──────────────────────────────────────────────────────────────┐ │
-│  │ Electron Renderer Process                                    │ │
-│  │                                                              │ │
-│  │  React + Zustand + Tailwind                                  │ │
-│  │                                                              │ │
-│  │  Routes: home, browser, desktop, monitors, skills,           │ │
-│  │          history, profile, settings                           │ │
-│  │                                                              │ │
-│  │  Key Components:                                             │ │
-│  │  ├─ ChatPanel (streaming messages)                           │ │
-│  │  ├─ TaskActionFeed (live tool-use visualization)             │ │
-│  │  ├─ ActiveTaskBanner (task progress)                         │ │
-│  │  ├─ BrowserPage (embedded browser with toolbar)              │ │
-│  │  ├─ DesktopPage (vision-based desktop control)               │ │
-│  │  └─ Widget window (floating overlay)                         │ │
-│  └──────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────┘
-```
+## Architecture Snapshot
 
-## How Chat Flows
+### Main Process
 
-```
-1. User types message in ChatPanel
-2. Renderer calls IPC: window.auraDesktop.chat.send({ message, source })
-3. Main process → GatewayManager.sendChat()
-4. Intent classifier runs (heuristic + LLM fallback):
-   ├─ "query" → OpenClaw gateway (or Groq fallback)
-   ├─ "browser" → OpenClaw gateway with page context
-   ├─ "monitor" → Creates PageMonitor
-   └─ "desktop" → OpenClaw gateway (or VisionAgent fallback)
-5. If OpenClaw connected:
-   └─ WebSocket chat.send → Agent decides tools → Streams delta events
-      ├─ Text deltas → LLM_TOKEN events → ChatPanel
-      └─ Tool-use blocks → TOOL_USE events → TaskActionFeed
-6. If OpenClaw not connected:
-   └─ Direct Groq streaming → LLM_TOKEN/LLM_DONE events
-```
+Core responsibilities:
+- bootstrap and monitor the packaged OpenClaw gateway
+- expose IPC for chat, browser, desktop, storage, and automations
+- persist local application state
+- manage BrowserView and local desktop helpers
 
-## Live Automation Visualization
+Key services:
+- `GatewayManager`
+  - runtime lifecycle
+  - WebSocket connection
+  - OpenClaw chat dispatch
+  - streaming events into renderer state
+- `MonitorManager`
+  - local scheduling/orchestration for automation jobs
+  - watch checks and notifications
+- `BrowserController`
+  - embedded browser tabs
+  - page context and bounds sync
+- `AuraStore`
+  - JSON persistence and compatibility migration
 
-When OpenClaw's agent uses tools, the user sees real-time progress:
+### Renderer
 
-```
-┌──────────────────────────┐  ┌──────────────────────────┐
-│ Chat Panel               │  │ Browser (or Desktop)     │
-│                          │  │                          │
-│ You: Open Gmail and      │  │ ┌────────────────────┐   │
-│ reply to John's email    │  │ │ Gmail - Inbox      │   │
-│                          │  │ │                    │   │
-│ ┌─ Automation ─────────┐ │  │ │ John's email       │   │
-│ │ ✓ 🌐 Navigating to   │ │  │ │  (highlighted)     │   │
-│ │   gmail.com           │ │  │ │                    │   │
-│ │ ✓ 🌐 Clicking John's │ │  │ └────────────────────┘   │
-│ │   email               │ │  │                          │
-│ │ ◎ 🌐 Typing reply... │ │  │                          │
-│ │ ○ 🌐 Sending          │ │  │                          │
-│ └───────────────────────┘ │  │                          │
-│                          │  │                          │
-│ Aura: Done! I've replied │  │                          │
-│ to John's email.         │  │                          │
-└──────────────────────────┘  └──────────────────────────┘
-```
+Core responsibilities:
+- present a chat-first UI
+- visualize live tool and task events
+- expose browser, desktop, skills, profile, settings, history, and automations surfaces
+- keep one app shell across all routes
 
-The pipeline: Gateway delta events → `extractToolUseBlocks()` → `TOOL_USE` IPC → `actionFeed[]` in Zustand → `TaskActionFeed` component renders with status icons & animations.
+Key state:
+- `runtimeStatus`
+- `bootstrapState`
+- `messages`
+- `activeTask`
+- `automationJobs`
+- `actionFeed`
 
-## Gateway Bootstrap
+## Implemented Upgrade Work
 
-```
-App launches → SplashScreen
-  ├─ Discover openclaw.mjs in extraResources or sibling dirs
-  ├─ Probe port 18789 (is gateway already running?)
-  │   ├─ Yes → Connect WebSocket immediately
-  │   └─ No  → Spawn child process → Wait for port (8s) → Connect WS
-  └─ Hard deadline: 15 seconds total
-      ├─ Success → "OpenClaw Gateway is running"
-      └─ Timeout → "Aura is ready (direct LLM mode)" (Groq fallback)
-```
+### Runtime And Contracts
+- extended shared runtime diagnostics and status types
+- added automation job types and compatibility mapping from legacy monitor data
+- exposed automation IPC through main process, preload, and renderer API
 
-## OpenClaw Fork Details
+### Main Process
+- improved managed runtime bootstrap/status reporting
+- tightened gateway status updates for connect, reconnect, stop, and error cases
+- kept chat/task flow aligned around managed OpenClaw routing for standard requests
+- unified automation job scheduling through shared monitor/automation storage
 
-| Aspect | Detail |
-|--------|--------|
-| **Source** | Forked explicitly for native desktop support (`openclaw-fork`) |
-| **Child process** | `spawn(process.execPath, [entryPath, "gateway", "run", ...])` |
-| **Protocol** | WebSocket JSON (+ DesktopContext payload) |
-| **Intelligence** | Modified "See-Decide-Act" loop for the OS persona |
+### Renderer And UX
+- rebuilt Settings into a managed runtime dashboard
+- replaced monitor-only framing with an Automations workspace
+- rebuilt Skills into a searchable categorized catalog
+- upgraded Home, Browser, Desktop, and main shell layout
+- aligned consent/chat copy with the OpenClaw-first product model
 
-## Build & Bundle
+## Remaining Work
 
-```bash
-npm run dev          # Development (Vite HMR + Electron + OpenClaw TS)
-npm run build        # Production build
-npm run package:win  # Package with electron-builder
-```
+### 1. Main-process cleanup
+- remove unreachable or dormant legacy direct-execution branches in `GatewayManager`
+- simplify intent-routing comments and helper methods to match the current OpenClaw-first flow
+- narrow fallback code to true support-only or bootstrap-only scenarios
 
-The custom OpenClaw compiled gateway is bundled via `extraResources` in `package.json`:
-```json
-"extraResources": [
-  { "from": "../openclaw-fork/dist", "to": "openclaw-src/dist" },
-  { "from": "../openclaw-fork/skills", "to": "openclaw-src/skills" }
-]
-```
+### 2. Automation expansion
+- add richer scheduled and cron-like job execution semantics
+- show richer run history and artifacts in the renderer
+- improve notifications and triggered-job review flows
 
-## Environment Variables
+### 3. Reliability
+- validate bundled runtime assets more explicitly at startup
+- add structured support export for logs and traces
+- verify packaged behavior on clean Windows machines
 
-See `.env.local`. Only `VITE_*` prefixed vars are used:
-- `VITE_LLM_*` — Groq API config (fallback when gateway isn't connected)
-- `VITE_FIREBASE_*` — Client-side Firebase auth
-- `VITE_DEEPGRAM_API_KEY` — Speech-to-text
-- No remote OpenClaw URL needed (runs locally)
+### 4. Voice and confirmations
+- keep text and voice on the same run/session model
+- improve confirmation UX for risky actions and resumable tasks
+
+## Working Rules For This Repo
+
+- treat OpenClaw as the product engine and Aura as the shell
+- prefer updating shared contracts before adding UI-only behavior
+- preserve backwards compatibility for stored monitor data while migrating to automation jobs
+- avoid exposing raw provider/gateway configuration in user-facing UX
+
+## Verification
+
+Current verification baseline:
+- `npm run typecheck`
+
+Desired next verification layers:
+- packaged bootstrap smoke test
+- automation scheduling smoke test
+- browser/desktop action flow tests where practical

@@ -1,81 +1,119 @@
-# Aura Desktop — Product Requirements
+# Aura Desktop Product Requirements
 
-## Vision
+## Product Summary
 
-Aura Desktop is a **Native Windows AI Copilot** powered by a custom, vision-first hard fork of OpenClaw. It provides an immediate, zero-configuration local AI that can:
+Aura Desktop is a managed desktop shell for OpenClaw. Users install one app and get a chat-first assistant that can:
 
-- **Master the Desktop** — natively read the physical screen, control the OS, and behave like a human taking actions (vision-first).
-- **Browse the web** — navigate sites, fill forms, click buttons, extract DOM data (headless HTML-first).
-- **Search the web** — find information, fetch page content.
-- **Automate tasks** — schedule recurring jobs via cron.
-- **Manage sessions** — spawn sub-agents for complex multi-step tasks.
-- **Generate media** — create images, text-to-speech.
+- chat in a familiar assistant interface
+- automate browser and desktop tasks through OpenClaw
+- use bundled OpenClaw skills
+- create recurring and watch-style automation jobs
+- switch between text and voice without runtime setup
 
-The key principle: **deep native intelligence with zero configuration**. No API keys to manage. No terminal to open. Download → Install → Chat.
+The product promise is simple: no separate OpenClaw install, no manual gateway setup, no exposed provider or model configuration in the main user experience.
 
 ## Target User
 
-The "normie" — someone who has never heard of OpenClaw, doesn't know what a terminal is, and just wants an AI that can do things on their computer.
+Aura is for users who want an AI operator on their computer without learning OpenClaw, terminals, runtimes, or API keys.
 
-**Anti-persona:** The developer who already uses OpenClaw CLI. They don't need Aura.
+Primary audience:
+- non-technical professionals
+- power users who want automation without setup friction
+- users who want ChatGPT-like UX with local desktop/browser action capability
 
-## Core Experience
+Anti-persona:
+- advanced OpenClaw CLI users who prefer direct runtime control
 
-### 1. Chat-First Interface
-The primary interaction is a chat window. Users type natural language requests:
-- *"Open Gmail and reply to John's email about the meeting"*
-- *"Find the cheapest flight from NYC to LA next month"*
-- *"Create a Python script that downloads all images from this URL"*
-- *"Every hour, check if this product goes on sale and notify me"*
+## Core Product Principles
 
-### 2. Live Automation Visualization
-When Aura executes automated tasks, users see each step happening in real-time:
-- **TaskActionFeed** shows tool-by-tool progress (navigating, clicking, typing...)
-- **Embedded browser** shows web pages being automated
-- **Desktop view** shows screen captures during desktop automation
+1. OpenClaw-first
+Aura is a UI and orchestration shell over OpenClaw, not a second competing agent runtime.
 
-### 3. Voice Mode (Optional)
-Users can speak to Aura via Deepgram STT. Voice is opt-in via Settings — not the default.
+2. Managed by default
+The product should hide raw runtime configuration and present health, readiness, and permissions instead.
 
-### 4. Widget Mode
-A floating overlay that stays on top of other windows. Accessible from the system tray.
+3. One conversation model
+Text chat, voice chat, browser work, desktop work, and automation context should feel like one continuous system.
 
-## Technical Architecture
+4. Explain automation clearly
+Users should see what the system is doing through live tool events, status, confirmations, and run history.
 
-### Custom OpenClaw Hard Fork
-- Aura embeds a **custom-built, vision-first hard fork** of OpenClaw (compiled from `openclaw-fork`).
-- Runs **locally** as a subprocess gateway.
-- Deeply integrated Native Desktop skills (`desktop_screenshot`, `desktop_click`) embedded into the agent's core reasoning Loop.
-- Auth: Token-based (auto-generated, no user involvement).
+## Primary User Flows
 
-### Fallback
-When the OpenClaw gateway isn't available (startup failure, timeout, crash):
-- Chat falls back to **direct Groq API streaming**
-- Basic conversational AI still works
-- Browser/desktop automation features are unavailable
+### 1. Chat-first operation
+Users open Aura and type natural language requests such as:
 
-### Data Storage
-- All data stored locally via `electron-store` (JSON files)
-- Session history, monitors, macros, user profile — all on-device
-- Firebase Auth used for account creation (optional)
+- "Summarize this page and tell me what matters."
+- "Open the pricing page, extract the plan comparison, and turn it into notes."
+- "Inspect my desktop and help me automate this repetitive task."
+- "Check this page every hour and notify me when the listing changes."
 
-## Feature Map
+### 2. Browser-assisted work
+Users can keep the embedded browser visible while OpenClaw reads the page, uses browser tools, and streams progress back into chat.
 
-| Feature | Route | Backend |
-|---------|-------|---------|
-| Chat | `home` | OpenClaw gateway → Groq fallback |
-| Browser automation | `browser` | OpenClaw gateway (browser tool) |
-| Desktop automation | `desktop` | Custom OpenClaw Gateway (Vision-First) |
-| Page monitors | `monitors` | MonitorManager (polling) |
-| Skills catalog | `skills` | OpenClaw skills directory |
-| Session history | `history` | Local store |
-| User profile | `profile` | Local store + Firebase Auth |
-| Settings | `settings` | Local store |
+### 3. Desktop control
+Users can launch common apps, inspect the current screen, and hand full desktop workflows to OpenClaw through the same session model.
 
-## Non-Goals (for MVP)
+### 4. Automations
+Users can create watch jobs, recurring jobs, and scheduled tasks from a dedicated Automations workspace rather than a narrow monitor-only UI.
 
-- **No cloud backend** — everything runs locally
-- **No team features** — single user per install
-- **No plugin marketplace** — use OpenClaw's built-in skills
-- **No mobile app** — desktop only (Windows, macOS, Linux)
-- **No browser extension mode** — Aura is a standalone Electron app
+### 5. Voice mode
+Users can switch to voice while preserving the same runtime, task model, and session identity.
+
+## Functional Requirements
+
+### Managed Runtime
+- Aura must detect the bundled OpenClaw runtime on startup.
+- Aura must bootstrap the local gateway automatically.
+- Aura must expose clear runtime states such as checking, starting, ready, reconnecting, degraded, and unavailable.
+- Aura must not require the user to edit gateway URLs, session keys, provider keys, or model settings in the normal flow.
+
+### Chat And Tasking
+- Standard chat requests must route through OpenClaw.
+- Streaming assistant text must appear token-by-token in the chat UI.
+- Tool activity must appear as live events in the renderer.
+- Stopping or cancelling an active run must interrupt the current OpenClaw response path.
+
+### Browser And Desktop
+- Browser actions must be visible inside Aura’s workspace surface.
+- Desktop interactions must be available through the same conversation flow.
+- Desktop and browser work must show live progress and final outcome in the same task timeline.
+
+### Skills
+- Aura must expose bundled OpenClaw skills through a searchable, categorized catalog.
+- Users should be able to use skill discovery as a launch point for prompts and workflows.
+
+### Automations
+- Aura must support automation jobs with a first-class job model.
+- Supported job concepts:
+  - watch jobs
+  - recurring interval jobs
+  - scheduled one-time jobs
+- The UI must show status, next run, last run, trigger count, and management controls.
+
+### Settings And Support
+- Settings should act as a runtime dashboard, not a raw config editor.
+- Aura should surface diagnostics like runtime version, gateway status, workspace path, and last error.
+- Permissions should be framed clearly for microphone, notifications, and automation prerequisites.
+
+## Non-Goals
+
+- exposing raw runtime/provider configuration in normal user settings
+- building a plugin marketplace for this phase
+- multi-user collaboration features
+- cloud-first execution as the default operating mode
+
+## Current Product Status
+
+Implemented in the codebase:
+- managed runtime health dashboard
+- OpenClaw-first chat routing
+- automation job model and Automations page
+- upgraded browser and desktop surfaces
+- skill catalog UI
+- main shell/header UX refresh
+
+Still to deepen:
+- remove more dormant legacy execution code in the main process
+- broaden native scheduling execution beyond interval/watch-style behavior
+- harden packaged-runtime validation and support export workflows
