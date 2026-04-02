@@ -220,6 +220,9 @@ export class GatewayManager {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private monitorManager: MonitorManager | null = null;
   private readonly openClawBuildTimeoutMs = 12 * 60_000;
+  private bootstrapDeadlineMs = 120_000;
+  private gatewayPortWaitTimeoutMs = 75_000;
+  private gatewayReadyHintTimeoutMs = 20_000;
 
   setMonitorManager(mm: MonitorManager): void {
     this.monitorManager = mm;
@@ -281,6 +284,11 @@ export class GatewayManager {
     private readonly emit: (message: ExtensionMessage<unknown>) => void,
     private readonly isPackagedApp = false,
   ) {
+    if (!this.isPackagedApp) {
+      this.bootstrapDeadlineMs = 240_000;
+      this.gatewayPortWaitTimeoutMs = 180_000;
+      this.gatewayReadyHintTimeoutMs = 60_000;
+    }
     this.runtimeStatus = {
       phase: "idle",
       running: false,
@@ -638,9 +646,10 @@ export class GatewayManager {
       }),
     });
 
-    // Try starting the Gateway — if it fails, Aura still works via direct Groq LLM.
-    // Hard deadline: 60s total to avoid long SplashScreen hangs (OpenClaw takes ~30s on Windows).
-    const BOOTSTRAP_DEADLINE_MS = 60_000;
+    // Try starting the gateway and tolerate slow first-run startup.
+    // OpenClaw can take minutes while preparing UI assets on fresh installs.
+    const bootstrapDeadlineMs = this.bootstrapDeadlineMs;
+    const portWaitTimeoutMs = this.gatewayPortWaitTimeoutMs;
     let bootstrapError: string | undefined;
     try {
       await Promise.race([
@@ -651,16 +660,21 @@ export class GatewayManager {
             console.log(`[GatewayManager] Port ${port} already in use — connecting to existing gateway.`);
             await this.connectWebSocket();
           } else {
-            console.log(`[GatewayManager] Port ${port} free — spawning gateway process...`);
-            // Ensure Groq auth profile is written before starting so the agent has API access
-            this.configManager.ensureGroqAuthProfile();
-            await this.startGatewayProcess();
+            console.log(`[GatewayManager] Port ${port} is not open yet; checking gateway process state...`);
+            const hasLiveGatewayProcess = this.gatewayProcess !== null && this.gatewayProcess.exitCode === null;
+            if (hasLiveGatewayProcess) {
+              console.log(`[GatewayManager] Gateway process is already running; waiting for port ${port} to open...`);
+            } else {
+              // Ensure Groq auth profile is written before starting so the agent has API access.
+              this.configManager.ensureGroqAuthProfile();
+              await this.startGatewayProcess();
+            }
             // startGatewayProcess resolves when the process prints a ready signal or times out,
             // but the TCP port may still not be open. Poll until it accepts connections.
             console.log("[GatewayManager] Waiting for gateway port to become available...");
-            const portOpen = await this.waitForPort(port, 45_000);
+            const portOpen = await this.waitForPort(port, portWaitTimeoutMs);
             if (!portOpen) {
-              throw new Error(`Gateway process started but port ${port} never opened within 45s`);
+              throw new Error(`Gateway process started but port ${port} never opened within ${Math.round(portWaitTimeoutMs / 1000)}s`);
             }
             console.log(`[GatewayManager] Port ${port} is open — connecting WebSocket...`);
             await this.connectWebSocket();
@@ -668,7 +682,10 @@ export class GatewayManager {
           console.log(`[GatewayManager] WebSocket connected! connected=${this.connected}`);
         })(),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Gateway bootstrap deadline exceeded (${Math.round(BOOTSTRAP_DEADLINE_MS / 1000)}s)`)), BOOTSTRAP_DEADLINE_MS)
+          setTimeout(
+            () => reject(new Error(`Gateway bootstrap deadline exceeded (${Math.round(bootstrapDeadlineMs / 1000)}s)`)),
+            bootstrapDeadlineMs
+          )
         ),
       ]);
     } catch (err) {
@@ -1043,6 +1060,11 @@ export class GatewayManager {
         return;
       }
 
+      if (this.gatewayProcess && this.gatewayProcess.exitCode === null) {
+        resolve();
+        return;
+      }
+
       const port = this.configManager.getGatewayPort();
       const token = this.configManager.getGatewayToken();
 
@@ -1138,13 +1160,13 @@ export class GatewayManager {
         }
       });
 
-      // Timeout: if gateway doesn't signal ready in 45s, resolve anyway and try connecting
+      // Timeout: if gateway does not signal ready, resolve and continue with explicit port probing.
       setTimeout(() => {
         if (!resolved) {
           resolved = true;
           resolve();
         }
-      }, 10_000);
+      }, this.gatewayReadyHintTimeoutMs);
     });
   }
 
@@ -1257,10 +1279,17 @@ export class GatewayManager {
   private async waitForPort(port: number, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     let attempt = 0;
+    const logEveryAttempts = 10;
     while (Date.now() < deadline) {
       attempt++;
+      if (this.gatewayProcess && this.gatewayProcess.exitCode !== null) {
+        console.warn(`[GatewayManager] waitForPort aborted: gateway process exited with code ${this.gatewayProcess.exitCode}.`);
+        return false;
+      }
       const open = await this.probePort(port);
-      console.log(`[GatewayManager] waitForPort attempt ${attempt}: port ${port} open=${open}`);
+      if (attempt === 1 || attempt % logEveryAttempts === 0 || open) {
+        console.log(`[GatewayManager] waitForPort attempt ${attempt}: port ${port} open=${open}`);
+      }
       if (open) return true;
       await new Promise<void>((r) => setTimeout(r, 500));
     }
