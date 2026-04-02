@@ -41,6 +41,11 @@ const readOpenClawVersion = (rootPath: string | null): string | undefined => {
   }
 };
 
+const hasOpenClawBuildEntry = (rootPath: string | null): boolean => {
+  if (!rootPath) return false;
+  return fs.existsSync(path.join(rootPath, "dist", "entry.js")) || fs.existsSync(path.join(rootPath, "dist", "entry.mjs"));
+};
+
 type EventFrame = { type: "event"; event: string; payload: unknown; seq?: number };
 type ResponseFrame = { type: "res"; id: string; ok: boolean; payload?: unknown; error?: { code?: string; message?: string } };
 type ApprovalKind = "exec" | "plugin";
@@ -208,6 +213,7 @@ export class GatewayManager {
 
   private reconnectTimer: NodeJS.Timeout | null = null;
   private monitorManager: MonitorManager | null = null;
+  private readonly openClawBuildTimeoutMs = 12 * 60_000;
 
   setMonitorManager(mm: MonitorManager): void {
     this.monitorManager = mm;
@@ -267,6 +273,7 @@ export class GatewayManager {
     private readonly store: AuraStore,
     private readonly browserController: BrowserController,
     private readonly emit: (message: ExtensionMessage<unknown>) => void,
+    private readonly isPackagedApp = false,
   ) {
     this.runtimeStatus = {
       phase: "idle",
@@ -301,6 +308,98 @@ export class GatewayManager {
       processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
       error: this.runtimeStatus.error,
     };
+  }
+
+  private async runOpenClawBuildCommand(command: string, args: string[]): Promise<void> {
+    if (!this.openClawRootPath) {
+      throw new Error("OpenClaw root path is not set.");
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(command, args, {
+        cwd: this.openClawRootPath!,
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      let output = "";
+      const appendOutput = (text: string): void => {
+        output += text;
+        if (output.length > 10_000) {
+          output = output.slice(-10_000);
+        }
+      };
+
+      child.stdout?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString("utf8");
+        appendOutput(text);
+        console.log(`[OpenClaw build:${command}] ${text.trimEnd()}`);
+      });
+
+      child.stderr?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString("utf8");
+        appendOutput(text);
+        console.warn(`[OpenClaw build:${command}] ${text.trimEnd()}`);
+      });
+
+      const timeout = setTimeout(() => {
+        if (child.exitCode === null) {
+          child.kill();
+        }
+        reject(new Error(`OpenClaw build timed out after ${Math.round(this.openClawBuildTimeoutMs / 1000)}s.`));
+      }, this.openClawBuildTimeoutMs);
+
+      child.on("error", (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+
+      child.on("close", (code) => {
+        clearTimeout(timeout);
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(`${command} ${args.join(" ")} exited with code ${code}\n${output.slice(-2000)}`));
+      });
+    });
+  }
+
+  private async ensureOpenClawBuildArtifacts(): Promise<void> {
+    if (hasOpenClawBuildEntry(this.openClawRootPath)) {
+      return;
+    }
+    if (!this.openClawRootPath) {
+      throw new Error("OpenClaw root path is missing.");
+    }
+
+    if (this.isPackagedApp) {
+      throw new Error("OpenClaw bundle is missing dist/entry.(m)js build output. Reinstall Aura with a complete bundled runtime.");
+    }
+
+    const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+    const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+    const attempts: Array<{ command: string; args: string[] }> = [
+      { command: pnpmCommand, args: ["build"] },
+      { command: npmCommand, args: ["run", "build"] },
+    ];
+    const failures: string[] = [];
+
+    for (const attempt of attempts) {
+      try {
+        console.log(`[GatewayManager] OpenClaw build output missing. Running ${attempt.command} ${attempt.args.join(" ")}...`);
+        await this.runOpenClawBuildCommand(attempt.command, attempt.args);
+        if (hasOpenClawBuildEntry(this.openClawRootPath)) {
+          console.log("[GatewayManager] OpenClaw build artifacts restored.");
+          return;
+        }
+        failures.push(`${attempt.command} ${attempt.args.join(" ")}: completed but dist/entry.(m)js is still missing.`);
+      } catch (err) {
+        failures.push(`${attempt.command} ${attempt.args.join(" ")}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    throw new Error(`OpenClaw build output is missing and auto-build failed.\n${failures.join("\n")}`);
   }
 
   async resolveChatConfirmation(requestId: string, decision: ApprovalDecision): Promise<void> {
@@ -429,6 +528,61 @@ export class GatewayManager {
         }),
       });
       return this.getBootstrap();
+    }
+
+    if (!hasOpenClawBuildEntry(this.openClawRootPath)) {
+      this.setBootstrap({
+        stage: "installing-runtime",
+        progress: 35,
+        message: this.isPackagedApp
+          ? "Validating bundled OpenClaw runtime artifacts."
+          : "Preparing local OpenClaw runtime artifacts.",
+      });
+      this.setStatus({
+        phase: "bootstrapping",
+        running: false,
+        openClawDetected: true,
+        bundleDetected: true,
+        gatewayConnected: false,
+        degraded: false,
+        lastCheckedAt: Date.now(),
+        message: this.isPackagedApp
+          ? "Checking bundled OpenClaw runtime artifacts."
+          : "Building local OpenClaw runtime artifacts.",
+        diagnostics: this.buildDiagnostics({
+          bundleRootPath: this.openClawRootPath ?? undefined,
+        }),
+      });
+
+      try {
+        await this.ensureOpenClawBuildArtifacts();
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        this.setBootstrap({
+          stage: "error",
+          progress: 100,
+          message: "OpenClaw runtime build output is missing.",
+          detail,
+        });
+        this.setStatus({
+          phase: "install-required",
+          running: false,
+          openClawDetected: true,
+          bundleDetected: true,
+          gatewayConnected: false,
+          degraded: true,
+          lastCheckedAt: Date.now(),
+          message: "OpenClaw runtime build output is missing.",
+          error: detail,
+          diagnostics: this.buildDiagnostics({
+            bundleRootPath: this.openClawRootPath ?? undefined,
+            supportNote: this.isPackagedApp
+              ? "Reinstall Aura so the bundled OpenClaw runtime includes dist/entry artifacts."
+              : "Run `pnpm build` in the OpenClaw source tree and restart Aura.",
+          }),
+        });
+        return this.getBootstrap();
+      }
     }
 
     this.configManager.ensureDefaults();

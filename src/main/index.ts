@@ -338,7 +338,8 @@ const createAppWindows = async (): Promise<void> => {
       configManager,
       store,
       browserController,
-      emit
+      emit,
+      app.isPackaged,
     );
     activeMonitorManager = new MonitorManager(browserController, store, emit, async (job) => {
       const promptParts = [job.sourcePrompt];
