@@ -65,6 +65,7 @@ Key state:
 - tightened gateway status updates for connect, reconnect, stop, and error cases
 - kept chat/task flow aligned around managed OpenClaw routing for standard requests
 - unified automation job scheduling through shared monitor/automation storage
+- removed legacy `TASK_PROGRESS` emission from `GatewayManager` query handling (run/tool events now primary renderer contract)
 
 ### Renderer And UX
 - rebuilt Settings into a managed runtime dashboard

@@ -36,7 +36,8 @@
 ### Main-process simplification
 - [ ] Remove dormant legacy planner/direct-executor branches from `GatewayManager`
 - [ ] Reduce leftover prototype comments and dead-path code
-- [ ] Retire renderer-facing dependency on `TASK_PROGRESS` events from main-process flows
+- [x] Remove `TASK_PROGRESS` emission from `GatewayManager` query flow
+- [ ] Retire remaining `TASK_PROGRESS` contract usage from dormant `task-executor` paths
 
 ### Automation depth
 - [ ] Add richer scheduled/cron-like job semantics

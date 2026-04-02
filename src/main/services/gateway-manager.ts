@@ -8,7 +8,6 @@ import type {
   AuraSessionMessage,
   OpenClawRun,
   OpenClawRunSurface,
-  AuraTask,
   BootstrapState,
   ChatSendRequest,
   ExtensionMessage,
@@ -16,7 +15,6 @@ import type {
   PageContext,
   RuntimeDiagnostics,
   RuntimeStatus,
-  TaskProgressPayload,
 } from "@shared/types";
 
 import { BrowserController } from "./browser-controller";
@@ -105,7 +103,6 @@ export class GatewayManager {
   private openClawEntryPath: string | null = null;
   private openClawRootPath: string | null = null;
   private activeMessageId: string | null = null;
-  private activeTaskId: string | null = null;
   private activeRunId: string | null = null;
   private activeRun: OpenClawRun | null = null;
   private streamedText = "";
@@ -398,7 +395,6 @@ export class GatewayManager {
       // best effort
     }
     this.activeMessageId = null;
-    this.activeTaskId = null;
     this.activeRunId = null;
     this.patchActiveRun({
       status: "cancelled",
@@ -417,7 +413,6 @@ export class GatewayManager {
     const messageId = crypto.randomUUID();
     const taskId = crypto.randomUUID();
     this.activeMessageId = messageId;
-    this.activeTaskId = taskId;
     this.activeRunId = null;
     this.streamedText = "";
 
@@ -487,37 +482,21 @@ export class GatewayManager {
     extraSystemPrompt?: string,
     surface: OpenClawRunSurface = pageContext?.url ? "browser" : "chat",
   ): Promise<{ messageId: string; taskId: string }> {
-    const task = this.createLegacyTask(taskId, request.message);
-    task.surface = surface === "automation" ? "mixed" : surface;
-    task.statusSource = "openclaw-gateway";
     this.beginRun(taskId, messageId, request.sessionId, request.message, surface);
-    this.emitProgress(task, { type: "status", statusText: "Thinking..." });
-
-    task.status = "running";
-    task.updatedAt = now();
-    task.steps[0]!.status = "done";
-    task.steps[0]!.completedAt = now();
-    task.steps[1]!.status = "running";
-    task.steps[1]!.startedAt = now();
-    this.emitProgress(task, { type: "step_start", statusText: "Generating response." });
 
     try {
       if (!this.connected) {
         throw new Error("Managed OpenClaw runtime is unavailable. Restart the runtime from Settings and try again.");
       }
       // Route through OpenClaw agent (has skills, memory, browser tools, web search)
-      this.emitProgress(task, { type: "step_start", statusText: "OpenClaw agent working..." });
       const responseText = await this.streamViaOpenClaw(messageId, request.message, "main", extraSystemPrompt);
-      task.runId = this.activeRunId ?? undefined;
-      this.handleChatSuccess(messageId, taskId, task, session, request, responseText);
+      this.handleChatSuccess(messageId, taskId, session, request, responseText);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      task.runId = this.activeRunId ?? undefined;
-      this.handleChatError(messageId, taskId, task, session, message);
+      this.handleChatError(messageId, taskId, session, message);
     }
 
     this.activeMessageId = null;
-    this.activeTaskId = null;
     this.activeRunId = null;
     this.activeRun = null;
     return { messageId, taskId };
@@ -1082,7 +1061,7 @@ export class GatewayManager {
             tool: block.tool,
             toolUseId: block.toolUseId,
             runId: payload.runId ?? this.activeRunId ?? undefined,
-            taskId: this.activeTaskId ?? undefined,
+            taskId: this.activeRun?.taskId ?? undefined,
             messageId: this.activeMessageId ?? undefined,
             surface,
             action,
@@ -1109,7 +1088,7 @@ export class GatewayManager {
             tool: block.tool,
             toolUseId: block.toolUseId,
             runId: payload.runId ?? this.activeRunId ?? undefined,
-            taskId: this.activeTaskId ?? undefined,
+            taskId: this.activeRun?.taskId ?? undefined,
             messageId: this.activeMessageId ?? undefined,
             surface,
             action,
@@ -1182,7 +1161,6 @@ export class GatewayManager {
   private handleChatSuccess(
     messageId: string,
     taskId: string,
-    task: AuraTask,
     session: AuraSession,
     request: ChatSendRequest,
     responseText: string,
@@ -1203,21 +1181,12 @@ export class GatewayManager {
       ...this.store.getState().history,
     ]);
 
-    task.status = "done";
-    task.updatedAt = now();
-    task.result = responseText;
-    if (task.steps[1]) {
-      task.steps[1].status = "done";
-      task.steps[1].completedAt = now();
-    }
-
-    this.emitProgress(task, { type: "result", output: responseText, statusText: "Task complete." });
     this.emit({
       type: "LLM_DONE",
       payload: { messageId, fullText: responseText, cleanText: responseText },
     });
     this.patchActiveRun({
-      runId: task.runId,
+      runId: this.activeRunId ?? undefined,
       status: "done",
       completedAt: now(),
       summary: responseText,
@@ -1235,32 +1204,22 @@ export class GatewayManager {
 
   private handleChatError(
     messageId: string,
-    _taskId: string,
-    task: AuraTask,
+    taskId: string,
     session: AuraSession,
     errorMessage: string,
   ): void {
-    task.status = "error";
-    task.updatedAt = now();
-    task.error = errorMessage;
-    if (task.steps[1]) {
-      task.steps[1].status = "error";
-      task.steps[1].completedAt = now();
-    }
-
     this.store.set("history", [
-      { id: task.id, command: task.command, result: errorMessage, status: "error", createdAt: now() },
+      { id: taskId, command: this.activeRun?.prompt ?? "request", result: errorMessage, status: "error", createdAt: now() },
       ...this.store.getState().history,
     ]);
 
     session.endedAt = now();
     this.persistCurrentSession(session);
 
-    this.emitProgress(task, { type: "error", statusText: errorMessage });
-    this.emit({ type: "TASK_ERROR", payload: { taskId: task.id, code: "UNKNOWN", message: errorMessage } });
+    this.emit({ type: "TASK_ERROR", payload: { taskId, code: "UNKNOWN", message: errorMessage } });
     this.emit({ type: "LLM_DONE", payload: { messageId, fullText: "", cleanText: "" } });
     this.patchActiveRun({
-      runId: task.runId,
+      runId: this.activeRunId ?? undefined,
       status: "error",
       completedAt: now(),
       error: errorMessage,
@@ -1272,26 +1231,6 @@ export class GatewayManager {
       message: "OpenClaw reported an error.",
       error: errorMessage,
     });
-  }
-
-
-  private createLegacyTask(taskId: string, command: string): AuraTask {
-    return {
-      id: taskId,
-      command,
-      status: "planning",
-      createdAt: now(),
-      updatedAt: now(),
-      retries: 0,
-      steps: [
-        { index: 0, tool: "read", description: "Collect current browser context", status: "running", params: {}, startedAt: now() },
-        { index: 1, tool: "read", description: "Execute request with OpenClaw", status: "pending", params: {} },
-      ],
-    };
-  }
-
-  private emitProgress(task: AuraTask, event: TaskProgressPayload["event"]): void {
-    this.emit({ type: "TASK_PROGRESS", payload: { task, event } });
   }
 
   private ensureSession(command: string): AuraSession {
