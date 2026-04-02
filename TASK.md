@@ -42,8 +42,13 @@
 - [x] Migrate confirmation IPC from `task.confirmResponse` to `chat.confirmAction`
 
 ### Automation depth
-- [ ] Add richer scheduled/cron-like job semantics
+- [x] Add richer scheduled/cron-like job semantics
+- [x] Route scheduled automation dispatch through OpenClaw chat runs
 - [ ] Expose more run history and triggered-job detail in UI
+
+### Confirmations and safety
+- [x] Wire gateway approval events (`exec/plugin`) to renderer confirmation modal
+- [x] Support native approval decisions (`allow-once`, `allow-always`, `deny`)
 
 ### Reliability and packaging
 - [ ] Harden packaged runtime validation

@@ -69,6 +69,10 @@ Key state:
 - kept chat/task flow aligned around managed OpenClaw routing for standard requests
 - unified automation job scheduling through shared monitor/automation storage
 - removed legacy `TASK_PROGRESS` emission from `GatewayManager` query handling (run/tool events now primary renderer contract)
+- wired gateway approval request/resolution events into renderer confirmation flow
+- added native approval decision handling for `allow-once` / `allow-always` / `deny`
+- upgraded automation scheduler engine for interval, one-time, and cron-style schedules
+- routed scheduled automation dispatch into managed OpenClaw chat runs
 
 ### Renderer And UX
 - rebuilt Settings into a managed runtime dashboard
@@ -88,7 +92,6 @@ Key state:
 - narrow fallback code to true support-only or bootstrap-only scenarios
 
 ### 2. Automation expansion
-- add richer scheduled and cron-like job execution semantics
 - show richer run history and artifacts in the renderer
 - improve notifications and triggered-job review flows
 
