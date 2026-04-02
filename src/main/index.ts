@@ -320,7 +320,21 @@ const createAppWindows = async (): Promise<void> => {
       browserController,
       emit
     );
-    activeMonitorManager = new MonitorManager(browserController, store, emit);
+    activeMonitorManager = new MonitorManager(browserController, store, emit, async (job) => {
+      const promptParts = [job.sourcePrompt];
+      if (job.url) {
+        promptParts.push(`Target URL: ${job.url}`);
+      }
+      if (job.condition) {
+        promptParts.push(`Condition: ${job.condition}`);
+      }
+      const message = promptParts.filter(Boolean).join("\n\n");
+      return activeGatewayManager!.sendChat({
+        message,
+        source: "text",
+        sessionId: `automation:${job.id}`,
+      });
+    });
     activeGatewayManager.setMonitorManager(activeMonitorManager);
 
     activeDesktopController = new DesktopController();

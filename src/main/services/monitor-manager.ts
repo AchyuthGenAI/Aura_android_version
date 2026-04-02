@@ -12,27 +12,31 @@ import { completeChat, resolveProvider } from "./llm-client";
 import type { AuraStore } from "./store";
 
 type EmitFn = (message: ExtensionMessage<unknown>) => void;
+type DispatchJobRun = (job: AutomationJob) => Promise<{ messageId: string; taskId: string }>;
+
+const DEFAULT_INTERVAL_MINUTES = 30;
 
 export class MonitorManager {
-  private intervals = new Map<string, NodeJS.Timeout>();
+  private timers = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly browserController: BrowserController,
     private readonly store: AuraStore,
-    private readonly emit: EmitFn
+    private readonly emit: EmitFn,
+    private readonly dispatchJobRun?: DispatchJobRun,
   ) {}
 
   start(): void {
     const { automationJobs } = this.store.getState();
     for (const job of automationJobs) {
-      if (job.status === "active") {
+      if (job.status !== "paused" && job.status !== "idle") {
         this.scheduleJob(job);
       }
     }
   }
 
   stop(): void {
-    for (const id of this.intervals.keys()) {
+    for (const id of this.timers.keys()) {
       this.unscheduleJob(id);
     }
   }
@@ -48,18 +52,12 @@ export class MonitorManager {
       });
     }
 
-    const intervalMinutes = job.schedule.intervalMinutes ?? 30;
-    const intervalMs = intervalMinutes * 60 * 1000;
-    const timeout = setInterval(() => {
-      void this.checkJob(job.id);
-    }, intervalMs);
-
-    this.intervals.set(job.id, timeout);
-    this.patchJob(job.id, {
+    const normalized = this.patchJob(job.id, {
       status: "active",
       updatedAt: Date.now(),
-      nextRunAt: Date.now() + intervalMs,
+      schedule: this.normalizeSchedule(job),
     });
+    this.planNextRun(normalized);
   }
 
   scheduleMonitor(monitor: PageMonitor): void {
@@ -67,16 +65,15 @@ export class MonitorManager {
   }
 
   unscheduleJob(id: string): void {
-    const existing = this.intervals.get(id);
+    const existing = this.timers.get(id);
     if (existing) {
-      clearInterval(existing);
-      this.intervals.delete(id);
+      clearTimeout(existing);
+      this.timers.delete(id);
     }
 
-    const jobs = this.store.getState().automationJobs;
-    const job = jobs.find((item) => item.id === id);
-    if (job && job.status === "active") {
-      this.patchJob(id, { status: "paused", updatedAt: Date.now() });
+    const job = this.store.getState().automationJobs.find((item) => item.id === id);
+    if (job && job.status !== "paused") {
+      this.patchJob(id, { status: "paused", updatedAt: Date.now(), nextRunAt: undefined });
     }
   }
 
@@ -89,50 +86,197 @@ export class MonitorManager {
   }
 
   async checkJob(id: string): Promise<void> {
-    const jobs = this.store.getState().automationJobs;
-    const job = jobs.find((item) => item.id === id);
-    if (!job) return;
+    await this.runScheduledJob(id, { reschedule: true });
+  }
 
-    let visibleText = "";
-    try {
-      if (!job.url) {
-        return;
-      }
-      await this.browserController.navigate({ url: job.url });
-      await new Promise<void>((resolve) => setTimeout(resolve, 2000));
-      const ctx = await this.browserController.getPageContext();
-      visibleText = ctx?.visibleText ?? "";
-    } catch {
-      this.patchJob(id, { lastCheckedAt: Date.now(), updatedAt: Date.now() });
+  private planNextRun(job: AutomationJob): void {
+    this.clearTimer(job.id);
+    const nextRunAt = this.computeNextRunAt(job);
+    if (!nextRunAt) {
+      this.patchJob(job.id, { nextRunAt: undefined, updatedAt: Date.now() });
       return;
     }
 
-    const triggered = await this.evaluateCondition(job.condition ?? job.sourcePrompt, visibleText);
-    const now = Date.now();
-    const nextRunAt = job.schedule.intervalMinutes
-      ? now + job.schedule.intervalMinutes * 60 * 1000
-      : undefined;
+    const delayMs = Math.max(250, nextRunAt - Date.now());
+    const timeout = setTimeout(() => {
+      void this.runScheduledJob(job.id, { reschedule: true });
+    }, delayMs);
 
-    if (triggered) {
+    this.timers.set(job.id, timeout);
+    this.patchJob(job.id, { nextRunAt, updatedAt: Date.now() });
+  }
+
+  private clearTimer(id: string): void {
+    const timeout = this.timers.get(id);
+    if (!timeout) return;
+    clearTimeout(timeout);
+    this.timers.delete(id);
+  }
+
+  private computeNextRunAt(job: AutomationJob): number | undefined {
+    const now = Date.now();
+    const schedule = this.normalizeSchedule(job);
+
+    if (schedule.mode === "once") {
+      if (!schedule.runAt) {
+        return now + 5_000;
+      }
+      if (schedule.runAt <= now) {
+        return now + 250;
+      }
+      return schedule.runAt;
+    }
+
+    if (schedule.mode === "cron") {
+      return this.computeCronNextRun(schedule.cron, now);
+    }
+
+    const intervalMinutes = schedule.intervalMinutes ?? DEFAULT_INTERVAL_MINUTES;
+    return now + Math.max(1, intervalMinutes) * 60 * 1000;
+  }
+
+  private computeCronNextRun(expression: string | undefined, now: number): number | undefined {
+    if (!expression) {
+      return now + 60 * 60 * 1000;
+    }
+
+    const parts = expression.trim().split(/\s+/);
+    if (parts.length !== 5) {
+      return now + 60 * 60 * 1000;
+    }
+
+    const [minutePart, hourPart] = parts;
+    const base = new Date(now + 60_000);
+    base.setSeconds(0, 0);
+
+    const minuteIntervalMatch = /^\*\/(\d{1,2})$/.exec(minutePart);
+    if (minuteIntervalMatch && hourPart === "*") {
+      const interval = Math.max(1, Number(minuteIntervalMatch[1]));
+      const next = new Date(base);
+      const roundedMinute = Math.ceil(next.getMinutes() / interval) * interval;
+      if (roundedMinute >= 60) {
+        next.setHours(next.getHours() + 1, roundedMinute - 60, 0, 0);
+      } else {
+        next.setMinutes(roundedMinute, 0, 0);
+      }
+      return next.getTime();
+    }
+
+    if (/^\d{1,2}$/.test(minutePart) && hourPart === "*") {
+      const minute = Number(minutePart);
+      if (minute < 0 || minute > 59) return now + 60 * 60 * 1000;
+      const next = new Date(base);
+      next.setMinutes(minute, 0, 0);
+      if (next.getTime() <= now) {
+        next.setHours(next.getHours() + 1);
+      }
+      return next.getTime();
+    }
+
+    if (/^\d{1,2}$/.test(minutePart) && /^\d{1,2}$/.test(hourPart)) {
+      const minute = Number(minutePart);
+      const hour = Number(hourPart);
+      if (minute < 0 || minute > 59 || hour < 0 || hour > 23) {
+        return now + 24 * 60 * 60 * 1000;
+      }
+      const next = new Date(base);
+      next.setHours(hour, minute, 0, 0);
+      if (next.getTime() <= now) {
+        next.setDate(next.getDate() + 1);
+      }
+      return next.getTime();
+    }
+
+    return now + 60 * 60 * 1000;
+  }
+
+  private async runScheduledJob(id: string, opts: { reschedule: boolean }): Promise<void> {
+    const before = this.store.getState().automationJobs.find((job) => job.id === id);
+    if (!before || before.status === "paused") return;
+
+    this.clearTimer(id);
+
+    const startedAt = Date.now();
+    this.patchJob(id, {
+      status: "running",
+      updatedAt: startedAt,
+      lastRun: {
+        runId: `${id}:${startedAt}`,
+        status: "running",
+        startedAt,
+      },
+      nextRunAt: undefined,
+    });
+
+    const updated = await this.executeJob(id);
+    if (!updated || !opts.reschedule) return;
+
+    const latest = this.store.getState().automationJobs.find((job) => job.id === id);
+    if (!latest || latest.status === "paused") return;
+
+    if (latest.schedule.mode === "once") {
+      this.patchJob(id, {
+        status: latest.status === "error" ? "error" : "idle",
+        updatedAt: Date.now(),
+        nextRunAt: undefined,
+      });
+      return;
+    }
+
+    this.planNextRun(latest);
+  }
+
+  private async executeJob(id: string): Promise<AutomationJob | null> {
+    const job = this.store.getState().automationJobs.find((item) => item.id === id);
+    if (!job) return null;
+
+    const now = Date.now();
+    if (job.kind === "watch") {
+      const watchResult = await this.evaluateWatchJob(job);
+      if (!watchResult.triggered) {
+        return this.patchJob(id, {
+          status: "active",
+          lastCheckedAt: now,
+          updatedAt: now,
+          lastRun: {
+            runId: `${job.id}:${now}`,
+            status: "done",
+            startedAt: now,
+            finishedAt: now,
+            summary: watchResult.summary,
+          },
+        });
+      }
+    }
+
+    try {
+      let summary = "Automation run completed.";
+      let runId = `${job.id}:${now}`;
+      if (this.dispatchJobRun) {
+        const dispatched = await this.dispatchJobRun(job);
+        runId = dispatched.taskId;
+        summary = `Dispatched OpenClaw run ${dispatched.taskId}.`;
+      }
+
+      const nextStatus = job.kind === "watch" ? "triggered" : "active";
       const updated = this.patchJob(id, {
-        status: "triggered",
+        status: nextStatus,
         lastCheckedAt: now,
         updatedAt: now,
-        nextRunAt,
         triggerCount: (job.triggerCount ?? 0) + 1,
         lastRun: {
-          runId: `${job.id}:${now}`,
-          status: "triggered",
+          runId,
+          status: "done",
           startedAt: now,
-          finishedAt: now,
-          summary: job.condition ?? job.sourcePrompt,
+          finishedAt: Date.now(),
+          summary,
         },
       });
 
       try {
         const notif = new Notification({
           title: "Aura Automation",
-          body: `${job.title} triggered`,
+          body: job.kind === "watch" ? `${job.title} triggered` : `${job.title} completed`,
         });
         notif.on("click", () => {
           if (job.url) {
@@ -148,24 +292,53 @@ export class MonitorManager {
         type: "AUTOMATION_JOB_UPDATED",
         payload: { job: updated } satisfies AutomationJobUpdatedPayload,
       });
-      this.emit({
-        type: "MONITOR_TRIGGERED",
-        payload: { monitor: updated },
-      });
-    } else {
-      this.patchJob(id, {
+      if (job.kind === "watch") {
+        this.emit({
+          type: "MONITOR_TRIGGERED",
+          payload: { monitor: updated },
+        });
+      }
+
+      return updated;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return this.patchJob(id, {
+        status: "error",
         lastCheckedAt: now,
         updatedAt: now,
-        nextRunAt,
         lastRun: {
           runId: `${job.id}:${now}`,
-          status: "done",
+          status: "error",
           startedAt: now,
-          finishedAt: now,
-          summary: "Condition not met",
+          finishedAt: Date.now(),
+          error: message,
+          summary: "Automation run failed.",
         },
       });
     }
+  }
+
+  private async evaluateWatchJob(job: AutomationJob): Promise<{ triggered: boolean; summary: string }> {
+    if (!job.url) {
+      return { triggered: true, summary: "Watch job has no URL. Dispatching prompt directly." };
+    }
+
+    let visibleText = "";
+    try {
+      await this.browserController.navigate({ url: job.url });
+      await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+      const ctx = await this.browserController.getPageContext();
+      visibleText = ctx?.visibleText ?? "";
+    } catch {
+      return { triggered: false, summary: "Could not load target page." };
+    }
+
+    const condition = job.condition ?? job.sourcePrompt;
+    const triggered = await this.evaluateCondition(condition, visibleText);
+    return {
+      triggered,
+      summary: triggered ? condition : "Condition not met.",
+    };
   }
 
   private async evaluateCondition(condition: string, visibleText: string): Promise<boolean> {
@@ -192,12 +365,33 @@ export class MonitorManager {
             content: `Condition: ${condition}\n\nPage content (first 1500 chars):\n${visibleText.slice(0, 1500)}\n\nIs the condition met?`,
           },
         ],
-        { maxTokens: 5, temperature: 0 }
+        { maxTokens: 5, temperature: 0 },
       );
       return result.trim().toLowerCase().startsWith("yes");
     } catch {
       return keywordMatch;
     }
+  }
+
+  private normalizeSchedule(job: AutomationJob): AutomationJob["schedule"] {
+    const mode = job.schedule.mode;
+    if (mode === "once") {
+      return {
+        ...job.schedule,
+        runAt: job.schedule.runAt ?? job.nextRunAt ?? Date.now() + 5_000,
+      };
+    }
+    if (mode === "cron") {
+      return {
+        ...job.schedule,
+        cron: job.schedule.cron?.trim() || "0 * * * *",
+      };
+    }
+    return {
+      ...job.schedule,
+      mode: "interval",
+      intervalMinutes: Math.max(1, job.schedule.intervalMinutes ?? job.intervalMinutes ?? DEFAULT_INTERVAL_MINUTES),
+    };
   }
 
   private patchJob(id: string, patch: Partial<AutomationJob>): AutomationJob {

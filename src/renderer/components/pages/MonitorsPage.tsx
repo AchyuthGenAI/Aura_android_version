@@ -20,6 +20,7 @@ const JOB_KIND_OPTIONS: Array<{ value: AutomationJobKind; label: string; detail:
   { value: "watch", label: "Watch Job", detail: "Observe a page and trigger when a condition is met." },
   { value: "recurring", label: "Recurring Task", detail: "Run the same managed task on an interval." },
   { value: "scheduled", label: "One-time Task", detail: "Queue a job to run once from the Automations workspace." },
+  { value: "cron", label: "Advanced Cron", detail: "Use cron syntax for advanced schedules." },
 ];
 
 const formatRelative = (ts?: number): string => {
@@ -31,6 +32,16 @@ const formatRelative = (ts?: number): string => {
   const absHours = Math.round(absMinutes / 60);
   if (absHours < 24) return diffMs >= 0 ? `In ${absHours}h` : `${absHours}h ago`;
   return new Date(ts).toLocaleDateString([], { month: "short", day: "numeric" });
+};
+
+const toLocalDateTimeInput = (ts: number): string => {
+  const date = new Date(ts);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
 };
 
 export const MonitorsPage = (): JSX.Element => {
@@ -46,6 +57,8 @@ export const MonitorsPage = (): JSX.Element => {
     condition: "",
     kind: "watch" as AutomationJobKind,
     intervalMinutes: 30,
+    cron: "0 * * * *",
+    runAt: toLocalDateTimeInput(Date.now() + 15 * 60 * 1000),
   });
   const [saving, setSaving] = useState(false);
 
@@ -62,6 +75,11 @@ export const MonitorsPage = (): JSX.Element => {
     setSaving(true);
     try {
       const now = Date.now();
+      const scheduleMode =
+        draft.kind === "scheduled" ? "once" : draft.kind === "cron" ? "cron" : "interval";
+      const onceRunAt = scheduleMode === "once"
+        ? Date.parse(draft.runAt) || (now + 15 * 60 * 1000)
+        : undefined;
       const job: AutomationJob = {
         id: crypto.randomUUID(),
         title: draft.title.trim(),
@@ -71,14 +89,20 @@ export const MonitorsPage = (): JSX.Element => {
         condition: draft.condition.trim() || draft.sourcePrompt.trim(),
         intervalMinutes: draft.intervalMinutes,
         schedule: {
-          mode: draft.kind === "scheduled" ? "once" : "interval",
-          intervalMinutes: draft.kind === "scheduled" ? undefined : draft.intervalMinutes,
-          runAt: draft.kind === "scheduled" ? now + 15 * 60 * 1000 : undefined,
+          mode: scheduleMode,
+          intervalMinutes: scheduleMode === "interval" ? draft.intervalMinutes : undefined,
+          runAt: onceRunAt,
+          cron: scheduleMode === "cron" ? draft.cron.trim() : undefined,
         },
         createdAt: now,
         updatedAt: now,
         lastCheckedAt: 0,
-        nextRunAt: draft.kind === "scheduled" ? now + 15 * 60 * 1000 : now + draft.intervalMinutes * 60 * 1000,
+        nextRunAt:
+          scheduleMode === "once"
+            ? onceRunAt
+            : scheduleMode === "cron"
+              ? undefined
+              : now + draft.intervalMinutes * 60 * 1000,
         status: "active",
         triggerCount: 0,
       };
@@ -93,6 +117,8 @@ export const MonitorsPage = (): JSX.Element => {
         condition: "",
         kind: "watch",
         intervalMinutes: draft.intervalMinutes,
+        cron: draft.cron,
+        runAt: toLocalDateTimeInput(Date.now() + 15 * 60 * 1000),
       });
     } finally {
       setSaving(false);
@@ -161,17 +187,38 @@ export const MonitorsPage = (): JSX.Element => {
                   rows={3}
                 />
               </Field>
-              <Field label="Interval">
-                <select
-                  value={draft.intervalMinutes}
-                  onChange={(event) => setDraft({ ...draft, intervalMinutes: Number(event.target.value) })}
-                  className="w-full rounded-[16px] border border-white/[0.08] bg-black/20 px-4 py-3 text-[13px] font-medium text-aura-text outline-none focus:border-aura-violet/50"
-                >
-                  {INTERVAL_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>{option.label}</option>
-                  ))}
-                </select>
-              </Field>
+              {(draft.kind === "watch" || draft.kind === "recurring") && (
+                <Field label="Interval">
+                  <select
+                    value={draft.intervalMinutes}
+                    onChange={(event) => setDraft({ ...draft, intervalMinutes: Number(event.target.value) })}
+                    className="w-full rounded-[16px] border border-white/[0.08] bg-black/20 px-4 py-3 text-[13px] font-medium text-aura-text outline-none focus:border-aura-violet/50"
+                  >
+                    {INTERVAL_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+              {draft.kind === "scheduled" && (
+                <Field label="Run At">
+                  <input
+                    type="datetime-local"
+                    value={draft.runAt}
+                    onChange={(event) => setDraft({ ...draft, runAt: event.target.value })}
+                    className="w-full rounded-[16px] border border-white/[0.08] bg-black/20 px-4 py-3 text-[13px] font-medium text-aura-text outline-none focus:border-aura-violet/50"
+                  />
+                </Field>
+              )}
+              {draft.kind === "cron" && (
+                <Field label="Cron Expression">
+                  <TextInput
+                    value={draft.cron}
+                    onChange={(value) => setDraft({ ...draft, cron: value })}
+                    placeholder="0 * * * *"
+                  />
+                </Field>
+              )}
             </div>
 
             <div className="mt-5">
@@ -221,7 +268,16 @@ export const MonitorsPage = (): JSX.Element => {
                   <div className="mt-4 grid gap-3 sm:grid-cols-2">
                     <MiniStat label="Next run" value={formatRelative(job.nextRunAt)} />
                     <MiniStat label="Last run" value={job.lastRun ? formatRelative(job.lastRun.finishedAt || job.lastRun.startedAt) : "Never"} />
-                    <MiniStat label="Schedule" value={job.schedule.mode === "once" ? "One-time" : `Every ${job.schedule.intervalMinutes || job.intervalMinutes || 30}m`} />
+                    <MiniStat
+                      label="Schedule"
+                      value={
+                        job.schedule.mode === "once"
+                          ? "One-time"
+                          : job.schedule.mode === "cron"
+                            ? job.schedule.cron || "Cron"
+                            : `Every ${job.schedule.intervalMinutes || job.intervalMinutes || 30}m`
+                      }
+                    />
                     <MiniStat label="Triggers" value={String(job.triggerCount)} />
                   </div>
 
