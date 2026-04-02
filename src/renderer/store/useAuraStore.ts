@@ -115,6 +115,24 @@ const upsertRecentRuns = (runs: OpenClawRun[], incoming: OpenClawRun): OpenClawR
   return [incoming, ...filtered].slice(0, 30);
 };
 
+const getRunEventKey = (value: { runId?: string; taskId?: string; messageId?: string; id?: string }): string | null =>
+  value.runId ?? value.taskId ?? value.messageId ?? value.id ?? null;
+
+const upsertRunEvent = (events: ToolUsePayload[], incoming: ToolUsePayload): ToolUsePayload[] => {
+  const next = [...events];
+  const existingIndex = incoming.toolUseId ? next.findIndex((entry) => entry.toolUseId === incoming.toolUseId) : -1;
+  if (existingIndex >= 0) {
+    next[existingIndex] = {
+      ...next[existingIndex],
+      ...incoming,
+      output: incoming.output ?? next[existingIndex]?.output,
+    };
+  } else {
+    next.push(incoming);
+  }
+  return next.slice(-12);
+};
+
 const mapContextActionToPrompt = (payload: ContextMenuActionPayload): string => {
   switch (payload.action) {
     case "ask":
@@ -166,6 +184,7 @@ type AuraState = {
   history: HistoryEntry[];
   activeRun: OpenClawRun | null;
   recentRuns: OpenClawRun[];
+  recentRunEvents: Record<string, ToolUsePayload[]>;
   activeTask: AuraTask | null;
   pendingConfirmation: ConfirmActionPayload | null;
   lastError: TaskErrorPayload | null;
@@ -297,6 +316,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   history: [],
   activeRun: null,
   recentRuns: [],
+  recentRunEvents: {},
   activeTask: null,
   pendingConfirmation: null,
   lastError: null,
@@ -402,9 +422,13 @@ export const useAuraStore = create<AuraState>((set, get) => ({
     if (message.type === "RUN_STATUS") {
       const payload = message.payload as { run: OpenClawRun };
       const nextRun = mergeRun(get().activeRun, payload.run);
+      const runKey = getRunEventKey(nextRun);
       set({
         activeRun: isTerminalRunStatus(nextRun.status) ? null : nextRun,
         recentRuns: isTerminalRunStatus(nextRun.status) ? upsertRecentRuns(get().recentRuns, nextRun) : get().recentRuns,
+        recentRunEvents: runKey && !get().recentRunEvents[runKey]
+          ? { ...get().recentRunEvents, [runKey]: [] }
+          : get().recentRunEvents,
         isLoading: !isTerminalRunStatus(nextRun.status),
       });
       return;
@@ -549,6 +573,14 @@ export const useAuraStore = create<AuraState>((set, get) => ({
           updatedAt: now(),
           toolCount: activeRun.toolCount + (payload.status === "running" ? 1 : 0),
           lastTool: `${payload.tool}:${payload.action}`,
+        };
+      }
+
+      const runKey = getRunEventKey(payload);
+      if (runKey) {
+        updates.recentRunEvents = {
+          ...get().recentRunEvents,
+          [runKey]: upsertRunEvent(get().recentRunEvents[runKey] ?? [], payload),
         };
       }
 

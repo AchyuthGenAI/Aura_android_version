@@ -4,6 +4,7 @@ import type { AuraSession, OpenClawRun } from "@shared/types";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
 import { RunHistoryList } from "../RunHistoryList";
+import { RunTimelineBubble } from "../RunTimelineBubble";
 import { SectionHeading } from "../shared";
 
 const formatDate = (ts: number): string => {
@@ -20,6 +21,7 @@ const formatDate = (ts: number): string => {
 export const HistoryPage = (): JSX.Element => {
   const sessions = useAuraStore((state) => state.sessions);
   const recentRuns = useAuraStore((state) => state.recentRuns);
+  const recentRunEvents = useAuraStore((state) => state.recentRunEvents);
   const loadSession = useAuraStore((state) => state.loadSession);
   const [mode, setMode] = useState<"runs" | "sessions">(recentRuns.length > 0 ? "runs" : "sessions");
   const [selectedRun, setSelectedRun] = useState<OpenClawRun | null>(recentRuns[0] ?? null);
@@ -44,6 +46,10 @@ export const HistoryPage = (): JSX.Element => {
     () => sessions.find((session) => session.id === selectedRun?.sessionId) ?? null,
     [selectedRun, sessions],
   );
+  const selectedRunEvents = useMemo(() => {
+    if (!selectedRun) return [];
+    return recentRunEvents[selectedRun.runId ?? selectedRun.id] ?? recentRunEvents[selectedRun.taskId] ?? recentRunEvents[selectedRun.messageId] ?? [];
+  }, [recentRunEvents, selectedRun]);
 
   if (recentRuns.length === 0 && sessions.length === 0) {
     return (
@@ -145,6 +151,15 @@ export const HistoryPage = (): JSX.Element => {
                     {selectedRun.summary ?? selectedRun.error ?? "This run completed without a saved summary yet."}
                   </p>
                 </div>
+
+                {selectedRunEvents.length > 0 && (
+                  <div className="rounded-[22px] border border-white/8 bg-white/[0.03] p-5">
+                    <p className="text-[11px] uppercase tracking-[0.2em] text-aura-muted">Tool Trace</p>
+                    <div className="mt-4">
+                      <RunTimelineBubble run={selectedRun} events={selectedRunEvents} showAvatar={false} />
+                    </div>
+                  </div>
+                )}
 
                 {selectedRunSession && (
                   <div className="rounded-[22px] border border-white/8 bg-white/[0.03] p-5">

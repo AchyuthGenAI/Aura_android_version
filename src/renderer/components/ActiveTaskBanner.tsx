@@ -46,6 +46,8 @@ const ElapsedTimer = ({ startedAt }: { startedAt: number }): JSX.Element => {
 
 export const ActiveTaskBanner = (): JSX.Element | null => {
   const activeRun = useAuraStore((s) => s.activeRun);
+  const recentRuns = useAuraStore((s) => s.recentRuns);
+  const recentRunEvents = useAuraStore((s) => s.recentRunEvents);
   const activeTask = useAuraStore((s) => s.activeTask);
   const cancelTask = useAuraStore((s) => s.cancelTask);
   const stepsRef = useRef<HTMLDivElement | null>(null);
@@ -57,29 +59,34 @@ export const ActiveTaskBanner = (): JSX.Element | null => {
     }
   }, [activeTask?.steps.length]);
 
-  // Auto-dismiss 3s after done
   useEffect(() => {
-    if (!activeTask) { setDismissed(false); return; }
-    if (activeTask.status === "done") {
-      const id = setTimeout(() => setDismissed(true), 3000);
-      return () => clearTimeout(id);
-    }
     setDismissed(false);
-  }, [activeTask?.status, activeTask?.id]);
+  }, [activeRun?.id, recentRuns[0]?.id, activeTask?.id]);
 
-  if (!activeRun && !activeTask) return null;
+  const displayRun = activeRun ?? recentRuns[0] ?? null;
+  const displayRunEvents = displayRun
+    ? recentRunEvents[displayRun.runId ?? displayRun.id] ?? recentRunEvents[displayRun.taskId] ?? recentRunEvents[displayRun.messageId] ?? []
+    : [];
+
+  if (!displayRun && !activeTask) return null;
   if (dismissed) return null;
 
-  const displayTitle = activeRun?.prompt ?? activeTask?.command ?? "";
-  const displayStatus = activeRun?.status ?? activeTask?.status ?? "running";
-  const metaLabel = activeRun
-    ? `${activeRun.surface} surface`
+  const displayTitle = displayRun?.prompt ?? activeTask?.command ?? "";
+  const displayStatus = displayRun?.status ?? activeTask?.status ?? "running";
+  const metaLabel = displayRun
+    ? `${displayRun.surface} surface`
     : "legacy task";
 
   const doneSteps = activeTask?.steps.filter((s) => s.status === "done").length ?? 0;
   const totalSteps = activeTask?.steps.length ?? 0;
   const progress = totalSteps > 0 ? Math.round((doneSteps / totalSteps) * 100) : 0;
   const runningStep = activeTask?.steps.find((s) => s.status === "running");
+  const canCancel =
+    activeRun
+      ? activeRun.status === "running" || activeRun.status === "queued"
+      : activeTask
+        ? activeTask.status === "running" || activeTask.status === "planning"
+        : false;
 
   return (
     <div className="task-banner-enter glass-panel relative overflow-hidden rounded-[28px] border-aura-violet/20 px-5 py-4 shadow-[0_18px_60px_rgba(3,6,20,0.28)]">
@@ -107,10 +114,10 @@ export const ActiveTaskBanner = (): JSX.Element | null => {
             >
               {displayStatus}
             </span>
-            {activeTask && (activeTask.status === "running" || activeTask.status === "planning") && (
+            {canCancel && (
               <button
                 className="rounded-lg border border-white/10 bg-white/6 px-2 py-0.5 text-[10px] text-aura-muted transition hover:bg-white/12 hover:text-red-300"
-                onClick={() => void cancelTask(activeTask.id)}
+                onClick={() => void cancelTask(activeRun?.taskId ?? activeTask?.id ?? "")}
               >
                 Cancel
               </button>
@@ -166,20 +173,41 @@ export const ActiveTaskBanner = (): JSX.Element | null => {
           </div>
         )}
 
-        {activeRun && (
+        {displayRun && (
           <div className="mt-3 grid gap-2 sm:grid-cols-3">
             <div className="rounded-[14px] border border-white/8 bg-black/20 px-3 py-2">
               <p className="text-[10px] uppercase tracking-[0.18em] text-aura-muted">Run</p>
-              <p className="mt-1 truncate text-xs font-semibold text-aura-text">{activeRun.runId ?? activeRun.id}</p>
+              <p className="mt-1 truncate text-xs font-semibold text-aura-text">{displayRun.runId ?? displayRun.id}</p>
             </div>
             <div className="rounded-[14px] border border-white/8 bg-black/20 px-3 py-2">
               <p className="text-[10px] uppercase tracking-[0.18em] text-aura-muted">Tool events</p>
-              <p className="mt-1 text-xs font-semibold text-aura-text">{activeRun.toolCount}</p>
+              <p className="mt-1 text-xs font-semibold text-aura-text">{displayRun.toolCount}</p>
             </div>
             <div className="rounded-[14px] border border-white/8 bg-black/20 px-3 py-2">
               <p className="text-[10px] uppercase tracking-[0.18em] text-aura-muted">Latest tool</p>
-              <p className="mt-1 truncate text-xs font-semibold text-aura-text">{activeRun.lastTool?.replace(":", " ") ?? "Starting up"}</p>
+              <p className="mt-1 truncate text-xs font-semibold text-aura-text">{displayRun.lastTool?.replace(":", " ") ?? "Starting up"}</p>
             </div>
+          </div>
+        )}
+
+        {displayRunEvents.length > 0 && (
+          <div className="mt-3 space-y-1.5">
+            {displayRunEvents.slice(-4).map((entry, index) => (
+              <div
+                key={`${entry.toolUseId ?? index}-${entry.timestamp}`}
+                className="flex items-center justify-between gap-3 rounded-[14px] border border-white/8 bg-white/[0.03] px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-xs font-semibold text-aura-text">
+                    {entry.tool.replace(/_/g, " ")} {entry.action.replace(/_/g, " ")}
+                  </p>
+                  <p className="truncate text-[11px] text-aura-muted">
+                    {entry.surface ? `${entry.surface} surface` : "Managed tool event"}
+                  </p>
+                </div>
+                <span className="shrink-0 text-[11px] text-aura-muted">{entry.status}</span>
+              </div>
+            ))}
           </div>
         )}
 
@@ -195,9 +223,9 @@ export const ActiveTaskBanner = (): JSX.Element | null => {
           </p>
         )}
 
-        {activeRun?.summary && !activeTask?.result && (
+        {displayRun?.summary && !activeTask?.result && (
           <p className="mt-3 truncate rounded-[14px] bg-emerald-500/8 px-3 py-2 text-xs text-emerald-300">
-            {activeRun.summary}
+            {displayRun.summary}
           </p>
         )}
       </div>

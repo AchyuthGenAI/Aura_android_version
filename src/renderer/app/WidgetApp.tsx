@@ -196,6 +196,7 @@ const WidgetApp = (): JSX.Element => {
 
   const onboardingNeeded = !authState.authenticated || !consentAccepted || !profileComplete;
   const isBootstrapping = !hydrated || isHydrating || (bootstrapState.stage !== "ready" && bootstrapState.stage !== "error");
+  const latestRun = activeRun ?? recentRuns[0] ?? null;
 
   const isTaskActive =
     activeTask?.status === "planning"
@@ -211,6 +212,19 @@ const WidgetApp = (): JSX.Element => {
       >
         {isTaskActive && (
           <div className="pulse-ring absolute inset-0 rounded-full border-2 border-aura-violet/60" />
+        )}
+        {latestRun && (
+          <div className="absolute -bottom-1.5 -right-1.5 rounded-full border border-white/10 bg-[#12111d]/95 px-2 py-1 shadow-[0_10px_24px_rgba(3,6,20,0.34)]">
+            <p className={`text-[9px] font-semibold uppercase tracking-[0.16em] ${
+              latestRun.status === "done"
+                ? "text-emerald-300"
+                : latestRun.status === "error"
+                  ? "text-rose-300"
+                  : "text-aura-violet"
+            }`}>
+              {latestRun.status}
+            </p>
+          </div>
         )}
         <div className="pointer-events-none scale-[1.25]">
           <AuraLogoBlob size="md" isTaskRunning={runtimeStatus.phase === "running" || isTaskActive} />
