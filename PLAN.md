@@ -73,6 +73,7 @@ Key state:
 - added native approval decision handling for `allow-once` / `allow-always` / `deny`
 - upgraded automation scheduler engine for interval, one-time, and cron-style schedules
 - routed scheduled automation dispatch into managed OpenClaw chat runs
+- added support-bundle export in Settings (sanitized config + runtime/storage diagnostics)
 
 ### Renderer And UX
 - rebuilt Settings into a managed runtime dashboard
@@ -97,7 +98,6 @@ Key state:
 
 ### 3. Reliability
 - validate bundled runtime assets more explicitly at startup
-- add structured support export for logs and traces
 - verify packaged behavior on clean Windows machines
 
 ### 4. Voice and confirmations

@@ -52,7 +52,7 @@
 
 ### Reliability and packaging
 - [ ] Harden packaged runtime validation
-- [ ] Add support export for logs/traces
+- [x] Add support export for logs/traces
 - [ ] Verify packaged Windows bootstrap on a clean machine
 
 ## Current Verification
