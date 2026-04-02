@@ -9,28 +9,22 @@ import type {
   AuraTask,
   BootstrapState,
   ChatSendRequest,
-  ConfirmActionPayload,
   ExtensionMessage,
   GatewayStatus,
   PageContext,
   RuntimeDiagnostics,
   RuntimeStatus,
   TaskProgressPayload,
-  TaskStep,
-  ToolName,
 } from "@shared/types";
 
 import { BrowserController } from "./browser-controller";
 import { ConfigManager } from "./config-manager";
 import { AuraStore } from "./store";
 import { classify, type Classification } from "./intent-classifier";
-import { TaskExecutor } from "./task-executor";
 import type { MonitorManager } from "./monitor-manager";
-import type { DesktopController } from "./desktop-controller";
 
 import WebSocket from "ws";
-import { completeChat, resolveGroqApiKey, resolveGeminiApiKey, resolveProvider, streamChat } from "./llm-client";
-import type { VisionProvider } from "./vision-agent";
+import { completeChat, resolveGroqApiKey, resolveGeminiApiKey, resolveProvider } from "./llm-client";
 
 const now = (): number => Date.now();
 
@@ -114,26 +108,12 @@ export class GatewayManager {
   private streamedText = "";
   private chatDoneResolve: ((text: string) => void) | null = null;
   private chatDoneReject: ((err: Error) => void) | null = null;
-  private readonly taskExecutor = new TaskExecutor();
-  private readonly pendingConfirmations = new Map<string, { resolve: (v: boolean) => void; timeout: NodeJS.Timeout }>();
 
   private reconnectTimer: NodeJS.Timeout | null = null;
   private monitorManager: MonitorManager | null = null;
-  private desktopController: DesktopController | null = null;
-  private hideMainWindow: (() => void) | null = null;
-  private showMainWindow: (() => void) | null = null;
 
   setMonitorManager(mm: MonitorManager): void {
     this.monitorManager = mm;
-  }
-
-  setDesktopController(dc: DesktopController): void {
-    this.desktopController = dc;
-  }
-
-  setWindowVisibilityCallbacks(hide: () => void, show: () => void): void {
-    this.hideMainWindow = hide;
-    this.showMainWindow = show;
   }
 
   constructor(
@@ -178,22 +158,12 @@ export class GatewayManager {
     };
   }
 
-  getTaskExecutor(): TaskExecutor {
-    return this.taskExecutor;
+  resolveConfirmation(_requestId: string, _confirmed: boolean): void {
+    // Kept as a compatibility bridge while the renderer still sends this IPC.
   }
 
-  resolveConfirmation(requestId: string, confirmed: boolean): void {
-    const pending = this.pendingConfirmations.get(requestId);
-    if (pending) {
-      clearTimeout(pending.timeout);
-      pending.resolve(confirmed);
-      this.pendingConfirmations.delete(requestId);
-    }
-  }
-
-  cancelTask(taskId: string): void {
+  cancelTask(_taskId: string): void {
     void this.stopResponse();
-    this.taskExecutor.cancel(taskId);
   }
 
   async bootstrap(): Promise<BootstrapState> {
@@ -406,7 +376,7 @@ export class GatewayManager {
     this.persistCurrentSession(session);
 
     console.log(`\n[GatewayManager] sendChat — message="${request.message.slice(0, 80)}" source=${request.source}`);
-    console.log(`[GatewayManager] connected=${this.connected} desktopController=${Boolean(this.desktopController)}`);
+    console.log(`[GatewayManager] connected=${this.connected}`);
 
     const pageContext = await this.browserController.getPageContext();
     console.log(`[GatewayManager] pageContext url="${pageContext?.url ?? "none"}" title="${pageContext?.title ?? "none"}"`);
@@ -446,29 +416,6 @@ export class GatewayManager {
     console.log("[GatewayManager] -> handleQueryIntent (managed OpenClaw)");
     return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
 
-    // ── Route by intent ──
-    if (classification.intent === "query") {
-      console.log("[GatewayManager] → handleQueryIntent");
-      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
-    }
-
-    if (classification.intent === "navigate" && classification.directAction) {
-      console.log("[GatewayManager] → handleDirectAction");
-      return this.handleDirectAction(messageId, taskId, session, request, classification);
-    }
-
-    if (classification.intent === "monitor" && this.monitorManager) {
-      console.log("[GatewayManager] → handleMonitorIntent");
-      return this.handleMonitorIntent(messageId, taskId, session, request, pageContext, apiKey);
-    }
-
-    if (classification.intent === "desktop") {
-      console.log("[GatewayManager] → handleDesktopIntent (vision agent)");
-      return this.handleDesktopIntent(messageId, taskId, session, request);
-    }
-    // task, autofill, or navigate-without-directAction → plan and execute
-    console.log("[GatewayManager] → handleTaskIntent");
-    return this.handleTaskIntent(messageId, taskId, session, request, pageContext, classification);
   }
 
   // ── Query intent: stream LLM response ──────────────────────────────────────
@@ -511,100 +458,6 @@ export class GatewayManager {
     return { messageId, taskId };
   }
 
-  // ── Direct action: execute immediately, skip planning ─────────────────────
-
-  private async handleDirectAction(
-    messageId: string,
-    taskId: string,
-    session: AuraSession,
-    request: ChatSendRequest,
-    classification: Classification,
-  ): Promise<{ messageId: string; taskId: string }> {
-    const extraSystemPrompt =
-      classification.intent === "navigate"
-        ? "Prefer OpenClaw browser tools and narrate the page transitions clearly."
-        : undefined;
-    return this.handleQueryIntent(messageId, taskId, session, request, null, extraSystemPrompt);
-  }
-
-  // ── Task intent: plan steps → execute ─────────────────────────────────────
-
-  private async handleTaskIntent(
-    messageId: string,
-    taskId: string,
-    session: AuraSession,
-    request: ChatSendRequest,
-    pageContext: PageContext | null,
-    classification: Classification,
-  ): Promise<{ messageId: string; taskId: string }> {
-    void classification;
-    return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
-
-    // When OpenClaw is connected, delegate to the OpenClaw agent — it handles
-    // full multi-step task execution with browser tools, web search, skills, etc.
-    if (this.connected) {
-      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
-    }
-
-    // Emit planning status
-    const planningTask: AuraTask = {
-      id: taskId,
-      command: request.message,
-      status: "planning",
-      createdAt: now(),
-      updatedAt: now(),
-      retries: 0,
-      steps: [],
-    };
-    this.emitProgress(planningTask, { type: "status", statusText: "Planning your task..." });
-
-    // Plan the task
-    let steps: TaskStep[];
-    try {
-      steps = await this.planTask(request.message, pageContext, classification);
-    } catch {
-      // Planning failed → fall back to query mode
-      console.warn("[GatewayManager] Task planning failed, falling back to chat.");
-      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
-    }
-
-    if (steps.length === 0) {
-      // No steps planned → fall back to query
-      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
-    }
-
-    const task: AuraTask = {
-      id: taskId,
-      command: request.message,
-      status: "running",
-      createdAt: now(),
-      updatedAt: now(),
-      retries: 0,
-      steps,
-    };
-
-    this.emitProgress(task, { type: "status", statusText: "Running task..." });
-
-    try {
-      const profile = this.store.getState().profile;
-      const result = await this.taskExecutor.execute({
-        task,
-        browserController: this.browserController,
-        emit: this.emit,
-        confirmStep: (payload) => this.confirmStep(payload),
-        profile,
-      });
-
-      this.handleChatSuccess(messageId, taskId, task, session, request, result || "Task completed.");
-    } catch (err: any) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.handleChatError(messageId, taskId, task, session, message);
-    }
-
-    this.activeMessageId = null;
-    this.activeTaskId = null;
-    return { messageId, taskId };
-  }
 
   // ── Monitor intent: extract params and schedule a PageMonitor ────────────
 
@@ -725,280 +578,8 @@ export class GatewayManager {
     const desktopPersona = "You are currently operating in native Windows desktop mode. Use OpenClaw desktop tools, verify the screen after meaningful actions, and narrate progress clearly.";
     return this.handleQueryIntent(messageId, taskId, session, request, null, desktopPersona);
 
-    console.log(`[GatewayManager] handleDesktopIntent — connected=${this.connected} dc=${Boolean(this.desktopController)}`);
-
-    // When OpenClaw is connected, let the agent handle it
-    if (this.connected) {
-      console.log("[GatewayManager] OpenClaw connected — delegating desktop task to OpenClaw agent");
-      const desktopPersona = "You are currently operating in NATIVE WINDOWS DESKTOP mode. You do not have DOM access. You must use `desktop_screenshot` and `desktop_click`/`desktop_type` to visually analyze and interact with the screen. CRITICAL: AFTER EVERY SINGLE desktop_click OR desktop_type ACTION, YOU MUST YIELD AND CALL `desktop_screenshot` AGAIN to verify the OS responded before proceeding.";
-      return this.handleQueryIntent(messageId, taskId, session, request, null, desktopPersona);
-    }
-
-    if (!this.desktopController) {
-      console.warn("[GatewayManager] desktopController is null — cannot run vision agent");
-      return this.handleQueryIntent(messageId, taskId, session, request, null);
-    }
-
-    // Resolve provider: prioritize Gemini for vision as Groq keys are currently prone to 401s
-    const config = this.configManager.readConfig();
-    let geminiKey = resolveGeminiApiKey(config.providers?.google?.apiKey);
-    let groqKey = resolveGroqApiKey(config.providers?.groq?.apiKey);
-
-    let visionProvider: VisionProvider = geminiKey ? "gemini" : "groq";
-    let apiKey = (visionProvider === "gemini" ? geminiKey : groqKey) as string;
-
-    console.log(`[GatewayManager] LLM for vision: provider=${visionProvider} key=${apiKey ? `${apiKey.slice(0, 8)}...` : "MISSING"}`);
-    if (!apiKey) {
-      console.warn("[GatewayManager] No LLM API key — cannot run vision agent, falling back to chat");
-      return this.handleQueryIntent(messageId, taskId, session, request, null);
-    }
-
-    // Emit a running task so the UI shows progress
-    const task: AuraTask = {
-      id: taskId,
-      command: request.message,
-      status: "running",
-      createdAt: now(),
-      updatedAt: now(),
-      retries: 0,
-      steps: [],
-    };
-    this.emitProgress(task, { type: "status", statusText: "Vision agent starting..." });
-
-    try {
-      console.log("[GatewayManager] Importing vision-agent module...");
-      const { runVisionAgent } = await import("./vision-agent");
-      console.log("[GatewayManager] Starting vision agent for goal:", request.message);
-      const result = await runVisionAgent({
-        goal: request.message,
-        provider: visionProvider,
-        apiKey,
-        dc: this.desktopController!,
-        onBeforeCapture: () => {
-          console.log("[GatewayManager] onBeforeCapture — minimizing windows");
-          this.hideMainWindow?.();
-        },
-        onAfterCapture: () => {
-          console.log("[GatewayManager] onAfterCapture — restoring windows");
-          this.showMainWindow?.();
-        },
-        onToken: (text) => {
-          if (this.activeMessageId) {
-            this.emit({ type: "LLM_TOKEN", payload: { messageId: this.activeMessageId, token: text } });
-          }
-        },
-        onStep: ({ iteration, action }) => {
-          const stepText = "description" in action ? action.description : action.action;
-          const toolMap: Record<string, string> = {
-            click: "desktop_click", double_click: "desktop_double_click",
-            right_click: "desktop_right_click", type: "desktop_type",
-            key: "desktop_key", scroll: "desktop_scroll",
-            wait: "wait", done: "desktop_screenshot", error: "desktop_screenshot",
-          };
-          task.steps.push({
-            index: iteration - 1,
-            tool: (toolMap[action.action] ?? "desktop_screenshot") as import("@shared/types").ToolName,
-            description: stepText,
-            status: "done",
-            params: {},
-          });
-          task.updatedAt = now();
-          this.emitProgress(task, { type: "step_done", statusText: stepText });
-        },
-      });
-
-      console.log("[GatewayManager] Vision agent finished, result:", result.slice(0, 120));
-      task.status = "done";
-      task.updatedAt = now();
-      this.handleChatSuccess(messageId, taskId, task, session, request, result);
-    } catch (err: any) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error("[GatewayManager] Vision agent threw:", message);
-      this.handleChatError(messageId, taskId, task, session, message);
-    }
-
-    this.activeMessageId = null;
-    this.activeTaskId = null;
-    return { messageId, taskId };
   }
 
-  // ── Task planner: LLM generates step array ──────────────────────────────
-
-  private async planTask(
-    userMessage: string,
-    pageContext: PageContext | null,
-    classification: Classification,
-  ): Promise<TaskStep[]> {
-    const config = this.configManager.readConfig();
-    const { provider, apiKey } = resolveProvider(
-      config.providers?.google?.apiKey,
-      config.providers?.groq?.apiKey,
-    );
-
-    const profile = this.store.getState().profile;
-    const systemPrompt = this.buildPlannerPrompt(pageContext, profile, classification);
-
-    const result = await completeChat(apiKey, [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userMessage },
-    ], { maxTokens: 800, temperature: 0.1, provider });
-
-    // Extract JSON array from response (handle markdown fences)
-    const jsonMatch = result.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) throw new Error("Planner did not return a valid JSON array.");
-
-    const raw = JSON.parse(jsonMatch[0]) as Array<{
-      tool: string;
-      params: Record<string, unknown>;
-      description: string;
-      requiresConfirmation?: boolean;
-    }>;
-
-    return raw.map((s, i) => ({
-      index: i,
-      tool: s.tool as ToolName,
-      description: s.description,
-      status: "pending" as const,
-      params: s.params,
-      requiresConfirmation: s.requiresConfirmation ?? false,
-    }));
-  }
-
-  private buildPlannerPrompt(
-    pageContext: PageContext | null,
-    profile: { fullName: string; email: string; phone: string },
-    classification: Classification,
-  ): string {
-    const lines = [
-      "You are a task planner for Aura Desktop, an AI assistant that automates browser actions.",
-      "Given the user's request and the current page context, output a JSON array of steps.",
-      "",
-      "Each step object must have:",
-      '  "tool": one of "navigate", "click", "type", "scroll", "submit", "select", "open_tab", "screenshot", "read", "wait", "execute_js", "hover"',
-      '  "params": object with tool-specific parameters',
-      '  "description": human-readable description of what this step does',
-      '  "requiresConfirmation": true if the action is destructive (submit, payment, delete, execute_js)',
-      "",
-      "Tool parameter details:",
-      '  navigate: { "url": "..." }',
-      '  click: { "selector": "CSS selector or text description" }',
-      '  type: { "selector": "CSS selector", "value": "text to type", "useProfile": true/false }',
-      '  scroll: { "direction": "up|down|top|bottom" }',
-      '  submit: { "selector": "form selector" } — ALWAYS requiresConfirmation: true',
-      '  select: { "selector": "CSS selector", "value": "option value" }',
-      '  wait: { "ms": 1000 }',
-      '  read: {} — reads current page content',
-      "",
-      "Rules:",
-      "- Max 10 steps",
-      "- requiresConfirmation MUST be true for: submit, execute_js, payment actions, delete actions",
-      "- Use useProfile: true when filling profile data (name, email, phone, address)",
-      "- Output ONLY the JSON array — no prose, no markdown fences, no explanation",
-    ];
-
-    if (classification.intent === "autofill" && profile.fullName) {
-      lines.push("");
-      lines.push(`User profile: name="${profile.fullName}", email="${profile.email}", phone="${profile.phone}"`);
-    }
-
-    if (pageContext) {
-      lines.push("");
-      lines.push(`Current page: ${pageContext.title} — ${pageContext.url}`);
-      if (pageContext.interactiveElements.length > 0) {
-        const elements = pageContext.interactiveElements.slice(0, 30).map(
-          (el) => `  ${el.tagName}${el.selector ? ` (${el.selector})` : ""}: ${el.name || el.text || ""}`,
-        );
-        lines.push("Interactive elements:");
-        lines.push(...elements);
-      }
-      if (pageContext.visibleText) {
-        lines.push(`Page text (first 2000 chars): ${pageContext.visibleText.slice(0, 2000)}`);
-      }
-    }
-
-    return lines.join("\n");
-  }
-
-  // ── Step confirmation ─────────────────────────────────────────────────────
-
-  private confirmStep(payload: Omit<ConfirmActionPayload, "requestId">): Promise<boolean> {
-    const requestId = crypto.randomUUID();
-    return new Promise<boolean>((resolve) => {
-      const timeout = setTimeout(() => {
-        this.pendingConfirmations.delete(requestId);
-        resolve(false); // Auto-deny after 30s
-      }, 30_000);
-
-      this.pendingConfirmations.set(requestId, { resolve, timeout });
-      this.emit({
-        type: "CONFIRM_ACTION",
-        payload: { ...payload, requestId },
-      });
-    });
-  }
-
-  /**
-   * Stream chat via direct LLM API call (Gemini primary, Groq fallback).
-   * Emits LLM_TOKEN events in real-time as tokens arrive.
-   */
-  private streamViaDirectLLM(
-    messageId: string,
-    prompt: string,
-    history?: Array<{ role: string; content: string }>,
-  ): Promise<string> {
-    return new Promise<string>((resolve, reject) => {
-      const config = this.configManager.readConfig();
-      const { provider, apiKey } = resolveProvider(
-        config.providers?.google?.apiKey,
-        config.providers?.groq?.apiKey,
-      );
-
-      if (!apiKey) {
-        reject(new Error("No LLM API key configured. Add a Gemini or Groq key in Settings."));
-        return;
-      }
-
-      console.log(`[GatewayManager] streamViaDirectLLM — provider=${provider}`);
-
-      const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
-        { role: "system", content: "You are Aura, a helpful AI assistant running inside Aura Desktop. Be concise, friendly, and helpful. Use markdown for formatting when appropriate." },
-      ];
-
-      if (history && history.length > 0) {
-        for (const msg of history.slice(-10)) {
-          messages.push({
-            role: msg.role as "user" | "assistant",
-            content: msg.content,
-          });
-        }
-      }
-
-      messages.push({ role: "user", content: prompt });
-
-      let resolved = false;
-
-      streamChat(apiKey, messages, {
-        onToken: (token) => {
-          this.emit({
-            type: "LLM_TOKEN",
-            payload: { messageId, token },
-          });
-        },
-        onDone: (fullText) => {
-          if (!resolved) {
-            resolved = true;
-            resolve(fullText);
-          }
-        },
-        onError: (err) => {
-          if (!resolved) {
-            resolved = true;
-            reject(err);
-          }
-        },
-      }, { provider });
-    });
-  }
 
   // --- Private: OpenClaw Gateway Chat ---
 
@@ -1586,26 +1167,6 @@ export class GatewayManager {
     });
   }
 
-  private composePrompt(request: ChatSendRequest, pageContext: PageContext | null): string {
-    const profile = this.store.getState().profile;
-    const sections = [request.message];
-
-    if (profile.fullName || profile.email) {
-      const profileInfo = [profile.fullName, profile.email, profile.city, profile.country].filter(Boolean).join(", ");
-      if (profileInfo) {
-        sections.push(`\n[User profile: ${profileInfo}]`);
-      }
-    }
-
-    if (pageContext?.title) {
-      sections.push(`\n[Current page: ${pageContext.title} — ${pageContext.url}]`);
-      if (pageContext.visibleText) {
-        sections.push(`[Page content preview: ${pageContext.visibleText.slice(0, 3000)}]`);
-      }
-    }
-
-    return sections.join("");
-  }
 
   private createLegacyTask(taskId: string, command: string): AuraTask {
     return {

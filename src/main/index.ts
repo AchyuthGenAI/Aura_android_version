@@ -324,17 +324,6 @@ const createAppWindows = async (): Promise<void> => {
     activeGatewayManager.setMonitorManager(activeMonitorManager);
 
     activeDesktopController = new DesktopController();
-    activeGatewayManager.setDesktopController(activeDesktopController);
-    activeGatewayManager.setWindowVisibilityCallbacks(
-      () => {
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
-        if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.minimize();
-      },
-      () => {
-        if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.restore(); mainWindow.show(); }
-        if (widgetWindow && !widgetWindow.isDestroyed()) { widgetWindow.restore(); widgetWindow.show(); }
-      },
-    );
 
     // ── Desktop IPC handlers ───────────────────────────────────────────────
     ipcMain.handle(IPC_CHANNELS.desktopScreenshot, async () =>
