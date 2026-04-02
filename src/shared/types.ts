@@ -228,6 +228,27 @@ export interface AuraTask {
   statusSource?: "openclaw-gateway" | "aura-local";
 }
 
+export type OpenClawRunStatus = "queued" | "running" | "done" | "error" | "cancelled";
+export type OpenClawRunSurface = "chat" | "browser" | "desktop" | "automation" | "mixed";
+
+export interface OpenClawRun {
+  id: string;
+  taskId: string;
+  messageId: string;
+  sessionId?: string;
+  runId?: string;
+  prompt: string;
+  status: OpenClawRunStatus;
+  surface: OpenClawRunSurface;
+  startedAt: number;
+  updatedAt: number;
+  completedAt?: number;
+  summary?: string;
+  error?: string;
+  toolCount: number;
+  lastTool?: string;
+}
+
 export interface DesktopBrowserTab {
   id: string;
   title: string;
@@ -397,6 +418,7 @@ export type MessageType =
   | "CHAT_MESSAGE"
   | "LLM_TOKEN"
   | "LLM_DONE"
+  | "RUN_STATUS"
   | "TASK_PROGRESS"
   | "TASK_RESULT"
   | "TASK_ERROR"
@@ -434,6 +456,10 @@ export interface LLMDonePayload {
   messageId: string;
   fullText: string;
   cleanText?: string;
+}
+
+export interface RunStatusPayload {
+  run: OpenClawRun;
 }
 
 export interface TaskProgressPayload {
@@ -492,6 +518,10 @@ export interface ContextMenuActionPayload {
 export interface ToolUsePayload {
   tool: string;
   toolUseId?: string;
+  runId?: string;
+  taskId?: string;
+  messageId?: string;
+  surface?: OpenClawRunSurface;
   action: string;
   params: Record<string, unknown>;
   status: "running" | "done" | "error";

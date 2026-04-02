@@ -6,7 +6,7 @@ import { WebSpeechClient } from "@renderer/services/web-speech";
 import { speakStreaming, stopSpeaking } from "@renderer/services/tts";
 import { AuraFace } from "./AuraFace";
 
-import type { TaskProgressPayload, TaskErrorPayload } from "@shared/types";
+import type { OpenClawRun, TaskProgressPayload, TaskErrorPayload } from "@shared/types";
 
 type VoiceClient = DeepgramClient | WebSpeechClient;
 type Phase = "idle" | "listening" | "thinking" | "task" | "speaking";
@@ -246,6 +246,19 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
           transitionPhase("task");
           const runningStep = p.task?.steps?.find((s) => s.status === "running");
           setTaskStatus(runningStep?.tool ? `${runningStep.tool.replace(/_/g, " ")}...` : "Working...");
+        }
+        return;
+      }
+
+      if (msg.type === "RUN_STATUS") {
+        const p = msg.payload as { run: OpenClawRun };
+        if ((phaseRef.current === "thinking" || phaseRef.current === "task") && p.run.status === "running") {
+          transitionPhase("task");
+          setTaskStatus(
+            p.run.lastTool
+              ? p.run.lastTool.replace(":", " ").replace(/_/g, " ")
+              : `${p.run.surface} tools active`,
+          );
         }
         return;
       }

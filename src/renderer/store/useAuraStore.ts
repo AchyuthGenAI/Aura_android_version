@@ -20,6 +20,7 @@ import type {
   ContextMenuActionPayload,
   ExtensionMessage,
   HistoryEntry,
+  OpenClawRun,
   OverlayTab,
   PageContext,
   PageMonitor,
@@ -78,6 +79,31 @@ const createToast = (tone: ToastNotice["tone"], title: string, message?: string)
   createdAt: now()
 });
 
+const isTerminalRunStatus = (status: OpenClawRun["status"]): boolean =>
+  status === "done" || status === "error" || status === "cancelled";
+
+const mergeRun = (current: OpenClawRun | null, incoming: OpenClawRun): OpenClawRun => {
+  if (!current) return incoming;
+  const sameRun =
+    current.id === incoming.id
+    || current.taskId === incoming.taskId
+    || (Boolean(current.runId) && current.runId === incoming.runId)
+    || current.messageId === incoming.messageId;
+
+  if (!sameRun) {
+    return incoming;
+  }
+
+  return {
+    ...current,
+    ...incoming,
+    toolCount: Math.max(current.toolCount, incoming.toolCount),
+    lastTool: incoming.lastTool ?? current.lastTool,
+    summary: incoming.summary ?? current.summary,
+    error: incoming.error ?? current.error,
+  };
+};
+
 const mapContextActionToPrompt = (payload: ContextMenuActionPayload): string => {
   switch (payload.action) {
     case "ask":
@@ -127,6 +153,7 @@ type AuraState = {
   currentSessionId: string | null;
   messages: ChatThreadMessage[];
   history: HistoryEntry[];
+  activeRun: OpenClawRun | null;
   activeTask: AuraTask | null;
   pendingConfirmation: ConfirmActionPayload | null;
   lastError: TaskErrorPayload | null;
@@ -256,6 +283,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   currentSessionId: null,
   messages: [],
   history: [],
+  activeRun: null,
   activeTask: null,
   pendingConfirmation: null,
   lastError: null,
@@ -358,6 +386,16 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       return;
     }
 
+    if (message.type === "RUN_STATUS") {
+      const payload = message.payload as { run: OpenClawRun };
+      const nextRun = mergeRun(get().activeRun, payload.run);
+      set({
+        activeRun: isTerminalRunStatus(nextRun.status) ? null : nextRun,
+        isLoading: !isTerminalRunStatus(nextRun.status),
+      });
+      return;
+    }
+
     if (message.type === "CONFIRM_ACTION") {
       const payload = message.payload as ConfirmActionPayload;
       set({ pendingConfirmation: payload });
@@ -391,6 +429,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       }
       set((state) => ({
         isLoading: false,
+        activeRun: null,
         activeTask: null,
         lastError: payload,
         messages: nextMessages,
@@ -482,6 +521,22 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       // Keep feed to max 50 entries
       const trimmed = feed.length > 50 ? feed.slice(feed.length - 50) : feed;
       const updates: Partial<AuraState> = { actionFeed: trimmed };
+
+      const activeRun = get().activeRun;
+      if (activeRun && (
+        (payload.runId && payload.runId === activeRun.runId)
+        || (payload.taskId && payload.taskId === activeRun.taskId)
+        || (payload.messageId && payload.messageId === activeRun.messageId)
+      )) {
+        updates.activeRun = {
+          ...activeRun,
+          runId: payload.runId ?? activeRun.runId,
+          surface: payload.surface ?? activeRun.surface,
+          updatedAt: now(),
+          toolCount: activeRun.toolCount + (payload.status === "running" ? 1 : 0),
+          lastTool: `${payload.tool}:${payload.action}`,
+        };
+      }
 
       // Auto-navigate browser when OpenClaw uses the browser tool
       if (payload.tool === "browser" && payload.action === "navigate" && typeof payload.params?.url === "string") {
@@ -706,7 +761,9 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       currentSessionId: null,
       messages: [],
       inputValue: "",
+      activeRun: null,
       activeTask: null,
+      actionFeed: [],
       lastError: null,
       isLoading: false
     });
@@ -723,7 +780,9 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       currentSessionId: session.id,
       messages: mapSessionMessages(session.messages),
       route: "home",
+      activeRun: null,
       activeTask: null,
+      actionFeed: [],
       lastError: null
     });
 

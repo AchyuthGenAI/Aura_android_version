@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 
 import { AuraLogoBlob, MessageBubble } from "./primitives";
+import { RunTimelineBubble } from "./RunTimelineBubble";
 import { TaskProgressBubble } from "./TaskProgress";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
@@ -13,6 +14,7 @@ const EXAMPLE_COMMANDS = [
 
 export const ChatPanel = (): JSX.Element => {
   const messages = useAuraStore((s) => s.messages);
+  const activeRun = useAuraStore((s) => s.activeRun);
   const activeTask = useAuraStore((s) => s.activeTask);
   const sendMessage = useAuraStore((s) => s.sendMessage);
   const settings = useAuraStore((s) => s.settings);
@@ -62,6 +64,7 @@ export const ChatPanel = (): JSX.Element => {
       {messages.map((message) => (
         <MessageBubble key={message.id} message={message} theme={settings.theme} />
       ))}
+      {activeRun && <RunTimelineBubble />}
       {showTaskBubble && <TaskProgressBubble task={activeTask} />}
     </div>
   );

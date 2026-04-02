@@ -12,6 +12,7 @@ export const HomePage = (): JSX.Element => {
   const settings = useAuraStore((state) => state.settings);
   const runtimeStatus = useAuraStore((state) => state.runtimeStatus);
   const automationJobs = useAuraStore((state) => state.automationJobs);
+  const activeRun = useAuraStore((state) => state.activeRun);
   const skills = useAuraStore((state) => state.skills);
 
   if (settings.voiceEnabled) {
@@ -36,8 +37,8 @@ export const HomePage = (): JSX.Element => {
 
           <div className="grid min-w-[280px] flex-1 gap-3 sm:grid-cols-3">
             <HeroMetric label="Runtime" value={runtimeStatus.phase} detail={runtimeStatus.gatewayConnected ? "Gateway live" : runtimeStatus.message} />
-            <HeroMetric label="Skills" value={String(skills.length)} detail="Bundled capabilities ready" />
-            <HeroMetric label="Automations" value={String(automationJobs.length)} detail="Saved background jobs" />
+            <HeroMetric label="Run" value={activeRun?.status ?? "idle"} detail={activeRun ? `${activeRun.surface} surface · ${activeRun.toolCount} tool events` : "No live OpenClaw run"} />
+            <HeroMetric label="Automations" value={String(automationJobs.length)} detail={`${skills.length} bundled skills available`} />
           </div>
         </div>
       </Card>

@@ -45,6 +45,7 @@ const ElapsedTimer = ({ startedAt }: { startedAt: number }): JSX.Element => {
 };
 
 export const ActiveTaskBanner = (): JSX.Element | null => {
+  const activeRun = useAuraStore((s) => s.activeRun);
   const activeTask = useAuraStore((s) => s.activeTask);
   const cancelTask = useAuraStore((s) => s.cancelTask);
   const stepsRef = useRef<HTMLDivElement | null>(null);
@@ -66,12 +67,19 @@ export const ActiveTaskBanner = (): JSX.Element | null => {
     setDismissed(false);
   }, [activeTask?.status, activeTask?.id]);
 
-  if (!activeTask || dismissed) return null;
+  if (!activeRun && !activeTask) return null;
+  if (dismissed) return null;
 
-  const doneSteps = activeTask.steps.filter((s) => s.status === "done").length;
-  const totalSteps = activeTask.steps.length;
+  const displayTitle = activeRun?.prompt ?? activeTask?.command ?? "";
+  const displayStatus = activeRun?.status ?? activeTask?.status ?? "running";
+  const metaLabel = activeRun
+    ? `${activeRun.surface} surface`
+    : "legacy task";
+
+  const doneSteps = activeTask?.steps.filter((s) => s.status === "done").length ?? 0;
+  const totalSteps = activeTask?.steps.length ?? 0;
   const progress = totalSteps > 0 ? Math.round((doneSteps / totalSteps) * 100) : 0;
-  const runningStep = activeTask.steps.find((s) => s.status === "running");
+  const runningStep = activeTask?.steps.find((s) => s.status === "running");
 
   return (
     <div className="task-banner-enter glass-panel relative overflow-hidden rounded-[28px] border-aura-violet/20 px-5 py-4 shadow-[0_18px_60px_rgba(3,6,20,0.28)]">
@@ -81,24 +89,25 @@ export const ActiveTaskBanner = (): JSX.Element | null => {
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0 flex-1">
             <p className="text-[10px] uppercase tracking-[0.28em] text-aura-violet">Active Task</p>
-            <p className="mt-1 truncate text-sm font-semibold text-aura-text">{activeTask.command}</p>
+            <p className="mt-1 truncate text-sm font-semibold text-aura-text">{displayTitle}</p>
+            <p className="mt-1 text-[11px] uppercase tracking-[0.18em] text-aura-muted">{metaLabel}</p>
           </div>
           <div className="flex items-center gap-2 text-xs text-aura-muted">
-            {activeTask.status === "running" && runningStep?.startedAt && (
+            {displayStatus === "running" && runningStep?.startedAt && (
               <ElapsedTimer startedAt={runningStep.startedAt} />
             )}
             <span
               className={
-                activeTask.status === "done"
+                displayStatus === "done"
                   ? "text-emerald-400"
-                  : activeTask.status === "error"
+                  : displayStatus === "error"
                     ? "text-red-400"
                     : "text-aura-violet"
               }
             >
-              {activeTask.status}
+              {displayStatus}
             </span>
-            {(activeTask.status === "running" || activeTask.status === "planning") && (
+            {activeTask && (activeTask.status === "running" || activeTask.status === "planning") && (
               <button
                 className="rounded-lg border border-white/10 bg-white/6 px-2 py-0.5 text-[10px] text-aura-muted transition hover:bg-white/12 hover:text-red-300"
                 onClick={() => void cancelTask(activeTask.id)}
@@ -120,7 +129,7 @@ export const ActiveTaskBanner = (): JSX.Element | null => {
         )}
 
         {/* Steps */}
-        {activeTask.steps.length > 0 && (
+        {activeTask && activeTask.steps.length > 0 && (
           <div ref={stepsRef} className="mt-3 max-h-[120px] space-y-1.5 overflow-y-auto">
             {activeTask.steps.map((step, i) => (
               <div
@@ -157,15 +166,38 @@ export const ActiveTaskBanner = (): JSX.Element | null => {
           </div>
         )}
 
-        {activeTask.error && (
+        {activeRun && (
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            <div className="rounded-[14px] border border-white/8 bg-black/20 px-3 py-2">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-aura-muted">Run</p>
+              <p className="mt-1 truncate text-xs font-semibold text-aura-text">{activeRun.runId ?? activeRun.id}</p>
+            </div>
+            <div className="rounded-[14px] border border-white/8 bg-black/20 px-3 py-2">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-aura-muted">Tool events</p>
+              <p className="mt-1 text-xs font-semibold text-aura-text">{activeRun.toolCount}</p>
+            </div>
+            <div className="rounded-[14px] border border-white/8 bg-black/20 px-3 py-2">
+              <p className="text-[10px] uppercase tracking-[0.18em] text-aura-muted">Latest tool</p>
+              <p className="mt-1 truncate text-xs font-semibold text-aura-text">{activeRun.lastTool?.replace(":", " ") ?? "Starting up"}</p>
+            </div>
+          </div>
+        )}
+
+        {activeTask?.error && (
           <p className="mt-3 rounded-[14px] border border-red-400/20 bg-red-500/8 px-3 py-2 text-xs text-red-300">
             {activeTask.error}
           </p>
         )}
 
-        {activeTask.status === "done" && activeTask.result && (
+        {activeTask?.status === "done" && activeTask.result && (
           <p className="mt-3 truncate rounded-[14px] bg-emerald-500/8 px-3 py-2 text-xs text-emerald-300">
             {activeTask.result}
+          </p>
+        )}
+
+        {activeRun?.summary && !activeTask?.result && (
+          <p className="mt-3 truncate rounded-[14px] bg-emerald-500/8 px-3 py-2 text-xs text-emerald-300">
+            {activeRun.summary}
           </p>
         )}
       </div>

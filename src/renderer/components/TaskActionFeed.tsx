@@ -124,6 +124,7 @@ function timeAgo(timestamp: number): string {
 }
 
 export const TaskActionFeed: React.FC = () => {
+  const activeRun = useAuraStore((s) => s.activeRun);
   const actionFeed = useAuraStore((s) => s.actionFeed);
   const clearActionFeed = useAuraStore((s) => s.clearActionFeed);
   const feedRef = useRef<HTMLDivElement>(null);
@@ -135,15 +136,28 @@ export const TaskActionFeed: React.FC = () => {
     }
   }, [actionFeed.length]);
 
-  if (actionFeed.length === 0) return null;
+  const visibleFeed = activeRun
+    ? actionFeed.filter((entry) => (
+      (activeRun.runId && entry.runId === activeRun.runId)
+      || entry.taskId === activeRun.taskId
+      || entry.messageId === activeRun.messageId
+    ))
+    : actionFeed;
+
+  if (visibleFeed.length === 0) return null;
 
   return (
     <div className="task-action-feed">
       <div className="task-action-feed-header">
         <span className="task-action-feed-title">
           <span className="pulse-dot" />
-          Automation
+          {activeRun ? "OpenClaw Run" : "Automation"}
         </span>
+        {activeRun && (
+          <span className="text-[10px] uppercase tracking-[0.16em] text-aura-muted">
+            {activeRun.surface}
+          </span>
+        )}
         <button
           className="task-action-feed-clear"
           onClick={clearActionFeed}
@@ -153,7 +167,7 @@ export const TaskActionFeed: React.FC = () => {
         </button>
       </div>
       <div className="task-action-feed-list" ref={feedRef}>
-        {actionFeed.map((entry, i) => (
+        {visibleFeed.map((entry, i) => (
           <div
             key={`${entry.toolUseId ?? i}-${entry.timestamp}`}
             className={`task-action-item ${entry.status}`}

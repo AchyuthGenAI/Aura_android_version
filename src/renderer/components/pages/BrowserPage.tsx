@@ -154,11 +154,14 @@ const BrowserToolbar = (): JSX.Element => {
 const WorkspaceSummary = (): JSX.Element => {
   const pageContext = useAuraStore((state) => state.pageContext);
   const runtimeStatus = useAuraStore((state) => state.runtimeStatus);
+  const activeRun = useAuraStore((state) => state.activeRun);
   const actionFeed = useAuraStore((state) => state.actionFeed);
   const sendMessage = useAuraStore((state) => state.sendMessage);
 
   const activityLabel =
-    actionFeed.length > 0
+    activeRun
+      ? `${activeRun.toolCount} tool event${activeRun.toolCount === 1 ? "" : "s"} in ${activeRun.surface}`
+      : actionFeed.length > 0
       ? `${actionFeed.length} live tool event${actionFeed.length === 1 ? "" : "s"}`
       : "No live tool activity";
 

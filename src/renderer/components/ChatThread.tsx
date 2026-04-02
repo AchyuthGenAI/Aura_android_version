@@ -12,8 +12,8 @@ const EXAMPLE_COMMANDS = [
 ];
 
 export const TaskBanner = (): JSX.Element | null => {
-  const activeTask = useAuraStore((state) => state.activeTask);
-  if (!activeTask) {
+  const activeRun = useAuraStore((state) => state.activeRun);
+  if (!activeRun) {
     return null;
   }
 
@@ -21,19 +21,19 @@ export const TaskBanner = (): JSX.Element | null => {
     <Card className="border-aura-violet/20 bg-aura-violet/10 px-4 py-3">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-xs uppercase tracking-[0.24em] text-aura-violet">Active Task</p>
-          <p className="mt-1 text-sm font-semibold text-aura-text">{activeTask.command}</p>
-          <p className="mt-1 text-xs text-aura-muted">Status: {activeTask.status}</p>
+          <p className="text-xs uppercase tracking-[0.24em] text-aura-violet">OpenClaw Run</p>
+          <p className="mt-1 text-sm font-semibold text-aura-text">{activeRun.prompt}</p>
+          <p className="mt-1 text-xs text-aura-muted">
+            Status: {activeRun.status} · Surface: {activeRun.surface}
+          </p>
         </div>
         <div className="flex flex-col items-end gap-2">
-          {activeTask.steps.slice(0, 3).map((step) => (
-            <span
-              key={step.index}
-              className="rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] text-aura-text"
-            >
-              {step.description}
-            </span>
-          ))}
+          <span className="rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] text-aura-text">
+            {activeRun.toolCount} tool event{activeRun.toolCount === 1 ? "" : "s"}
+          </span>
+          <span className="rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] text-aura-text">
+            {activeRun.lastTool?.replace(":", " ") ?? "Preparing run"}
+          </span>
         </div>
       </div>
     </Card>

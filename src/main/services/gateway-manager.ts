@@ -6,6 +6,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import type {
   AuraSession,
   AuraSessionMessage,
+  OpenClawRun,
+  OpenClawRunSurface,
   AuraTask,
   BootstrapState,
   ChatSendRequest,
@@ -105,6 +107,7 @@ export class GatewayManager {
   private activeMessageId: string | null = null;
   private activeTaskId: string | null = null;
   private activeRunId: string | null = null;
+  private activeRun: OpenClawRun | null = null;
   private streamedText = "";
   private chatDoneResolve: ((text: string) => void) | null = null;
   private chatDoneReject: ((err: Error) => void) | null = null;
@@ -114,6 +117,54 @@ export class GatewayManager {
 
   setMonitorManager(mm: MonitorManager): void {
     this.monitorManager = mm;
+  }
+
+  private inferSurface(classification: Classification, pageContext: PageContext | null): OpenClawRunSurface {
+    if (classification.intent === "desktop") return "desktop";
+    if (classification.intent === "monitor") return "automation";
+    if (pageContext?.url) return "browser";
+    return "chat";
+  }
+
+  private beginRun(
+    taskId: string,
+    messageId: string,
+    sessionId: string | undefined,
+    prompt: string,
+    surface: OpenClawRunSurface,
+  ): OpenClawRun {
+    const run: OpenClawRun = {
+      id: taskId,
+      taskId,
+      messageId,
+      sessionId,
+      prompt,
+      status: "running",
+      surface,
+      startedAt: now(),
+      updatedAt: now(),
+      toolCount: 0,
+    };
+    this.activeRun = run;
+    this.emit({ type: "RUN_STATUS", payload: { run } });
+    return run;
+  }
+
+  private patchActiveRun(partial: Partial<OpenClawRun>): void {
+    if (!this.activeRun) return;
+    this.activeRun = {
+      ...this.activeRun,
+      ...partial,
+      updatedAt: partial.updatedAt ?? now(),
+    };
+    this.emit({ type: "RUN_STATUS", payload: { run: this.activeRun } });
+  }
+
+  private inferToolSurface(tool: string): OpenClawRunSurface {
+    if (tool === "browser") return "browser";
+    if (tool === "nodes" || tool.startsWith("desktop")) return "desktop";
+    if (tool === "cron") return "automation";
+    return this.activeRun?.surface ?? "chat";
   }
 
   constructor(
@@ -349,6 +400,12 @@ export class GatewayManager {
     this.activeMessageId = null;
     this.activeTaskId = null;
     this.activeRunId = null;
+    this.patchActiveRun({
+      status: "cancelled",
+      completedAt: now(),
+      summary: this.streamedText || "Response stopped.",
+    });
+    this.activeRun = null;
     this.setStatus({
       ...this.runtimeStatus,
       phase: "ready",
@@ -397,6 +454,7 @@ export class GatewayManager {
       classification = { intent: "query", confidence: 0.5 };
     }
     console.log(`[GatewayManager] classification intent="${classification.intent}" confidence=${classification.confidence} directAction=${JSON.stringify(classification.directAction ?? null)}`);
+    const surface = this.inferSurface(classification, pageContext);
 
     this.setStatus({
       ...this.runtimeStatus,
@@ -414,7 +472,7 @@ export class GatewayManager {
     }
 
     console.log("[GatewayManager] -> handleQueryIntent (managed OpenClaw)");
-    return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
+    return this.handleQueryIntent(messageId, taskId, session, request, pageContext, undefined, surface);
 
   }
 
@@ -426,9 +484,13 @@ export class GatewayManager {
     session: AuraSession,
     request: ChatSendRequest,
     pageContext: PageContext | null,
-    extraSystemPrompt?: string
+    extraSystemPrompt?: string,
+    surface: OpenClawRunSurface = pageContext?.url ? "browser" : "chat",
   ): Promise<{ messageId: string; taskId: string }> {
     const task = this.createLegacyTask(taskId, request.message);
+    task.surface = surface === "automation" ? "mixed" : surface;
+    task.statusSource = "openclaw-gateway";
+    this.beginRun(taskId, messageId, request.sessionId, request.message, surface);
     this.emitProgress(task, { type: "status", statusText: "Thinking..." });
 
     task.status = "running";
@@ -446,15 +508,18 @@ export class GatewayManager {
       // Route through OpenClaw agent (has skills, memory, browser tools, web search)
       this.emitProgress(task, { type: "step_start", statusText: "OpenClaw agent working..." });
       const responseText = await this.streamViaOpenClaw(messageId, request.message, "main", extraSystemPrompt);
+      task.runId = this.activeRunId ?? undefined;
       this.handleChatSuccess(messageId, taskId, task, session, request, responseText);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
+      task.runId = this.activeRunId ?? undefined;
       this.handleChatError(messageId, taskId, task, session, message);
     }
 
     this.activeMessageId = null;
     this.activeTaskId = null;
     this.activeRunId = null;
+    this.activeRun = null;
     return { messageId, taskId };
   }
 
@@ -469,6 +534,7 @@ export class GatewayManager {
     pageContext: PageContext | null,
     apiKey: string,
   ): Promise<{ messageId: string; taskId: string }> {
+    this.beginRun(taskId, messageId, request.sessionId, request.message, "automation");
     const currentUrl = pageContext?.url ?? "";
     const currentTitle = pageContext?.title ?? "current page";
 
@@ -512,6 +578,12 @@ export class GatewayManager {
       session.endedAt = now();
       this.persistCurrentSession(session);
       this.emit({ type: "LLM_DONE", payload: { messageId, fullText: responseText, cleanText: responseText } });
+      this.patchActiveRun({
+        status: "error",
+        completedAt: now(),
+        error: responseText,
+      });
+      this.activeRun = null;
       this.setStatus({ ...this.runtimeStatus, phase: "ready", gatewayConnected: this.connected, degraded: !this.connected, lastCheckedAt: Date.now(), message: "Managed OpenClaw runtime is online." });
       return { messageId, taskId };
     }
@@ -562,6 +634,12 @@ export class GatewayManager {
       type: "LLM_DONE",
       payload: { messageId, fullText: responseText, cleanText: responseText },
     });
+    this.patchActiveRun({
+      status: "done",
+      completedAt: now(),
+      summary: responseText,
+    });
+    this.activeRun = null;
     this.setStatus({ ...this.runtimeStatus, phase: "ready", gatewayConnected: this.connected, degraded: !this.connected, lastCheckedAt: Date.now(), message: "Managed OpenClaw runtime is online." });
 
     return { messageId, taskId };
@@ -576,7 +654,7 @@ export class GatewayManager {
     request: ChatSendRequest,
   ): Promise<{ messageId: string; taskId: string }> {
     const desktopPersona = "You are currently operating in native Windows desktop mode. Use OpenClaw desktop tools, verify the screen after meaningful actions, and narrate progress clearly.";
-    return this.handleQueryIntent(messageId, taskId, session, request, null, desktopPersona);
+    return this.handleQueryIntent(messageId, taskId, session, request, null, desktopPersona, "desktop");
 
   }
 
@@ -606,6 +684,7 @@ export class GatewayManager {
         .then((res) => {
           if (res?.runId) {
             this.activeRunId = res.runId;
+            this.patchActiveRun({ runId: res.runId, status: "running" });
           }
           // Response will arrive via handleChatStreamEvent()
         })
@@ -984,17 +1063,28 @@ export class GatewayManager {
       const toolBlocks = extractToolUseBlocks(payload);
       for (const block of toolBlocks) {
         const action = typeof block.input?.action === "string" ? block.input.action : "execute";
+        const surface = this.inferToolSurface(block.tool);
         
         // --- Added: Visual Step Overlays ---
         if (block.tool === "browser" && typeof block.input?.selector === "string") {
           void this.browserController?.highlightElement(block.input.selector);
         }
+        this.patchActiveRun({
+          runId: payload.runId ?? this.activeRunId ?? this.activeRun?.runId,
+          surface: this.activeRun?.surface === surface ? this.activeRun.surface : "mixed",
+          toolCount: (this.activeRun?.toolCount ?? 0) + 1,
+          lastTool: `${block.tool}:${action}`,
+        });
         
         this.emit({
           type: "TOOL_USE",
           payload: {
             tool: block.tool,
             toolUseId: block.toolUseId,
+            runId: payload.runId ?? this.activeRunId ?? undefined,
+            taskId: this.activeTaskId ?? undefined,
+            messageId: this.activeMessageId ?? undefined,
+            surface,
             action,
             params: block.input,
             status: "running",
@@ -1012,11 +1102,16 @@ export class GatewayManager {
       const toolBlocks = extractToolUseBlocks(payload);
       for (const block of toolBlocks) {
         const action = typeof block.input?.action === "string" ? block.input.action : "execute";
+        const surface = this.inferToolSurface(block.tool);
         this.emit({
           type: "TOOL_USE",
           payload: {
             tool: block.tool,
             toolUseId: block.toolUseId,
+            runId: payload.runId ?? this.activeRunId ?? undefined,
+            taskId: this.activeTaskId ?? undefined,
+            messageId: this.activeMessageId ?? undefined,
+            surface,
             action,
             params: block.input,
             status: "done",
@@ -1121,6 +1216,12 @@ export class GatewayManager {
       type: "LLM_DONE",
       payload: { messageId, fullText: responseText, cleanText: responseText },
     });
+    this.patchActiveRun({
+      runId: task.runId,
+      status: "done",
+      completedAt: now(),
+      summary: responseText,
+    });
 
     this.setStatus({
       ...this.runtimeStatus,
@@ -1158,6 +1259,12 @@ export class GatewayManager {
     this.emitProgress(task, { type: "error", statusText: errorMessage });
     this.emit({ type: "TASK_ERROR", payload: { taskId: task.id, code: "UNKNOWN", message: errorMessage } });
     this.emit({ type: "LLM_DONE", payload: { messageId, fullText: "", cleanText: "" } });
+    this.patchActiveRun({
+      runId: task.runId,
+      status: "error",
+      completedAt: now(),
+      error: errorMessage,
+    });
 
     this.setStatus({
       ...this.runtimeStatus,
