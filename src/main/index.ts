@@ -425,7 +425,7 @@ const createAppWindows = async (): Promise<void> => {
     ipcMain.handle(IPC_CHANNELS.chatSend, async (_event, payload) => activeGatewayManager!.sendChat(payload));
     ipcMain.handle(IPC_CHANNELS.chatStop, async () => activeGatewayManager!.stopResponse());
     ipcMain.handle(IPC_CHANNELS.chatConfirmAction, async (_event, payload: { requestId: string; confirmed: boolean }) => {
-      activeGatewayManager!.resolveChatConfirmation(payload.requestId, payload.confirmed);
+      await activeGatewayManager!.resolveChatConfirmation(payload.requestId, payload.confirmed);
     });
     ipcMain.handle(IPC_CHANNELS.automationStart, async (_event, job) => {
       activeMonitorManager!.scheduleJob(job as import("@shared/types").AutomationJob);

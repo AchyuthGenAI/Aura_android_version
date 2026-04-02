@@ -401,6 +401,7 @@ export type MessageType =
   | "TASK_RESULT"
   | "TASK_ERROR"
   | "CONFIRM_ACTION"
+  | "CONFIRM_ACTION_RESOLVED"
   | "MONITORS_LOADED"
   | "MONITOR_TRIGGERED"
   | "MACROS_LOADED"
@@ -456,6 +457,11 @@ export interface ConfirmActionPayload {
   taskId: string;
   message: string;
   step: TaskStep;
+}
+
+export interface ConfirmActionResolvedPayload {
+  requestId: string;
+  decision?: string;
 }
 
 export interface BrowserTabsUpdatedPayload {

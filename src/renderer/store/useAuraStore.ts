@@ -16,6 +16,7 @@ import type {
   ChatSendRequest,
   ChatThreadMessage,
   ConfirmActionPayload,
+  ConfirmActionResolvedPayload,
   ContextMenuActionPayload,
   ExtensionMessage,
   HistoryEntry,
@@ -432,6 +433,14 @@ export const useAuraStore = create<AuraState>((set, get) => ({
     if (message.type === "CONFIRM_ACTION") {
       const payload = message.payload as ConfirmActionPayload;
       set({ pendingConfirmation: payload });
+      return;
+    }
+
+    if (message.type === "CONFIRM_ACTION_RESOLVED") {
+      const payload = message.payload as ConfirmActionResolvedPayload;
+      if (get().pendingConfirmation?.requestId === payload.requestId) {
+        set({ pendingConfirmation: null });
+      }
       return;
     }
 

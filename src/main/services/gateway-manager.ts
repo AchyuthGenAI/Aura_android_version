@@ -6,6 +6,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import type {
   AuraSession,
   AuraSessionMessage,
+  ConfirmActionPayload,
   OpenClawRun,
   OpenClawRunSurface,
   BootstrapState,
@@ -15,6 +16,7 @@ import type {
   PageContext,
   RuntimeDiagnostics,
   RuntimeStatus,
+  TaskStep,
 } from "@shared/types";
 
 import { BrowserController } from "./browser-controller";
@@ -40,6 +42,21 @@ const readOpenClawVersion = (rootPath: string | null): string | undefined => {
 
 type EventFrame = { type: "event"; event: string; payload: unknown; seq?: number };
 type ResponseFrame = { type: "res"; id: string; ok: boolean; payload?: unknown; error?: { code?: string; message?: string } };
+type ApprovalKind = "exec" | "plugin";
+
+interface ParsedApprovalRequest {
+  id: string;
+  kind: ApprovalKind;
+  message: string;
+  description: string;
+  params: Record<string, unknown>;
+  expiresAtMs?: number;
+}
+
+interface ParsedApprovalResolved {
+  id: string;
+  decision?: string;
+}
 
 // chat event payload shape from the gateway protocol (v3)
 interface ChatContentBlock {
@@ -92,11 +109,90 @@ function extractToolUseBlocks(payload: ChatEventPayload): Array<{ tool: string; 
     }));
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+}
+
+function asNonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}
+
+function parseApprovalRequested(event: string, payload: unknown): ParsedApprovalRequest | null {
+  const root = asRecord(payload);
+  if (!root) return null;
+  const id = asNonEmptyString(root.id);
+  if (!id) return null;
+  const request = asRecord(root.request) ?? {};
+  const expiresAtMs = typeof root.expiresAtMs === "number" ? root.expiresAtMs : undefined;
+
+  if (event === "exec.approval.requested") {
+    const command = asNonEmptyString(request.command);
+    if (!command) return null;
+    const host = asNonEmptyString(request.host);
+    const cwd = asNonEmptyString(request.cwd);
+    const security = asNonEmptyString(request.security);
+    const ask = asNonEmptyString(request.ask);
+
+    return {
+      id,
+      kind: "exec",
+      message: `Allow OpenClaw to run this command?\n${command}`,
+      description: command,
+      params: {
+        command,
+        host,
+        cwd,
+        security,
+        ask,
+      },
+      expiresAtMs,
+    };
+  }
+
+  if (event === "plugin.approval.requested") {
+    const title = asNonEmptyString(request.title);
+    if (!title) return null;
+    const description = asNonEmptyString(request.description);
+    const severity = asNonEmptyString(request.severity);
+    const pluginId = asNonEmptyString(request.pluginId);
+
+    return {
+      id,
+      kind: "plugin",
+      message: description
+        ? `Allow plugin action: ${title}\n${description}`
+        : `Allow plugin action: ${title}`,
+      description: title,
+      params: {
+        title,
+        description,
+        severity,
+        pluginId,
+      },
+      expiresAtMs,
+    };
+  }
+
+  return null;
+}
+
+function parseApprovalResolved(payload: unknown): ParsedApprovalResolved | null {
+  const root = asRecord(payload);
+  if (!root) return null;
+  const id = asNonEmptyString(root.id);
+  if (!id) return null;
+  const decision = asNonEmptyString(root.decision) ?? undefined;
+  return { id, decision };
+}
+
 export class GatewayManager {
   private gatewayProcess: ChildProcess | null = null;
   private ws: WebSocket | null = null;
   private connected = false;
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timeout: NodeJS.Timeout }>();
+  private pendingApprovals = new Map<string, { kind: ApprovalKind; taskId?: string; timeout: NodeJS.Timeout | null }>();
   private onConnected: (() => void) | null = null;
   private runtimeStatus: RuntimeStatus;
   private bootstrapState: BootstrapState;
@@ -206,8 +302,89 @@ export class GatewayManager {
     };
   }
 
-  resolveChatConfirmation(_requestId: string, _confirmed: boolean): void {
-    // Compatibility bridge until gateway confirmation wiring is fully implemented.
+  async resolveChatConfirmation(requestId: string, confirmed: boolean): Promise<void> {
+    const normalizedId = requestId.trim();
+    if (!normalizedId) return;
+    const decision = confirmed ? "allow-once" : "deny";
+    const approval = this.pendingApprovals.get(normalizedId);
+
+    try {
+      if (approval?.kind === "plugin") {
+        await this.request("plugin.approval.resolve", { id: normalizedId, decision }, { timeoutMs: 20_000 });
+      } else if (approval?.kind === "exec") {
+        await this.request("exec.approval.resolve", { id: normalizedId, decision }, { timeoutMs: 20_000 });
+      } else {
+        try {
+          await this.request("exec.approval.resolve", { id: normalizedId, decision }, { timeoutMs: 20_000 });
+        } catch {
+          await this.request("plugin.approval.resolve", { id: normalizedId, decision }, { timeoutMs: 20_000 });
+        }
+      }
+      this.clearPendingApproval(normalizedId);
+      this.emit({ type: "CONFIRM_ACTION_RESOLVED", payload: { requestId: normalizedId, decision } });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(`[GatewayManager] Failed resolving approval ${normalizedId}: ${detail}`);
+      this.clearPendingApproval(normalizedId);
+      this.emit({ type: "CONFIRM_ACTION_RESOLVED", payload: { requestId: normalizedId, decision: "error" } });
+    }
+  }
+
+  private clearPendingApproval(requestId: string): { kind: ApprovalKind; taskId?: string } | null {
+    const existing = this.pendingApprovals.get(requestId);
+    if (!existing) return null;
+    if (existing.timeout) {
+      clearTimeout(existing.timeout);
+    }
+    this.pendingApprovals.delete(requestId);
+    return { kind: existing.kind, taskId: existing.taskId };
+  }
+
+  private handleApprovalRequestedEvent(event: string, payload: unknown): void {
+    const parsed = parseApprovalRequested(event, payload);
+    if (!parsed) return;
+    this.clearPendingApproval(parsed.id);
+
+    const taskId = this.activeRun?.taskId ?? parsed.id;
+    const step: TaskStep = {
+      index: 0,
+      tool: "ask_user",
+      description: parsed.description,
+      status: "running",
+      params: parsed.params,
+      requiresConfirmation: true,
+      startedAt: now(),
+    };
+    const confirmPayload: ConfirmActionPayload = {
+      requestId: parsed.id,
+      taskId,
+      message: parsed.message,
+      step,
+    };
+    this.emit({ type: "CONFIRM_ACTION", payload: confirmPayload });
+
+    const timeoutMs = parsed.expiresAtMs ? Math.max(0, parsed.expiresAtMs - Date.now() + 500) : 0;
+    const timeout = timeoutMs
+      ? setTimeout(() => {
+          this.clearPendingApproval(parsed.id);
+          this.emit({
+            type: "CONFIRM_ACTION_RESOLVED",
+            payload: { requestId: parsed.id, decision: "timeout" },
+          });
+        }, timeoutMs)
+      : null;
+
+    this.pendingApprovals.set(parsed.id, { kind: parsed.kind, taskId, timeout });
+  }
+
+  private handleApprovalResolvedEvent(payload: unknown): void {
+    const resolved = parseApprovalResolved(payload);
+    if (!resolved) return;
+    this.clearPendingApproval(resolved.id);
+    this.emit({
+      type: "CONFIRM_ACTION_RESOLVED",
+      payload: { requestId: resolved.id, decision: resolved.decision },
+    });
   }
 
   async bootstrap(): Promise<BootstrapState> {
@@ -927,6 +1104,14 @@ export class GatewayManager {
       reject(new Error("Gateway disconnected."));
     });
     this.pending.clear();
+    const pendingApprovalIds = [...this.pendingApprovals.keys()];
+    for (const requestId of pendingApprovalIds) {
+      this.clearPendingApproval(requestId);
+      this.emit({
+        type: "CONFIRM_ACTION_RESOLVED",
+        payload: { requestId, decision: "disconnected" },
+      });
+    }
 
     if (this.ws) {
       try { this.ws.close(); } catch { /* ignore */ }
@@ -950,6 +1135,16 @@ export class GatewayManager {
       // Chat streaming events from OpenClaw
       if (evt.event === "chat") {
         this.handleChatStreamEvent(evt);
+        return;
+      }
+
+      if (evt.event === "exec.approval.requested" || evt.event === "plugin.approval.requested") {
+        this.handleApprovalRequestedEvent(evt.event, evt.payload);
+        return;
+      }
+
+      if (evt.event === "exec.approval.resolved" || evt.event === "plugin.approval.resolved") {
+        this.handleApprovalResolvedEvent(evt.payload);
         return;
       }
 
