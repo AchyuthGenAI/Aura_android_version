@@ -64,6 +64,12 @@ interface ParsedApprovalResolved {
   decision?: string;
 }
 
+interface OpenClawBuildAttempt {
+  command: string;
+  args: string[];
+  label: string;
+}
+
 // chat event payload shape from the gateway protocol (v3)
 interface ChatContentBlock {
   type: string;
@@ -365,6 +371,21 @@ export class GatewayManager {
     });
   }
 
+  private getOpenClawBuildAttempts(): OpenClawBuildAttempt[] {
+    if (process.platform === "win32") {
+      return [
+        { command: "cmd.exe", args: ["/d", "/s", "/c", "pnpm build"], label: "pnpm build" },
+        { command: "cmd.exe", args: ["/d", "/s", "/c", "npm run build"], label: "npm run build" },
+        { command: "cmd.exe", args: ["/d", "/s", "/c", "corepack pnpm build"], label: "corepack pnpm build" },
+      ];
+    }
+    return [
+      { command: "pnpm", args: ["build"], label: "pnpm build" },
+      { command: "npm", args: ["run", "build"], label: "npm run build" },
+      { command: "corepack", args: ["pnpm", "build"], label: "corepack pnpm build" },
+    ];
+  }
+
   private async ensureOpenClawBuildArtifacts(): Promise<void> {
     if (hasOpenClawBuildEntry(this.openClawRootPath)) {
       return;
@@ -377,25 +398,24 @@ export class GatewayManager {
       throw new Error("OpenClaw bundle is missing dist/entry.(m)js build output. Reinstall Aura with a complete bundled runtime.");
     }
 
-    const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-    const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
-    const attempts: Array<{ command: string; args: string[] }> = [
-      { command: pnpmCommand, args: ["build"] },
-      { command: npmCommand, args: ["run", "build"] },
-    ];
+    const attempts = this.getOpenClawBuildAttempts();
     const failures: string[] = [];
 
     for (const attempt of attempts) {
       try {
-        console.log(`[GatewayManager] OpenClaw build output missing. Running ${attempt.command} ${attempt.args.join(" ")}...`);
+        console.log(`[GatewayManager] OpenClaw build output missing. Running ${attempt.label}...`);
         await this.runOpenClawBuildCommand(attempt.command, attempt.args);
         if (hasOpenClawBuildEntry(this.openClawRootPath)) {
           console.log("[GatewayManager] OpenClaw build artifacts restored.");
           return;
         }
-        failures.push(`${attempt.command} ${attempt.args.join(" ")}: completed but dist/entry.(m)js is still missing.`);
+        const detail = `${attempt.label}: completed but dist/entry.(m)js is still missing.`;
+        failures.push(detail);
+        console.warn(`[GatewayManager] ${detail}`);
       } catch (err) {
-        failures.push(`${attempt.command} ${attempt.args.join(" ")}: ${err instanceof Error ? err.message : String(err)}`);
+        const detail = `${attempt.label}: ${err instanceof Error ? err.message : String(err)}`;
+        failures.push(detail);
+        console.warn(`[GatewayManager] ${detail}`);
       }
     }
 
@@ -487,6 +507,17 @@ export class GatewayManager {
   }
 
   async bootstrap(): Promise<BootstrapState> {
+    if (
+      this.runtimeStatus.phase === "checking"
+      || this.runtimeStatus.phase === "starting"
+      || this.runtimeStatus.phase === "bootstrapping"
+      || this.bootstrapState.stage === "checking-runtime"
+      || this.bootstrapState.stage === "installing-runtime"
+      || this.bootstrapState.stage === "starting-runtime"
+    ) {
+      return this.getBootstrap();
+    }
+
     this.setBootstrap({ stage: "checking-runtime", progress: 15, message: "Checking local OpenClaw runtime." });
     this.setStatus({
       phase: "checking",
