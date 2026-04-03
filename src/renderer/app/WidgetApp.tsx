@@ -5,6 +5,7 @@ import { useAuraStore } from "@renderer/store/useAuraStore";
 import type { AuraStorageShape, WidgetBounds, WidgetVisibilityPayload, OverlayTab } from "@shared/types";
 import { VoicePanel } from "@renderer/components/VoicePanel";
 import { HistoryPanel } from "@renderer/components/HistoryPanel";
+import { ToolsPanel } from "@renderer/components/ToolsPanel";
 import { useWindowInteraction } from "@renderer/hooks/useWindowInteraction";
 
 const COLLAPSED_SIZE = 84;
@@ -351,8 +352,8 @@ const WidgetApp = (): JSX.Element => {
                   <HistoryPanel />
                 </div>
               ) : activeTab === "tools" ? (
-                <div key="tools" className="tab-enter flex-1 flex flex-col items-center justify-center min-h-0 text-aura-muted">
-                    <p className="text-sm font-medium">Coming soon in Desktop...</p>
+                <div key="tools" className="tab-enter flex-1 flex flex-col min-h-0">
+                    <ToolsPanel />
                 </div>
               ) : (
                 <div key="chat" ref={messagesRef} className="tab-enter custom-scroll min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 pb-3">
