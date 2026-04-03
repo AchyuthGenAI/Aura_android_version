@@ -7,7 +7,7 @@ import { useAuraStore } from "@renderer/store/useAuraStore";
 const EXAMPLE_COMMANDS = [
   "Summarize this page and tell me what matters most.",
   "Research this topic and extract the key takeaways.",
-  "Turn this workflow into a reusable automation job.",
+  "Draft a polished reply from the context on this page.",
   "Use my profile to help me complete this form.",
 ];
 
@@ -21,19 +21,18 @@ export const TaskBanner = (): JSX.Element | null => {
     <Card className="border-aura-violet/20 bg-aura-violet/10 px-4 py-3">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-xs uppercase tracking-[0.24em] text-aura-violet">OpenClaw Run</p>
-          <p className="mt-1 text-sm font-semibold text-aura-text">{activeRun.prompt}</p>
-          <p className="mt-1 text-xs text-aura-muted">
-            Status: {activeRun.status} · Surface: {activeRun.surface}
-          </p>
+          <p className="text-xs uppercase tracking-[0.24em] text-aura-violet">Active Task</p>
+          <p className="mt-1 text-sm font-semibold text-aura-text">{activeRun.prompt ?? activeRun.lastTool ?? "Running..."}</p>
+          <p className="mt-1 text-xs text-aura-muted">Status: {activeRun.status}</p>
         </div>
         <div className="flex flex-col items-end gap-2">
-          <span className="rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] text-aura-text">
-            {activeRun.toolCount} tool event{activeRun.toolCount === 1 ? "" : "s"}
-          </span>
-          <span className="rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] text-aura-text">
-            {activeRun.lastTool?.replace(":", " ") ?? "Preparing run"}
-          </span>
+          {activeRun.lastTool && (
+            <span
+              className="rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] text-aura-text"
+            >
+              {activeRun.lastTool}
+            </span>
+          )}
         </div>
       </div>
     </Card>
@@ -152,7 +151,7 @@ export const ChatThread = ({
             {emptyContext === "home" ? "Aura Home" : "What can I do for you?"}
           </h3>
           <p className="mt-2 max-w-[420px] text-sm leading-6 text-aura-muted">
-            Aura wraps a managed local OpenClaw runtime so you can chat, automate the browser and desktop, use bundled skills, and schedule jobs without manual setup.
+            Aura wraps local OpenClaw so users can chat, browse, automate, summarize, and monitor pages without manual setup.
           </p>
         </div>
         <div className="grid w-full max-w-[760px] gap-3 md:grid-cols-2">

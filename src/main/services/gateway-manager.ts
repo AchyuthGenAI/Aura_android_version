@@ -992,7 +992,7 @@ export class GatewayManager {
           const alreadyUp = await this.probePort(port);
           if (alreadyUp) {
             console.log(`[GatewayManager] Port ${port} already in use — connecting to existing gateway.`);
-            await this.connectWebSocket();
+            await this.connectWebSocketWithRetry(3);
           } else {
             console.log(`[GatewayManager] Port ${port} is not open yet; checking gateway process state...`);
             const hasLiveGatewayProcess = this.gatewayProcess !== null && this.gatewayProcess.exitCode === null;
@@ -1011,7 +1011,7 @@ export class GatewayManager {
               throw new Error(`Gateway process started but port ${port} never opened within ${Math.round(portWaitTimeoutMs / 1000)}s`);
             }
             console.log(`[GatewayManager] Port ${port} is open — connecting WebSocket...`);
-            await this.connectWebSocket();
+            await this.connectWebSocketWithRetry(3);
           }
           console.log(`[GatewayManager] WebSocket connected! connected=${this.connected}`);
         })(),
@@ -1535,6 +1535,26 @@ export class GatewayManager {
 
   // --- Private: WebSocket Connection ---
 
+  private async connectWebSocketWithRetry(maxAttempts: number): Promise<void> {
+    let lastError: Error | undefined;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        console.log(`[GatewayManager] WebSocket connect attempt ${attempt}/${maxAttempts}...`);
+        await this.connectWebSocket();
+        return;
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        console.warn(`[GatewayManager] WebSocket connect attempt ${attempt} failed: ${lastError.message}`);
+        if (attempt < maxAttempts) {
+          const delay = attempt * 2000;
+          console.log(`[GatewayManager] Retrying WebSocket in ${delay}ms...`);
+          await new Promise<void>((r) => setTimeout(r, delay));
+        }
+      }
+    }
+    throw lastError ?? new Error("WebSocket connection failed after retries.");
+  }
+
   private connectWebSocket(): Promise<void> {
     return new Promise((resolve, reject) => {
       const port = this.configManager.getGatewayPort();
@@ -1638,7 +1658,7 @@ export class GatewayManager {
           reject(new Error("WebSocket connection timed out."));
           ws.close();
         }
-      }, 10_000);
+      }, 15_000);
     });
   }
 
@@ -1811,6 +1831,10 @@ export class GatewayManager {
     // When it resolves, trigger the onConnected callback.
     const timeout = setTimeout(() => {
       this.pending.delete(connectReq.id);
+      console.warn("[GatewayManager] Connect request timed out (10s) — no response from gateway. Treating as connected.");
+      // The gateway IS listening (port opened, WS connected) but may not implement
+      // the connect handshake response in all versions. Fall through to connected.
+      this.onConnected?.();
     }, 10_000);
 
     this.pending.set(connectReq.id, {

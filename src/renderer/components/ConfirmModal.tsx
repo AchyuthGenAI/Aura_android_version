@@ -16,6 +16,12 @@ export const ConfirmModal = (): JSX.Element | null => {
     return () => clearInterval(id);
   }, [pendingConfirmation?.requestId]);
 
+  useEffect(() => {
+    if (countdown === 0 && pendingConfirmation) {
+      void confirmChatAction(pendingConfirmation.requestId, "deny");
+    }
+  }, [countdown, pendingConfirmation, confirmChatAction]);
+
   if (!pendingConfirmation) return null;
 
   const { requestId, message, step } = pendingConfirmation;
@@ -45,10 +51,10 @@ export const ConfirmModal = (): JSX.Element | null => {
           {/* Description */}
           <div className="mt-4 rounded-[16px] border border-white/8 bg-white/4 px-4 py-3">
             <p className="text-sm text-aura-text">{message}</p>
-            {step.tool && (
+            {step?.tool && (
               <p className="mt-1.5 text-xs text-aura-muted">
                 Tool: <span className="text-amber-400/80">{step.tool}</span>
-                {typeof step.params.selector === "string" && (
+                {step.params && typeof step.params === "object" && "selector" in step.params && typeof step.params.selector === "string" && (
                   <> · Target: <span className="text-aura-muted">{step.params.selector}</span></>
                 )}
               </p>
@@ -56,22 +62,9 @@ export const ConfirmModal = (): JSX.Element | null => {
           </div>
 
           {/* Countdown */}
-          <div className="mt-3 flex items-center justify-center gap-2">
-            <svg width="20" height="20" viewBox="0 0 20 20" className="-rotate-90">
-              <circle cx="10" cy="10" r="8" fill="none" stroke="rgba(245,158,11,0.15)" strokeWidth="2" />
-              <circle
-                cx="10" cy="10" r="8" fill="none"
-                stroke="rgb(245,158,11)" strokeWidth="2"
-                strokeDasharray={`${2 * Math.PI * 8}`}
-                strokeDashoffset={`${2 * Math.PI * 8 * (1 - countdown / 30)}`}
-                strokeLinecap="round"
-                style={{ transition: "stroke-dashoffset 0.9s linear" }}
-              />
-            </svg>
-            <p className="text-[11px] text-aura-muted">
-              Auto-denying in <span className="font-mono text-amber-400">{countdown}s</span>
-            </p>
-          </div>
+          <p className="mt-3 text-center text-[11px] text-aura-muted">
+            Auto-denying in <span className="font-mono text-amber-400">{countdown}s</span>
+          </p>
 
           {/* Buttons */}
           <div className="mt-4 flex gap-3">
@@ -82,16 +75,10 @@ export const ConfirmModal = (): JSX.Element | null => {
               Cancel
             </button>
             <button
-              className="flex-1 rounded-[16px] border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-sm font-semibold text-amber-300 transition hover:bg-amber-500/20"
+              className="flex-1 rounded-[16px] bg-amber-500 px-4 py-2.5 text-sm font-semibold text-black transition hover:bg-amber-400"
               onClick={() => void confirmChatAction(requestId, "allow-once")}
             >
               Allow
-            </button>
-            <button
-              className="flex-1 rounded-[16px] bg-amber-500 px-4 py-2.5 text-sm font-semibold text-black transition hover:bg-amber-400"
-              onClick={() => void confirmChatAction(requestId, "allow-always")}
-            >
-              Always allow
             </button>
           </div>
         </div>

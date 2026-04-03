@@ -2,6 +2,12 @@ import { useEffect, useMemo, useRef } from "react";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 
+
+const normalizeTextContent = (value: unknown): string => {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object" && "text" in value) return String((value as { text: unknown }).text);
+  return value ? String(value) : "";
+};
 import type { ChatThreadMessage, ThemeMode, ToastNotice } from "@shared/types";
 
 const sizeMap = {
@@ -174,10 +180,16 @@ export const MessageBubble = ({
   message: ChatThreadMessage;
   theme: ThemeMode;
 }): JSX.Element => {
+  const content = normalizeTextContent(message.content);
+  const isStreaming = message.status === "streaming";
+
   const html = useMemo(() => {
-    const raw = marked.parse(message.content || "", { breaks: true }) as string;
+    if (isStreaming) {
+      return "";
+    }
+    const raw = marked.parse(content || "", { breaks: true }) as string;
     return DOMPurify.sanitize(raw);
-  }, [message.content]);
+  }, [content, isStreaming]);
 
   const isUser = message.role === "user";
 
@@ -197,10 +209,54 @@ export const MessageBubble = ({
               : theme === "light"
                 ? "rounded-bl-md border border-black/10 bg-white text-slate-800"
                 : "rounded-bl-md border border-white/10 bg-white/6 text-aura-text",
-            message.status === "streaming" ? "animate-pulse-subtle" : ""
+            ""
           ].join(" ")}
         >
-          <div dangerouslySetInnerHTML={{ __html: html }} />
+          {isStreaming ? (
+            <div className="whitespace-pre-wrap break-words">
+              {content}
+              <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse align-middle bg-aura-violet" />
+            </div>
+          ) : (
+            <div dangerouslySetInnerHTML={{ __html: html }} />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export const PendingMessageBubble = ({
+  title,
+  detail
+}: {
+  title: string;
+  detail?: string;
+}): JSX.Element => {
+  return (
+    <div className="flex w-full justify-start">
+      <div className="flex max-w-[86%] gap-3">
+        <div className="mt-1">
+          <AuraLogoBlob size="xs" isTaskRunning />
+        </div>
+        <div className="rounded-[22px] rounded-bl-md border border-aura-violet/20 bg-white/6 px-4 py-3 text-aura-text shadow-sm">
+          <div className="flex items-center gap-2">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-aura-violet/80">
+              {title}
+            </p>
+            <div className="flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-aura-violet/80 animate-bounce" style={{ animationDelay: "0ms" }} />
+              <span className="h-1.5 w-1.5 rounded-full bg-aura-violet/80 animate-bounce" style={{ animationDelay: "150ms" }} />
+              <span className="h-1.5 w-1.5 rounded-full bg-aura-violet/80 animate-bounce" style={{ animationDelay: "300ms" }} />
+            </div>
+          </div>
+          {detail && <p className="mt-2 text-xs leading-5 text-aura-muted">{detail}</p>}
+          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/8">
+            <div
+              className="animate-shimmer h-full rounded-full bg-[linear-gradient(90deg,rgba(124,58,237,0.14),rgba(168,85,247,0.95),rgba(6,182,212,0.2))] bg-[length:200%_100%]"
+              style={{ width: "46%" }}
+            />
+          </div>
         </div>
       </div>
     </div>

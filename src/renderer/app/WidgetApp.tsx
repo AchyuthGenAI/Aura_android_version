@@ -1,12 +1,9 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { AuraLogoBlob, MessageBubble, StatusPill, ToastViewport } from "@renderer/components/primitives";
-import { RunHistoryList } from "@renderer/components/RunHistoryList";
-import { RunTimelineBubble } from "@renderer/components/RunTimelineBubble";
+import { AuraLogoBlob, MessageBubble, PendingMessageBubble, ToastViewport } from "@renderer/components/primitives";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 import type { AuraStorageShape, WidgetBounds, WidgetVisibilityPayload, OverlayTab } from "@shared/types";
 import { VoicePanel } from "@renderer/components/VoicePanel";
-import { ConfirmModal } from "@renderer/components/ConfirmModal";
 import { useWindowInteraction } from "@renderer/hooks/useWindowInteraction";
 
 const COLLAPSED_SIZE = 84;
@@ -16,8 +13,6 @@ const WidgetApp = (): JSX.Element => {
   const hydrated = useAuraStore((state) => state.hydrated);
   const isHydrating = useAuraStore((state) => state.isHydrating);
   const authState = useAuraStore((state) => state.authState);
-  const consentAccepted = useAuraStore((state) => state.consentAccepted);
-  const profileComplete = useAuraStore((state) => state.profileComplete);
   const settings = useAuraStore((state) => state.settings);
   const bootstrapState = useAuraStore((state) => state.bootstrapState);
   const runtimeStatus = useAuraStore((state) => state.runtimeStatus);
@@ -32,15 +27,13 @@ const WidgetApp = (): JSX.Element => {
   const sendMessage = useAuraStore((state) => state.sendMessage);
   const stopMessage = useAuraStore((state) => state.stopMessage);
   const startNewSession = useAuraStore((state) => state.startNewSession);
-  const profile = useAuraStore((state) => state.profile);
   const activeRun = useAuraStore((state) => state.activeRun);
-  const recentRuns = useAuraStore((state) => state.recentRuns);
-  const actionFeed = useAuraStore((state) => state.actionFeed);
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [expanded, setExpanded] = useState(false);
   const [size, setSize] = useState(DEFAULT_WIDGET_SIZE);
   const [activeTab, setActiveTab] = useState<OverlayTab>("chat");
   const messagesRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const positionRef = useRef(position);
   const expandedRef = useRef(expanded);
   const sizeRef = useRef(size);
@@ -104,51 +97,36 @@ const WidgetApp = (): JSX.Element => {
   useEffect(() => {
     const node = messagesRef.current;
     if (node) {
-      node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+      const latest = messages[messages.length - 1];
+      const isStreaming = latest?.role === "assistant" && latest.status === "streaming";
+      const behavior: ScrollBehavior = isStreaming || isLoading ? "auto" : "smooth";
+      const frame = window.requestAnimationFrame(() => {
+        node.scrollTo({ top: node.scrollHeight, behavior });
+      });
+      return () => window.cancelAnimationFrame(frame);
     }
-  }, [messages, activeTab]);
+  }, [messages, activeTab, isLoading, activeRun?.updatedAt]);
 
   const syncWidgetBounds = async (next: {
     position?: { x: number; y: number };
     expanded?: boolean;
     size?: { w: number; h: number };
   }): Promise<void> => {
-    let nextPosition = next.position ?? positionRef.current;
+    const nextPosition = next.position ?? positionRef.current;
     const nextExpanded = next.expanded ?? expandedRef.current;
     const nextSize = next.size ?? sizeRef.current;
-    
-    const minX = (window.screen as any).availLeft || 0;
-    const minY = (window.screen as any).availTop || 0;
-    const screenW = window.screen.availWidth || window.innerWidth || 1920;
-    const screenH = window.screen.availHeight || window.innerHeight || 1080;
-
-    // Use overlay size when expanded, collapsed constant when collapsed
-    const overlayW = Math.max(nextSize.w, DEFAULT_WIDGET_SIZE.w);
-    const overlayH = Math.max(nextSize.h, DEFAULT_WIDGET_SIZE.h);
-    const width = nextExpanded ? Math.min(overlayW, screenW) : COLLAPSED_SIZE;
-    const height = nextExpanded ? Math.min(overlayH, screenH) : COLLAPSED_SIZE;
-
-    const maxX = minX + screenW - width;
-    const maxY = minY + screenH - height;
-
-    nextPosition = {
-      x: Math.max(minX, Math.min(nextPosition.x, maxX)),
-      y: Math.max(minY, Math.min(nextPosition.y, maxY))
-    };
-
     const bounds: WidgetBounds = {
       x: nextPosition.x,
       y: nextPosition.y,
-      width,
-      height
+      width: nextExpanded ? nextSize.w : COLLAPSED_SIZE,
+      height: nextExpanded ? nextSize.h : COLLAPSED_SIZE
     };
 
     await window.auraDesktop.widget.setBounds(bounds);
-    // Always persist the OVERLAY size, never the collapsed size
     await window.auraDesktop.storage.set({
       widgetPosition: nextPosition,
       widgetExpanded: nextExpanded,
-      widgetSize: { w: overlayW, h: overlayH }
+      widgetSize: nextSize
     });
   };
 
@@ -193,35 +171,83 @@ const WidgetApp = (): JSX.Element => {
     }
   });
 
-  const onboardingNeeded = !authState.authenticated || !consentAccepted || !profileComplete;
   const isBootstrapping = !hydrated || isHydrating || (bootstrapState.stage !== "ready" && bootstrapState.stage !== "error");
-  const latestRun = activeRun ?? recentRuns[0] ?? null;
+  const isAuthenticated = authState.authenticated;
 
-  const isTaskActive =
-    activeRun?.status === "queued"
-    || activeRun?.status === "running";
+  const isTaskActive = activeRun?.status === "running";
+  const lastMessage = messages[messages.length - 1];
+  const hasStreamingAssistant = lastMessage?.role === "assistant" && lastMessage.status === "streaming";
+  const isLocalMode = runtimeStatus.phase === "ready" && runtimeStatus.message.toLowerCase().includes("local");
+  const statusLabel = runtimeStatus.phase === "ready" ? (isLocalMode ? "Local" : "Ready") : runtimeStatus.phase;
+  const statusDotClass =
+    runtimeStatus.phase === "ready"
+      ? isLocalMode
+        ? "bg-sky-400"
+        : "bg-[#10b981]"
+      : runtimeStatus.phase === "running"
+        ? "bg-violet-400"
+        : "bg-amber-500";
+  const statusTextClass =
+    runtimeStatus.phase === "ready"
+      ? isLocalMode
+        ? "text-sky-300"
+        : "text-[#10b981]"
+      : runtimeStatus.phase === "running"
+        ? "text-violet-300"
+        : "text-amber-300";
+  const pendingState =
+    activeRun?.status === "running"
+      ? {
+          title: "Working",
+          detail: activeRun.lastTool ?? activeRun.prompt ?? "Running..."
+        }
+      : isLoading
+        ? {
+            title: "Generating",
+            detail: "Aura is preparing a response."
+          }
+        : null;
+  const accountLabel = authState.authenticated
+    ? authState.email || "Signed In"
+    : "Sign In Required";
+
+  useEffect(() => {
+    if (!expanded || activeTab !== "chat" || !isAuthenticated || isBootstrapping) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      const node = textareaRef.current;
+      if (!node) {
+        return;
+      }
+
+      window.focus();
+      node.focus({ preventScroll: true });
+      const caret = node.value.length;
+      try {
+        node.setSelectionRange(caret, caret);
+      } catch {
+        // Ignore selection errors for browsers that block caret placement.
+      }
+    }, 80);
+
+    return () => window.clearTimeout(timeout);
+  }, [expanded, activeTab, isAuthenticated, isBootstrapping]);
 
   if (!expanded) {
     return (
       <div
         className="group relative flex h-full w-full items-center justify-center bg-transparent cursor-pointer transition-transform duration-300 hover:scale-110"
-        onPointerDown={startBubbleDrag}
+        onPointerDown={isAuthenticated ? startBubbleDrag : undefined}
+        onClick={() => {
+          if (!isAuthenticated) {
+            void window.auraDesktop.app.showMainWindow();
+          }
+        }}
       >
         {isTaskActive && (
           <div className="pulse-ring absolute inset-0 rounded-full border-2 border-aura-violet/60" />
-        )}
-        {latestRun && (
-          <div className="absolute -bottom-1.5 -right-1.5 rounded-full border border-white/10 bg-[#12111d]/95 px-2 py-1 shadow-[0_10px_24px_rgba(3,6,20,0.34)]">
-            <p className={`text-[9px] font-semibold uppercase tracking-[0.16em] ${
-              latestRun.status === "done"
-                ? "text-emerald-300"
-                : latestRun.status === "error"
-                  ? "text-rose-300"
-                  : "text-aura-violet"
-            }`}>
-              {latestRun.status}
-            </p>
-          </div>
         )}
         <div className="pointer-events-none scale-[1.25]">
           <AuraLogoBlob size="md" isTaskRunning={runtimeStatus.phase === "running" || isTaskActive} />
@@ -232,7 +258,6 @@ const WidgetApp = (): JSX.Element => {
 
   return (
     <div className="h-full w-full bg-transparent p-2">
-      <ConfirmModal />
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
       <div className="relative flex h-full w-full flex-col overflow-hidden rounded-[32px] border border-white/10 bg-[#12111d] backdrop-blur-[60px]">
         {/* Soft radial background glow inside the container */}
@@ -251,11 +276,11 @@ const WidgetApp = (): JSX.Element => {
               <div className="flex items-center gap-2">
                 <p className="text-[15px] font-bold tracking-tight text-aura-text">Aura</p>
                 <div className="flex items-center gap-1.5 rounded-full bg-black/20 px-2 py-0.5 border border-white/5">
-                  <span className={`h-1.5 w-1.5 rounded-full ${runtimeStatus.phase === "ready" ? "bg-[#10b981]" : "bg-amber-500"}`} />
-                  <p className="text-[10px] uppercase font-semibold tracking-wider text-[#10b981]">{runtimeStatus.phase === "ready" ? "Ready" : runtimeStatus.phase}</p>
+                  <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass}`} />
+                  <p className={`text-[10px] uppercase font-semibold tracking-wider ${statusTextClass}`}>{statusLabel}</p>
                 </div>
               </div>
-              <p className="text-[11px] text-aura-muted leading-tight mt-0.5">{profile?.email || "No Account"}</p>
+              <p className="text-[11px] text-aura-muted leading-tight mt-0.5">{accountLabel}</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -290,7 +315,23 @@ const WidgetApp = (): JSX.Element => {
 
         {/* Content Area */}
         <div className="flex min-h-0 flex-1 flex-col px-5 pb-5 pt-3 relative z-10">
-          {isBootstrapping ? (
+          {!isAuthenticated ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-5 text-center">
+              <AuraLogoBlob size="lg" />
+              <div>
+                <p className="text-base font-medium text-aura-text">Sign in to use Aura</p>
+                <p className="mt-2 text-sm leading-6 text-aura-muted">
+                  Open the main window, sign in once, and Aura will load the shared automation setup automatically.
+                </p>
+              </div>
+              <button
+                className="rounded-[16px] bg-aura-violet px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-aura-violet/90"
+                onClick={() => void window.auraDesktop.app.showMainWindow()}
+              >
+                Open Login
+              </button>
+            </div>
+          ) : isBootstrapping ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-5 text-center">
               <AuraLogoBlob size="lg" isTaskRunning />
               <div>
@@ -298,64 +339,15 @@ const WidgetApp = (): JSX.Element => {
                 <p className="mt-2 text-sm leading-6 text-aura-muted">{bootstrapState.message}</p>
               </div>
             </div>
-          ) : onboardingNeeded ? (
-            <div className="flex flex-1 flex-col items-center justify-center gap-5 text-center px-4">
-              <AuraLogoBlob size="lg" />
-              <div>
-                <p className="text-xl font-semibold tracking-tight text-aura-text">Welcome to Aura</p>
-                <p className="mt-3 text-sm leading-6 text-aura-muted">
-                  Open the main dashboard to finish setup. Once configured, Aura lives right here on your desktop, ready to help.
-                </p>
-              </div>
-              <button
-                className="mt-2 rounded-[18px] bg-aura-gradient px-6 py-3 text-sm font-semibold text-white shadow-aura-glow transition hover:scale-105"
-                onClick={() => void window.auraDesktop.app.showMainWindow()}
-              >
-                Complete Setup
-              </button>
-            </div>
           ) : (
             <>
               {activeTab === "voice" ? (
                 <div className="flex-1 flex flex-col justify-center min-h-0">
                   <VoicePanel active={activeTab === "voice"} />
                 </div>
-              ) : activeTab === "history" ? (
-                <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
-                  <div className="rounded-[22px] border border-white/8 bg-white/[0.03] px-4 py-4">
-                    <p className="text-[11px] uppercase tracking-[0.2em] text-aura-muted">Recent runs</p>
-                    <p className="mt-2 text-sm text-aura-text">Completed OpenClaw runs stay here so you can quickly reopen the main shell and continue from context.</p>
-                  </div>
-                  <RunHistoryList
-                    runs={recentRuns}
-                    compact
-                    emptyMessage="No finished runs yet. Start a chat or automation and the results will appear here."
-                  />
-                </div>
-              ) : activeTab === "tools" ? (
-                <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
-                  <div className="rounded-[22px] border border-white/8 bg-white/[0.03] px-4 py-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-[11px] uppercase tracking-[0.2em] text-aura-muted">Live runtime</p>
-                        <p className="mt-2 text-sm font-semibold text-aura-text">{activeRun ? activeRun.prompt : "No live OpenClaw run"}</p>
-                        <p className="mt-1 text-xs text-aura-muted">{runtimeStatus.message}</p>
-                      </div>
-                      <StatusPill label={activeRun?.status ?? runtimeStatus.phase} tone={runtimeStatus.phase === "ready" ? "success" : runtimeStatus.phase === "error" ? "error" : "warning"} />
-                    </div>
-                  </div>
-                  {activeRun ? (
-                    <RunTimelineBubble />
-                  ) : (
-                    <div className="rounded-[22px] border border-dashed border-white/10 bg-white/[0.03] px-4 py-5 text-sm text-aura-muted">
-                      Tool activity will appear here while OpenClaw is working.
-                    </div>
-                  )}
-                  <div className="grid gap-3 sm:grid-cols-3">
-                    <ToolMetric label="Tool events" value={String(actionFeed.length)} />
-                    <ToolMetric label="Runs" value={String(recentRuns.length)} />
-                    <ToolMetric label="Mode" value={runtimeStatus.phase} />
-                  </div>
+              ) : activeTab === "history" || activeTab === "tools" ? (
+                <div className="flex-1 flex flex-col items-center justify-center min-h-0 text-aura-muted">
+                    <p className="text-sm font-medium">Coming soon in Desktop...</p>
                 </div>
               ) : (
                 <div ref={messagesRef} className="custom-scroll min-h-0 flex-1 space-y-4 overflow-y-auto pr-2 pb-4">
@@ -372,13 +364,29 @@ const WidgetApp = (): JSX.Element => {
                       <MessageBubble key={message.id} message={message} theme={settings.theme} />
                     ))
                   )}
-                  {activeRun && <RunTimelineBubble />}
+                  {pendingState && !hasStreamingAssistant && (
+                    <PendingMessageBubble title={pendingState.title} detail={pendingState.detail} />
+                  )}
                 </div>
               )}
 
               {/* Chat Pill Input (Only visible in Chat mode) */}
               {activeTab === "chat" && (
-                <div className="group relative mt-2 flex items-center rounded-full border border-white/5 bg-[#1e1c2e] px-4 py-3 transition-all focus-within:border-aura-violet/40 focus-within:bg-[#25223a]">
+                <div
+                  className="group relative mt-2 flex items-center rounded-full border border-white/5 bg-[#1e1c2e] px-4 py-3 transition-all focus-within:border-aura-violet/40 focus-within:bg-[#25223a]"
+                  onMouseDown={(event) => {
+                    if ((event.target as HTMLElement | null)?.closest("button")) {
+                      return;
+                    }
+                    window.setTimeout(() => {
+                      const node = textareaRef.current;
+                      if (!node) {
+                        return;
+                      }
+                      node.focus({ preventScroll: true });
+                    }, 0);
+                  }}
+                >
                   <button 
                     className="flex h-8 w-8 items-center justify-center rounded-full text-aura-muted hover:bg-white/10 hover:text-aura-text transition-colors"
                     onClick={() => setActiveTab("voice")}
@@ -390,15 +398,26 @@ const WidgetApp = (): JSX.Element => {
                     </svg>
                   </button>
                   <textarea
+                    ref={textareaRef}
                     value={inputValue}
                     onChange={(event) => setInputValue(event.target.value)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" && !event.shiftKey) {
                         event.preventDefault();
-                        void sendMessage("text");
+                        if (!isLoading && !isTaskActive) {
+                          void sendMessage("text");
+                        }
                       }
                     }}
-                    placeholder="Message Aura..."
+                    autoFocus={expanded && activeTab === "chat"}
+                    id="aura-widget-input"
+                    placeholder={
+                      activeRun?.status === "running"
+                        ? "Aura is working on it..."
+                        : isLoading
+                          ? "Aura is generating a response..."
+                          : "Message Aura..."
+                    }
                     rows={1}
                     className="mx-3 flex-1 resize-none bg-transparent text-[15px] leading-8 text-aura-text outline-none placeholder:text-aura-muted"
                   />
@@ -459,7 +478,7 @@ const WidgetApp = (): JSX.Element => {
         </div>
 
         {/* Custom Resize Handle (bottom-right) */}
-        {!isBootstrapping && !onboardingNeeded && (
+        {isAuthenticated && !isBootstrapping && (
           <div
             className="absolute bottom-1 right-1 z-[100] flex h-10 w-10 cursor-nwse-resize items-end justify-end p-1.5 opacity-50 transition-opacity hover:opacity-100"
             onPointerDown={startResize}
@@ -473,12 +492,5 @@ const WidgetApp = (): JSX.Element => {
     </div>
   );
 };
-
-const ToolMetric = ({ label, value }: { label: string; value: string }): JSX.Element => (
-  <div className="rounded-[18px] border border-white/8 bg-black/20 px-4 py-3">
-    <p className="text-[10px] uppercase tracking-[0.16em] text-aura-muted">{label}</p>
-    <p className="mt-2 truncate text-sm font-semibold text-aura-text capitalize">{value}</p>
-  </div>
-);
 
 export default WidgetApp;

@@ -5,6 +5,7 @@ import { useAuraStore } from "@renderer/store/useAuraStore";
 export const InputBar = ({ compact = false }: { compact?: boolean }): JSX.Element => {
   const inputValue = useAuraStore((s) => s.inputValue);
   const isLoading = useAuraStore((s) => s.isLoading);
+  const activeRun = useAuraStore((s) => s.activeRun);
   const macros = useAuraStore((s) => s.macros);
   const setInputValue = useAuraStore((s) => s.setInputValue);
   const sendMessage = useAuraStore((s) => s.sendMessage);
@@ -56,12 +57,23 @@ export const InputBar = ({ compact = false }: { compact?: boolean }): JSX.Elemen
         <textarea
           ref={textareaRef}
           value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
+          onChange={(e) => {
+            setInputValue(e.target.value);
+            const ta = e.target;
+            ta.style.height = 'auto';
+            ta.style.height = Math.min(ta.scrollHeight, 140) + 'px';
+          }}
           onKeyDown={handleKeyDown}
-          placeholder="Message Aura..."
-          rows={compact ? 1 : 2}
+          placeholder={
+            activeRun?.status === "running"
+              ? "Aura is working on it..."
+              : isLoading
+                  ? "Aura is generating a response..."
+                  : "Ask me anything, or tell me what to do..."
+          }
+          rows={1}
           className="w-full resize-none rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm text-aura-text outline-none transition placeholder:text-aura-muted focus:border-aura-violet/50 focus:bg-white/8"
-          style={{ maxHeight: 140 }}
+          style={{ minHeight: compact ? 36 : 44, maxHeight: 140 }}
         />
         <div className="flex shrink-0 gap-2">
           {isLoading ? (

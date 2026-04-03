@@ -1,10 +1,8 @@
 import { useEffect } from "react";
 
+import { AuthScreen } from "@renderer/components/AuthScreen";
 import { ToastViewport } from "@renderer/components/primitives";
 import { SplashScreen } from "@renderer/components/SplashScreen";
-import { AuthScreen } from "@renderer/components/AuthScreen";
-import { ConsentScreen } from "@renderer/components/ConsentScreen";
-import { ProfileSetupScreen } from "@renderer/components/ProfileSetupScreen";
 import { MainSurface } from "@renderer/components/layout/MainSurface";
 import { ConfirmModal } from "@renderer/components/ConfirmModal";
 import { useAuraStore } from "@renderer/store/useAuraStore";
@@ -13,8 +11,6 @@ export default function App(): JSX.Element {
   const hydrated = useAuraStore((state) => state.hydrated);
   const isHydrating = useAuraStore((state) => state.isHydrating);
   const authState = useAuraStore((state) => state.authState);
-  const consentAccepted = useAuraStore((state) => state.consentAccepted);
-  const profileComplete = useAuraStore((state) => state.profileComplete);
   const settings = useAuraStore((state) => state.settings);
   const bootstrapState = useAuraStore((state) => state.bootstrapState);
   const hydrate = useAuraStore((state) => state.hydrate);
@@ -32,30 +28,16 @@ export default function App(): JSX.Element {
     document.documentElement.setAttribute("data-theme", settings.theme);
   }, [settings.theme]);
 
-  if (!hydrated || isHydrating || (bootstrapState.stage !== "ready" && bootstrapState.stage !== "error")) {
-    return <SplashScreen />;
-  }
-
-  const skipProfile = async (): Promise<void> => {
-    await window.auraDesktop.storage.set({ profileComplete: true });
-    await hydrate();
-  };
-
   return (
     <div className="h-full">
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
       <ConfirmModal />
-      {!authState.authenticated ? (
+      {!hydrated || isHydrating ? (
+        <SplashScreen />
+      ) : !authState.authenticated ? (
         <AuthScreen onDone={hydrate} />
-      ) : !consentAccepted ? (
-        <ConsentScreen
-          onContinue={async () => {
-            await window.auraDesktop.storage.set({ consentAccepted: true });
-            await hydrate();
-          }}
-        />
-      ) : !profileComplete ? (
-        <ProfileSetupScreen onDone={hydrate} onSkip={skipProfile} />
+      ) : bootstrapState.stage !== "ready" && bootstrapState.stage !== "error" ? (
+        <SplashScreen />
       ) : (
         <MainSurface />
       )}
