@@ -3,3 +3,7 @@ dist/
 .env
 .env.local
 .env.*.local
+pnpm-lock.yaml
+output.log
+test-home/.openclaw/workspace/
+build/icon2.png
