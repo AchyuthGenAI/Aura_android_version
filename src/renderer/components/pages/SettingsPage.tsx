@@ -95,6 +95,9 @@ export const SettingsPage = (): JSX.Element => {
                 {runtimeStatus.error && (
                   <p className="mt-2 text-sm text-red-300">{runtimeStatus.error}</p>
                 )}
+                {runtimeStatus.diagnostics?.blockedReason && (
+                  <p className="mt-2 text-sm text-amber-200">{runtimeStatus.diagnostics.blockedReason}</p>
+                )}
                 {notice && (
                   <p className="mt-3 text-sm text-aura-muted">{notice}</p>
                 )}
@@ -186,10 +189,18 @@ export const SettingsPage = (): JSX.Element => {
             <div className="mt-5 space-y-3 text-sm text-aura-muted">
               <DiagnosticRow label="Managed mode" value={runtimeStatus.diagnostics?.managedMode || "openclaw-first"} />
               <DiagnosticRow label="Version" value={runtimeStatus.version || "Pending"} />
+              <DiagnosticRow label="Startup state" value={runtimeStatus.diagnostics?.startupState || runtimeStatus.phase} />
+              <DiagnosticRow label="Bundle integrity" value={runtimeStatus.diagnostics?.bundleIntegrity || "unknown"} />
               <DiagnosticRow label="Gateway URL" value={runtimeStatus.diagnostics?.gatewayUrl || "ws://127.0.0.1:18789"} />
               <DiagnosticRow label="Gateway token" value={runtimeStatus.diagnostics?.gatewayTokenConfigured ? "Configured" : "Missing"} />
               <DiagnosticRow label="Session key" value={runtimeStatus.diagnostics?.sessionKey || "main"} />
               <DiagnosticRow label="Bundle root" value={runtimeStatus.diagnostics?.bundleRootPath || "Pending"} />
+              {runtimeStatus.diagnostics?.missingBundleFiles?.length ? (
+                <DiagnosticRow label="Missing files" value={runtimeStatus.diagnostics.missingBundleFiles.join(", ")} />
+              ) : null}
+              {runtimeStatus.diagnostics?.blockedReason ? (
+                <DiagnosticRow label="Blocked reason" value={runtimeStatus.diagnostics.blockedReason} />
+              ) : null}
               <DiagnosticRow label="Workspace" value={runtimeStatus.workspacePath || "Pending"} />
               <DiagnosticRow label="Last check" value={runtimeStatus.lastCheckedAt ? new Date(runtimeStatus.lastCheckedAt).toLocaleString() : "Pending"} />
             </div>
@@ -256,6 +267,6 @@ const DiagnosticRow = ({
 }): JSX.Element => (
   <div className="flex items-start justify-between gap-4 rounded-[18px] border border-white/[0.06] bg-black/10 px-4 py-3">
     <p className="text-xs uppercase tracking-[0.18em] text-aura-muted">{label}</p>
-    <p className="text-right text-sm text-aura-text">{value}</p>
+    <p className="max-w-[68%] text-right text-sm text-aura-text break-words">{value}</p>
   </div>
 );

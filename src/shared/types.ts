@@ -56,10 +56,14 @@ export interface ManagedProviderState {
 
 export interface RuntimeDiagnostics {
   bundleRootPath?: string;
+  bundleIntegrity?: "ok" | "missing-files" | "unknown";
+  missingBundleFiles?: string[];
   gatewayUrl?: string;
   gatewayTokenConfigured?: boolean;
   sessionKey?: string;
   processRunning?: boolean;
+  startupState?: string;
+  blockedReason?: string;
   managedMode: "openclaw-first";
   supportNote?: string;
 }

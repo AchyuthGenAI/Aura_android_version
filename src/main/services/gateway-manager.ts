@@ -70,6 +70,13 @@ interface OpenClawBuildAttempt {
   label: string;
 }
 
+interface ChatPreflightBlocker {
+  statusMessage: string;
+  errorMessage: string;
+  blockedReason: string;
+  supportNote: string;
+}
+
 // chat event payload shape from the gateway protocol (v3)
 interface ChatContentBlock {
   type: string;
@@ -220,6 +227,7 @@ export class GatewayManager {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private monitorManager: MonitorManager | null = null;
   private readonly openClawBuildTimeoutMs = 12 * 60_000;
+  private lastBundleIntegrityMissingFiles: string[] = [];
   private bootstrapDeadlineMs = 120_000;
   private gatewayPortWaitTimeoutMs = 75_000;
   private gatewayReadyHintTimeoutMs = 20_000;
@@ -321,6 +329,89 @@ export class GatewayManager {
       port: this.configManager.getGatewayPort(),
       processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
       error: this.runtimeStatus.error,
+    };
+  }
+
+  private evaluateBundleIntegrity(rootPath: string | null): { ok: boolean; missingFiles: string[] } {
+    const missingFiles: string[] = [];
+    if (!rootPath) {
+      return { ok: false, missingFiles: ["openclaw.mjs", "package.json", "dist/entry.(m)js"] };
+    }
+
+    if (!fs.existsSync(path.join(rootPath, "openclaw.mjs"))) {
+      missingFiles.push("openclaw.mjs");
+    }
+    if (!fs.existsSync(path.join(rootPath, "package.json"))) {
+      missingFiles.push("package.json");
+    }
+    if (!hasOpenClawBuildEntry(rootPath)) {
+      missingFiles.push("dist/entry.(m)js");
+    }
+    return { ok: missingFiles.length === 0, missingFiles };
+  }
+
+  private async getChatPreflightBlocker(): Promise<ChatPreflightBlocker | null> {
+    if (this.connected) {
+      return null;
+    }
+
+    const phase = this.runtimeStatus.phase;
+    const processRunning = this.gatewayProcess !== null && this.gatewayProcess.exitCode === null;
+    const port = this.configManager.getGatewayPort();
+    const portOpen = await this.probePort(port);
+    const missingFiles = this.runtimeStatus.diagnostics?.missingBundleFiles ?? this.lastBundleIntegrityMissingFiles;
+
+    if (phase === "install-required") {
+      const missingLabel = missingFiles.length ? `Missing bundled files: ${missingFiles.join(", ")}.` : "OpenClaw bundle is missing.";
+      return {
+        statusMessage: "Managed OpenClaw runtime is blocked: bundled files are missing.",
+        errorMessage: `OpenClaw runtime is not ready. ${missingLabel} Reinstall Aura with a complete OpenClaw bundle.`,
+        blockedReason: missingLabel,
+        supportNote: "Reinstall Aura so bundled OpenClaw runtime assets are complete.",
+      };
+    }
+
+    if (phase === "checking" || phase === "bootstrapping" || phase === "starting") {
+      const startupDetail = processRunning || portOpen
+        ? `Gateway is still starting (port ${port} not ready yet).`
+        : "Runtime bootstrap has not finished.";
+      return {
+        statusMessage: "Managed OpenClaw runtime is still starting.",
+        errorMessage: `OpenClaw runtime is still starting. ${startupDetail} Try again in a few seconds.`,
+        blockedReason: startupDetail,
+        supportNote: "Wait for runtime status to become ready, or restart managed runtime from Settings.",
+      };
+    }
+
+    if (phase === "idle") {
+      return {
+        statusMessage: "Managed OpenClaw runtime has not bootstrapped yet.",
+        errorMessage: "OpenClaw runtime has not started yet. Restart the managed runtime from Settings.",
+        blockedReason: "Runtime bootstrap did not run yet.",
+        supportNote: "Use Restart Managed Runtime in Settings and wait for ready state.",
+      };
+    }
+
+    if (phase === "error") {
+      const reason = this.runtimeStatus.error ?? "Runtime startup failed.";
+      const processDetail = processRunning || portOpen
+        ? "Gateway process is present but connection handshake is not healthy."
+        : "Gateway process is not running.";
+      return {
+        statusMessage: "Managed OpenClaw runtime is degraded.",
+        errorMessage: `OpenClaw runtime is unavailable. ${reason}`,
+        blockedReason: `${processDetail} ${reason}`,
+        supportNote: "Restart managed runtime and export support bundle if this keeps happening.",
+      };
+    }
+
+    return {
+      statusMessage: "Managed OpenClaw runtime is unavailable.",
+      errorMessage: "OpenClaw runtime is not connected yet. Restart the managed runtime from Settings and try again.",
+      blockedReason: processRunning || portOpen
+        ? "Gateway process exists but Aura is not connected."
+        : "Gateway process is offline.",
+      supportNote: "Restart managed runtime and confirm the gateway reaches ready state.",
     };
   }
 
@@ -536,13 +627,15 @@ export class GatewayManager {
       degraded: false,
       lastCheckedAt: Date.now(),
       message: "Checking managed OpenClaw runtime.",
-      diagnostics: this.buildDiagnostics(),
+      diagnostics: this.buildDiagnostics({ startupState: "checking" }),
     });
 
     const candidates = this.openClawRootCandidates.map((c) => path.join(c, "openclaw.mjs"));
     this.openClawEntryPath = candidates.find((c) => fs.existsSync(c)) ?? null;
     console.log(`[GatewayManager] Selected OpenClaw entry path: ${this.openClawEntryPath}`);
     this.openClawRootPath = this.openClawEntryPath ? path.dirname(this.openClawEntryPath) : null;
+    const bundleIntegrity = this.evaluateBundleIntegrity(this.openClawRootPath);
+    this.lastBundleIntegrityMissingFiles = bundleIntegrity.missingFiles;
 
     if (!this.openClawEntryPath) {
       this.setBootstrap({
@@ -563,7 +656,39 @@ export class GatewayManager {
         error: `Local OpenClaw entrypoint not found in ${this.openClawRootCandidates.join(", ")}.`,
         diagnostics: this.buildDiagnostics({
           bundleRootPath: this.openClawRootCandidates.join(", "),
+          blockedReason: "OpenClaw runtime entrypoint is missing.",
+          startupState: "install-required",
           supportNote: "Bundle OpenClaw with Aura or place the app beside a compatible checkout.",
+        }),
+      });
+      return this.getBootstrap();
+    }
+
+    if (this.isPackagedApp && !bundleIntegrity.ok) {
+      const missingFiles = bundleIntegrity.missingFiles.join(", ");
+      this.setBootstrap({
+        stage: "error",
+        progress: 100,
+        message: "Bundled OpenClaw runtime is incomplete.",
+        detail: `Missing required bundle files: ${missingFiles}`,
+      });
+      this.setStatus({
+        phase: "install-required",
+        running: false,
+        openClawDetected: true,
+        bundleDetected: false,
+        gatewayConnected: false,
+        degraded: true,
+        lastCheckedAt: Date.now(),
+        message: "Bundled OpenClaw runtime is incomplete.",
+        error: `Missing required bundle files: ${missingFiles}`,
+        diagnostics: this.buildDiagnostics({
+          bundleRootPath: this.openClawRootPath ?? undefined,
+          bundleIntegrity: "missing-files",
+          missingBundleFiles: bundleIntegrity.missingFiles,
+          blockedReason: "Required OpenClaw bundle files are missing.",
+          startupState: "install-required",
+          supportNote: "Reinstall Aura so bundled OpenClaw runtime files are present and compatible.",
         }),
       });
       return this.getBootstrap();
@@ -590,6 +715,7 @@ export class GatewayManager {
           : "Building local OpenClaw runtime artifacts.",
         diagnostics: this.buildDiagnostics({
           bundleRootPath: this.openClawRootPath ?? undefined,
+          startupState: "bootstrapping",
         }),
       });
 
@@ -615,6 +741,8 @@ export class GatewayManager {
           error: detail,
           diagnostics: this.buildDiagnostics({
             bundleRootPath: this.openClawRootPath ?? undefined,
+            blockedReason: "OpenClaw build output is missing.",
+            startupState: "install-required",
             supportNote: this.isPackagedApp
               ? "Reinstall Aura so the bundled OpenClaw runtime includes dist/entry artifacts."
               : "Run `pnpm build` in the OpenClaw source tree and restart Aura.",
@@ -623,6 +751,9 @@ export class GatewayManager {
         return this.getBootstrap();
       }
     }
+
+    const refreshedBundleIntegrity = this.evaluateBundleIntegrity(this.openClawRootPath);
+    this.lastBundleIntegrityMissingFiles = refreshedBundleIntegrity.missingFiles;
 
     this.configManager.ensureDefaults();
     const version = readOpenClawVersion(this.openClawRootPath) ?? "local-source";
@@ -643,6 +774,7 @@ export class GatewayManager {
       diagnostics: this.buildDiagnostics({
         bundleRootPath: this.openClawRootPath ?? undefined,
         processRunning: false,
+        startupState: "starting",
       }),
     });
 
@@ -726,6 +858,8 @@ export class GatewayManager {
       diagnostics: this.buildDiagnostics({
         bundleRootPath: this.openClawRootPath ?? undefined,
         processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
+        startupState: bootstrapSucceeded ? "ready" : "error",
+        blockedReason: bootstrapSucceeded ? undefined : (bootstrapError ?? "OpenClaw gateway bootstrap failed."),
         supportNote: bootstrapSucceeded
           ? "Aura is connected to the managed OpenClaw gateway."
           : "Restart the runtime from Settings after checking the bundled OpenClaw assets.",
@@ -785,6 +919,36 @@ export class GatewayManager {
   }
 
   async sendChat(request: ChatSendRequest): Promise<{ messageId: string; taskId: string }> {
+    console.log(`\n[GatewayManager] sendChat — message="${request.message.slice(0, 80)}" source=${request.source}`);
+    console.log(`[GatewayManager] connected=${this.connected} phase=${this.runtimeStatus.phase}`);
+
+    const preflightBlocker = await this.getChatPreflightBlocker();
+    if (preflightBlocker) {
+      const processRunning = this.gatewayProcess !== null && this.gatewayProcess.exitCode === null;
+      const statusPhase = this.runtimeStatus.phase === "ready" || this.runtimeStatus.phase === "running"
+        ? "error"
+        : this.runtimeStatus.phase;
+      this.setStatus({
+        ...this.runtimeStatus,
+        phase: statusPhase,
+        running: false,
+        gatewayConnected: false,
+        degraded: true,
+        lastCheckedAt: Date.now(),
+        message: preflightBlocker.statusMessage,
+        error: preflightBlocker.errorMessage,
+        diagnostics: this.buildDiagnostics({
+          ...(this.runtimeStatus.diagnostics ?? {}),
+          bundleRootPath: this.openClawRootPath ?? this.runtimeStatus.diagnostics?.bundleRootPath,
+          processRunning,
+          blockedReason: preflightBlocker.blockedReason,
+          startupState: statusPhase,
+          supportNote: preflightBlocker.supportNote,
+        }),
+      });
+      throw new Error(preflightBlocker.errorMessage);
+    }
+
     const messageId = crypto.randomUUID();
     const taskId = crypto.randomUUID();
     this.activeMessageId = messageId;
@@ -801,9 +965,6 @@ export class GatewayManager {
     };
     session.messages.push(userMessage);
     this.persistCurrentSession(session);
-
-    console.log(`\n[GatewayManager] sendChat — message="${request.message.slice(0, 80)}" source=${request.source}`);
-    console.log(`[GatewayManager] connected=${this.connected}`);
 
     const pageContext = await this.browserController.getPageContext();
     console.log(`[GatewayManager] pageContext url="${pageContext?.url ?? "none"}" title="${pageContext?.title ?? "none"}"`);
@@ -1671,13 +1832,23 @@ export class GatewayManager {
   }
 
   private buildDiagnostics(overrides: Partial<RuntimeDiagnostics> = {}): RuntimeDiagnostics {
-    return {
+    const base: RuntimeDiagnostics = {
       managedMode: "openclaw-first",
       gatewayTokenConfigured: Boolean(this.configManager.getGatewayToken()),
       gatewayUrl: `ws://127.0.0.1:${this.configManager.getGatewayPort()}`,
       sessionKey: "main",
-      ...overrides,
+      startupState: this.runtimeStatus?.phase ?? "unknown",
+      bundleIntegrity: this.lastBundleIntegrityMissingFiles.length
+        ? "missing-files"
+        : this.openClawRootPath
+          ? "ok"
+          : "unknown",
     };
+    const diagnostics: RuntimeDiagnostics = { ...base, ...overrides };
+    if (!diagnostics.missingBundleFiles && this.lastBundleIntegrityMissingFiles.length) {
+      diagnostics.missingBundleFiles = [...this.lastBundleIntegrityMissingFiles];
+    }
+    return diagnostics;
   }
 
   private setBootstrap(next: BootstrapState): void {
