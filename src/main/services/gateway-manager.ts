@@ -1762,7 +1762,8 @@ export class GatewayManager {
     const scopes = [...GatewayManager.gatewayOperatorScopes];
     const deviceIdentity = this.loadOrCreateGatewayDeviceIdentity();
     const signedAtMs = Date.now();
-    const signatureToken = token.trim().length ? token.trim() : undefined;
+    const normalizedToken = token.trim();
+    const signatureToken = normalizedToken.length ? normalizedToken : undefined;
     const device = deviceIdentity
       ? (() => {
           const payload = buildDeviceAuthPayload({
@@ -1799,7 +1800,7 @@ export class GatewayManager {
           platform: process.platform,
           mode: "backend",
         },
-        auth: { token },
+        auth: { token: normalizedToken },
         role,
         scopes,
         ...(device ? { device } : {}),
