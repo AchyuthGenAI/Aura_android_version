@@ -207,6 +207,31 @@ function buildDeviceAuthPayloadV3(params: {
   ].join("|");
 }
 
+function buildDeviceAuthPayload(params: {
+  deviceId: string;
+  clientId: string;
+  clientMode: string;
+  role: string;
+  scopes: string[];
+  signedAtMs: number;
+  token?: string | null;
+  nonce: string;
+}): string {
+  const scopes = params.scopes.join(",");
+  const token = params.token ?? "";
+  return [
+    "v2",
+    params.deviceId,
+    params.clientId,
+    params.clientMode,
+    params.role,
+    scopes,
+    String(params.signedAtMs),
+    token,
+    params.nonce,
+  ].join("|");
+}
+
 function parseApprovalRequested(event: string, payload: unknown): ParsedApprovalRequest | null {
   const root = asRecord(payload);
   if (!root) return null;
@@ -1714,7 +1739,7 @@ export class GatewayManager {
     const signatureToken = token.trim().length ? token.trim() : undefined;
     const device = deviceIdentity
       ? (() => {
-          const payload = buildDeviceAuthPayloadV3({
+          const payload = buildDeviceAuthPayload({
             deviceId: deviceIdentity.deviceId,
             clientId: "gateway-client",
             clientMode: "backend",
@@ -1723,8 +1748,6 @@ export class GatewayManager {
             signedAtMs,
             token: signatureToken ?? null,
             nonce,
-            platform: process.platform,
-            deviceFamily: "desktop",
           });
           return {
             id: deviceIdentity.deviceId,
