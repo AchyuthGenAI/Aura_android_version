@@ -322,6 +322,9 @@ const createAppWindows = async (): Promise<void> => {
     );
     activeMonitorManager = new MonitorManager(browserController, store, emit);
     activeGatewayManager.setMonitorManager(activeMonitorManager);
+    activeMonitorManager.setGatewayCallback((message, source = "text") => {
+      void activeGatewayManager!.sendChat({ message, source });
+    });
 
     activeDesktopController = new DesktopController();
     activeGatewayManager.setDesktopController(activeDesktopController);
@@ -448,6 +451,9 @@ const createAppWindows = async (): Promise<void> => {
       activeMonitorManager!.unscheduleJob(payload.id);
     });
     ipcMain.handle(IPC_CHANNELS.automationList, async () => activeMonitorManager!.listJobs());
+    ipcMain.handle(IPC_CHANNELS.automationRunNow, async (_event, payload: { id: string }) => {
+      await activeMonitorManager!.runJobNow(payload.id);
+    });
     ipcMain.handle(IPC_CHANNELS.monitorStart, async (_event, monitor) => {
       activeMonitorManager!.scheduleMonitor(monitor as import("@shared/types").PageMonitor);
     });

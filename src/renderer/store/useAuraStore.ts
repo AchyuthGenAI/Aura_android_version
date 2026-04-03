@@ -136,6 +136,7 @@ type AuraState = {
   monitors: PageMonitor[];
   macros: AuraMacro[];
   skills: SkillSummary[];
+  usedSkillIds: string[];
   toasts: ToastNotice[];
   actionFeed: ToolUsePayload[];
   hydrate: () => Promise<void>;
@@ -158,6 +159,7 @@ type AuraState = {
   startAutomationJob: (job: AutomationJob) => Promise<void>;
   stopAutomationJob: (id: string) => Promise<void>;
   deleteAutomationJob: (id: string) => Promise<void>;
+  runAutomationJobNow: (id: string) => Promise<void>;
   startMonitor: (monitor: PageMonitor) => Promise<void>;
   stopMonitor: (id: string) => Promise<void>;
   deleteMonitor: (id: string) => Promise<void>;
@@ -265,6 +267,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   monitors: [],
   macros: [],
   skills: [],
+  usedSkillIds: [],
   toasts: [],
   actionFeed: [],
 
@@ -483,6 +486,18 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       const trimmed = feed.length > 50 ? feed.slice(feed.length - 50) : feed;
       const updates: Partial<AuraState> = { actionFeed: trimmed };
 
+      // Track which skills were invoked: match the tool name against the skill catalog
+      const currentSkills = get().skills;
+      const matchedSkill = currentSkills.find(
+        (s) => s.id === payload.tool || s.name.toLowerCase() === payload.tool.toLowerCase()
+      );
+      if (matchedSkill) {
+        const current = get().usedSkillIds;
+        if (!current.includes(matchedSkill.id)) {
+          updates.usedSkillIds = [matchedSkill.id, ...current].slice(0, 20);
+        }
+      }
+
       // Auto-navigate browser when OpenClaw uses the browser tool
       if (payload.tool === "browser" && payload.action === "navigate" && typeof payload.params?.url === "string") {
         void get().browserNavigate(payload.params.url as string);
@@ -579,6 +594,10 @@ export const useAuraStore = create<AuraState>((set, get) => ({
     const automationJobs = get().automationJobs.filter((item) => item.id !== id);
     const nextState = await window.auraDesktop.storage.set({ automationJobs, monitors: automationJobs });
     applyStorageState(set, nextState);
+  },
+
+  runAutomationJobNow: async (id) => {
+    await window.auraDesktop.automation.runNow({ id });
   },
 
   startMonitor: async (monitor) => {

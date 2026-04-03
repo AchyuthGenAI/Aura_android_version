@@ -445,30 +445,6 @@ export class GatewayManager {
 
     console.log("[GatewayManager] -> handleQueryIntent (managed OpenClaw)");
     return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
-
-    // ── Route by intent ──
-    if (classification.intent === "query") {
-      console.log("[GatewayManager] → handleQueryIntent");
-      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
-    }
-
-    if (classification.intent === "navigate" && classification.directAction) {
-      console.log("[GatewayManager] → handleDirectAction");
-      return this.handleDirectAction(messageId, taskId, session, request, classification);
-    }
-
-    if (classification.intent === "monitor" && this.monitorManager) {
-      console.log("[GatewayManager] → handleMonitorIntent");
-      return this.handleMonitorIntent(messageId, taskId, session, request, pageContext, apiKey);
-    }
-
-    if (classification.intent === "desktop") {
-      console.log("[GatewayManager] → handleDesktopIntent (vision agent)");
-      return this.handleDesktopIntent(messageId, taskId, session, request);
-    }
-    // task, autofill, or navigate-without-directAction → plan and execute
-    console.log("[GatewayManager] → handleTaskIntent");
-    return this.handleTaskIntent(messageId, taskId, session, request, pageContext, classification);
   }
 
   // ── Query intent: stream LLM response ──────────────────────────────────────
@@ -539,71 +515,6 @@ export class GatewayManager {
   ): Promise<{ messageId: string; taskId: string }> {
     void classification;
     return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
-
-    // When OpenClaw is connected, delegate to the OpenClaw agent — it handles
-    // full multi-step task execution with browser tools, web search, skills, etc.
-    if (this.connected) {
-      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
-    }
-
-    // Emit planning status
-    const planningTask: AuraTask = {
-      id: taskId,
-      command: request.message,
-      status: "planning",
-      createdAt: now(),
-      updatedAt: now(),
-      retries: 0,
-      steps: [],
-    };
-    this.emitProgress(planningTask, { type: "status", statusText: "Planning your task..." });
-
-    // Plan the task
-    let steps: TaskStep[];
-    try {
-      steps = await this.planTask(request.message, pageContext, classification);
-    } catch {
-      // Planning failed → fall back to query mode
-      console.warn("[GatewayManager] Task planning failed, falling back to chat.");
-      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
-    }
-
-    if (steps.length === 0) {
-      // No steps planned → fall back to query
-      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
-    }
-
-    const task: AuraTask = {
-      id: taskId,
-      command: request.message,
-      status: "running",
-      createdAt: now(),
-      updatedAt: now(),
-      retries: 0,
-      steps,
-    };
-
-    this.emitProgress(task, { type: "status", statusText: "Running task..." });
-
-    try {
-      const profile = this.store.getState().profile;
-      const result = await this.taskExecutor.execute({
-        task,
-        browserController: this.browserController,
-        emit: this.emit,
-        confirmStep: (payload) => this.confirmStep(payload),
-        profile,
-      });
-
-      this.handleChatSuccess(messageId, taskId, task, session, request, result || "Task completed.");
-    } catch (err: any) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.handleChatError(messageId, taskId, task, session, message);
-    }
-
-    this.activeMessageId = null;
-    this.activeTaskId = null;
-    return { messageId, taskId };
   }
 
   // ── Monitor intent: extract params and schedule a PageMonitor ────────────
@@ -724,102 +635,6 @@ export class GatewayManager {
   ): Promise<{ messageId: string; taskId: string }> {
     const desktopPersona = "You are currently operating in native Windows desktop mode. Use OpenClaw desktop tools, verify the screen after meaningful actions, and narrate progress clearly.";
     return this.handleQueryIntent(messageId, taskId, session, request, null, desktopPersona);
-
-    console.log(`[GatewayManager] handleDesktopIntent — connected=${this.connected} dc=${Boolean(this.desktopController)}`);
-
-    // When OpenClaw is connected, let the agent handle it
-    if (this.connected) {
-      console.log("[GatewayManager] OpenClaw connected — delegating desktop task to OpenClaw agent");
-      const desktopPersona = "You are currently operating in NATIVE WINDOWS DESKTOP mode. You do not have DOM access. You must use `desktop_screenshot` and `desktop_click`/`desktop_type` to visually analyze and interact with the screen. CRITICAL: AFTER EVERY SINGLE desktop_click OR desktop_type ACTION, YOU MUST YIELD AND CALL `desktop_screenshot` AGAIN to verify the OS responded before proceeding.";
-      return this.handleQueryIntent(messageId, taskId, session, request, null, desktopPersona);
-    }
-
-    if (!this.desktopController) {
-      console.warn("[GatewayManager] desktopController is null — cannot run vision agent");
-      return this.handleQueryIntent(messageId, taskId, session, request, null);
-    }
-
-    // Resolve provider: prioritize Gemini for vision as Groq keys are currently prone to 401s
-    const config = this.configManager.readConfig();
-    let geminiKey = resolveGeminiApiKey(config.providers?.google?.apiKey);
-    let groqKey = resolveGroqApiKey(config.providers?.groq?.apiKey);
-
-    let visionProvider: VisionProvider = geminiKey ? "gemini" : "groq";
-    let apiKey = (visionProvider === "gemini" ? geminiKey : groqKey) as string;
-
-    console.log(`[GatewayManager] LLM for vision: provider=${visionProvider} key=${apiKey ? `${apiKey.slice(0, 8)}...` : "MISSING"}`);
-    if (!apiKey) {
-      console.warn("[GatewayManager] No LLM API key — cannot run vision agent, falling back to chat");
-      return this.handleQueryIntent(messageId, taskId, session, request, null);
-    }
-
-    // Emit a running task so the UI shows progress
-    const task: AuraTask = {
-      id: taskId,
-      command: request.message,
-      status: "running",
-      createdAt: now(),
-      updatedAt: now(),
-      retries: 0,
-      steps: [],
-    };
-    this.emitProgress(task, { type: "status", statusText: "Vision agent starting..." });
-
-    try {
-      console.log("[GatewayManager] Importing vision-agent module...");
-      const { runVisionAgent } = await import("./vision-agent");
-      console.log("[GatewayManager] Starting vision agent for goal:", request.message);
-      const result = await runVisionAgent({
-        goal: request.message,
-        provider: visionProvider,
-        apiKey,
-        dc: this.desktopController!,
-        onBeforeCapture: () => {
-          console.log("[GatewayManager] onBeforeCapture — minimizing windows");
-          this.hideMainWindow?.();
-        },
-        onAfterCapture: () => {
-          console.log("[GatewayManager] onAfterCapture — restoring windows");
-          this.showMainWindow?.();
-        },
-        onToken: (text) => {
-          if (this.activeMessageId) {
-            this.emit({ type: "LLM_TOKEN", payload: { messageId: this.activeMessageId, token: text } });
-          }
-        },
-        onStep: ({ iteration, action }) => {
-          const stepText = "description" in action ? action.description : action.action;
-          const toolMap: Record<string, string> = {
-            click: "desktop_click", double_click: "desktop_double_click",
-            right_click: "desktop_right_click", type: "desktop_type",
-            key: "desktop_key", scroll: "desktop_scroll",
-            wait: "wait", done: "desktop_screenshot", error: "desktop_screenshot",
-          };
-          task.steps.push({
-            index: iteration - 1,
-            tool: (toolMap[action.action] ?? "desktop_screenshot") as import("@shared/types").ToolName,
-            description: stepText,
-            status: "done",
-            params: {},
-          });
-          task.updatedAt = now();
-          this.emitProgress(task, { type: "step_done", statusText: stepText });
-        },
-      });
-
-      console.log("[GatewayManager] Vision agent finished, result:", result.slice(0, 120));
-      task.status = "done";
-      task.updatedAt = now();
-      this.handleChatSuccess(messageId, taskId, task, session, request, result);
-    } catch (err: any) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error("[GatewayManager] Vision agent threw:", message);
-      this.handleChatError(messageId, taskId, task, session, message);
-    }
-
-    this.activeMessageId = null;
-    this.activeTaskId = null;
-    return { messageId, taskId };
   }
 
   // ── Task planner: LLM generates step array ──────────────────────────────
