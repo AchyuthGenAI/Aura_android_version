@@ -84,6 +84,7 @@ Key state:
 - shifted chat/widget/live banner UI from legacy task progress to run-native timeline events
 - aligned voice mode lifecycle with OpenClaw run/tool events and removed duplicate renderer event forwarding
 - refreshed shared UI primitives and Splash screen loading presentation for stronger visual consistency
+- completely overhauled the floating desktop Widget UI (added History and Tools panel, premium glassmorphism, responsive chat bubbles).
 
 ## Remaining Work
 

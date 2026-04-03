@@ -80,10 +80,11 @@ The renderer is now structured as a managed app shell:
 
 ## Current Product Direction
 
-The repo is mid-migration toward a cleaner managed-runtime model. When editing:
+The repo is completing its migration toward a cleaner managed-runtime model with OpenClaw. When editing:
 - prefer OpenClaw execution paths over local fallback execution
 - treat user-facing settings as a runtime dashboard, not a raw config editor
 - prefer “automation jobs” wording over “monitors” in new UX unless you are touching compatibility code
+- maintain the highly polished "Achyuth UI" design language in the Renderer components (glassmorphism overlays, spring-loaded buttons, rich responsive gradients).
 
 ## Verification Baseline
 

@@ -119,6 +119,7 @@ Implemented in the codebase:
 - managed voice key behavior with no user-facing key editing path
 - confirmation pipeline wired to gateway approval events with native decisions (`allow-once`, `allow-always`, `deny`)
 - support-bundle export path from Settings for diagnostics/troubleshooting
+- completely overhauled the floating desktop Widget UI (added History and Tools panels, responsive chat bubbles, premium glassmorphism layout)
 
 Still to deepen:
 - remove more dormant legacy execution code in the main process

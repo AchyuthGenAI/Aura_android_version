@@ -55,9 +55,18 @@
 - [x] Add support export for logs/traces
 - [ ] Verify packaged Windows bootstrap on a clean machine
 
+### Gateway & UI Stabilization (Recent)
+- [x] Implement WebSocket retry loop and resilient bootstrapping for OpenClaw Gateway.
+- [x] Sync 53 foundational OpenClaw skills into workspace.
+- [x] Revamp Widget UI with deep glassmorphism and tactile micro-animations.
+- [x] Build out unified HistoryPanel in Widget.
+- [x] Build out native ToolsPanel in Widget.
+- [x] Polish Chat Bubble layout, typography, and pending states.
+
 ## Current Verification
 
 - [x] `npm run typecheck`
+- [x] Automated WebSocket reconnection checks out locally.
 
 ## Notes
 
