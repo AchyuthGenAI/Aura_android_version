@@ -74,7 +74,7 @@ export const MonitorsPage = (): JSX.Element => {
   const [runningNow, setRunningNow] = useState<string | null>(null);
   const [expandedHistory, setExpandedHistory] = useState<string | null>(null);
 
-  const selectedKindOption = JOB_KIND_OPTIONS.find((o) => o.value === draft.kind)!;
+  const selectedKindOption = JOB_KIND_OPTIONS.find((o) => o.value === draft.kind) ?? JOB_KIND_OPTIONS[0]!;
   const isOnce = selectedKindOption.defaultScheduleMode === "once";
   const isCron = selectedKindOption.defaultScheduleMode === "cron";
 
@@ -333,7 +333,7 @@ export const MonitorsPage = (): JSX.Element => {
                         className="flex w-full items-center justify-between text-[11px] uppercase tracking-[0.14em] text-aura-muted hover:text-aura-text transition"
                         onClick={() => setExpandedHistory(expandedHistory === job.id ? null : job.id)}
                       >
-                        <span>Run History ({job.runHistory!.length})</span>
+                        <span>Run History ({job.runHistory?.length ?? 0})</span>
                         <svg
                           width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
                           className={`transition-transform ${expandedHistory === job.id ? "rotate-180" : ""}`}
@@ -343,7 +343,7 @@ export const MonitorsPage = (): JSX.Element => {
                       </button>
                       {expandedHistory === job.id && (
                         <div className="mt-3 max-h-[220px] space-y-2 overflow-y-auto">
-                          {[...job.runHistory!].reverse().map((run) => (
+                          {[...(job.runHistory ?? [])].reverse().map((run) => (
                             <div
                               key={run.runId ?? run.startedAt}
                               className="flex items-start justify-between gap-3 rounded-[14px] border border-white/[0.06] bg-black/10 px-3 py-2"

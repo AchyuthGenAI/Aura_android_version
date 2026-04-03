@@ -81,16 +81,20 @@ export class MonitorManager {
       return;
     }
 
-    if (mode === "cron" && job.schedule.cron && cronValidate(job.schedule.cron)) {
-      const task = cronSchedule(job.schedule.cron, () => {
-        void this.checkJob(job.id);
-      }, { timezone: job.schedule.timezone });
-      this.cronTasks.set(job.id, task);
-      this.patchJob(job.id, {
-        status: "active",
-        updatedAt: Date.now(),
-      });
-      return;
+    if (mode === "cron") {
+      if (job.schedule.cron && cronValidate(job.schedule.cron)) {
+        const task = cronSchedule(job.schedule.cron, () => {
+          void this.checkJob(job.id);
+        }, { timezone: job.schedule.timezone });
+        this.cronTasks.set(job.id, task);
+        this.patchJob(job.id, {
+          status: "active",
+          updatedAt: Date.now(),
+        });
+        return;
+      } else {
+        console.error(`[MonitorManager] Invalid or missing cron expression for job "${job.id}": "${job.schedule.cron ?? ""}". Falling back to interval mode.`);
+      }
     }
 
     // Default: interval mode
