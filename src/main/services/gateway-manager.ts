@@ -70,6 +70,12 @@ interface OpenClawBuildAttempt {
   label: string;
 }
 
+interface GatewayDeviceIdentity {
+  deviceId: string;
+  publicKeyPem: string;
+  privateKeyPem: string;
+}
+
 interface ChatPreflightBlocker {
   statusMessage: string;
   errorMessage: string;
@@ -142,6 +148,65 @@ function isBrokenPipeError(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { code?: string }).code === "EPIPE";
 }
 
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+function base64UrlEncode(value: Buffer): string {
+  return value.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
+}
+
+function derivePublicKeyRaw(publicKeyPem: string): Buffer {
+  const key = crypto.createPublicKey(publicKeyPem);
+  const spki = key.export({ type: "spki", format: "der" }) as Buffer;
+  if (
+    spki.length === ED25519_SPKI_PREFIX.length + 32 &&
+    spki.subarray(0, ED25519_SPKI_PREFIX.length).equals(ED25519_SPKI_PREFIX)
+  ) {
+    return spki.subarray(ED25519_SPKI_PREFIX.length);
+  }
+  return spki;
+}
+
+function publicKeyRawBase64UrlFromPem(publicKeyPem: string): string {
+  return base64UrlEncode(derivePublicKeyRaw(publicKeyPem));
+}
+
+function signDevicePayload(privateKeyPem: string, payload: string): string {
+  const key = crypto.createPrivateKey(privateKeyPem);
+  const sig = crypto.sign(null, Buffer.from(payload, "utf8"), key);
+  return base64UrlEncode(sig);
+}
+
+function buildDeviceAuthPayloadV3(params: {
+  deviceId: string;
+  clientId: string;
+  clientMode: string;
+  role: string;
+  scopes: string[];
+  signedAtMs: number;
+  token?: string | null;
+  nonce: string;
+  platform?: string | null;
+  deviceFamily?: string | null;
+}): string {
+  const scopes = params.scopes.join(",");
+  const token = params.token ?? "";
+  const platform = (params.platform ?? "").trim().toLowerCase();
+  const deviceFamily = (params.deviceFamily ?? "").trim().toLowerCase();
+  return [
+    "v3",
+    params.deviceId,
+    params.clientId,
+    params.clientMode,
+    params.role,
+    scopes,
+    String(params.signedAtMs),
+    token,
+    params.nonce,
+    platform,
+    deviceFamily,
+  ].join("|");
+}
+
 function parseApprovalRequested(event: string, payload: unknown): ParsedApprovalRequest | null {
   const root = asRecord(payload);
   if (!root) return null;
@@ -211,6 +276,14 @@ function parseApprovalResolved(payload: unknown): ParsedApprovalResolved | null 
 }
 
 export class GatewayManager {
+  private static readonly gatewayOperatorScopes = [
+    "operator.admin",
+    "operator.read",
+    "operator.write",
+    "operator.approvals",
+    "operator.pairing",
+  ] as const;
+
   private gatewayProcess: ChildProcess | null = null;
   private ws: WebSocket | null = null;
   private connected = false;
@@ -230,6 +303,7 @@ export class GatewayManager {
 
   private reconnectTimer: NodeJS.Timeout | null = null;
   private monitorManager: MonitorManager | null = null;
+  private gatewayDeviceIdentity: GatewayDeviceIdentity | null = null;
   private readonly openClawBuildTimeoutMs = 12 * 60_000;
   private lastBundleIntegrityMissingFiles: string[] = [];
   private bootstrapDeadlineMs = 120_000;
@@ -257,6 +331,63 @@ export class GatewayManager {
       if (!isBrokenPipeError(error)) {
         // Prevent logging failures from crashing the managed runtime process.
       }
+    }
+  }
+
+  private loadOrCreateGatewayDeviceIdentity(): GatewayDeviceIdentity | null {
+    if (this.gatewayDeviceIdentity) {
+      return this.gatewayDeviceIdentity;
+    }
+    try {
+      const filePath = path.join(this.configManager.getOpenClawHomePath(), ".openclaw", "identity", "aura-device.json");
+      const fromDisk = (): GatewayDeviceIdentity | null => {
+        if (!fs.existsSync(filePath)) {
+          return null;
+        }
+        const raw = fs.readFileSync(filePath, "utf8");
+        const parsed = JSON.parse(raw) as Partial<GatewayDeviceIdentity>;
+        if (
+          typeof parsed.deviceId === "string" &&
+          typeof parsed.publicKeyPem === "string" &&
+          typeof parsed.privateKeyPem === "string" &&
+          parsed.deviceId.trim().length > 0 &&
+          parsed.publicKeyPem.trim().length > 0 &&
+          parsed.privateKeyPem.trim().length > 0
+        ) {
+          return {
+            deviceId: parsed.deviceId,
+            publicKeyPem: parsed.publicKeyPem,
+            privateKeyPem: parsed.privateKeyPem,
+          };
+        }
+        return null;
+      };
+
+      const existing = fromDisk();
+      if (existing) {
+        this.gatewayDeviceIdentity = existing;
+        return existing;
+      }
+
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+      const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+      const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+      const deviceId = crypto.createHash("sha256").update(derivePublicKeyRaw(publicKeyPem)).digest("hex");
+      const created: GatewayDeviceIdentity = { deviceId, publicKeyPem, privateKeyPem };
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, `${JSON.stringify(created, null, 2)}\n`, { mode: 0o600 });
+      try {
+        fs.chmodSync(filePath, 0o600);
+      } catch {
+        // best effort
+      }
+      this.gatewayDeviceIdentity = created;
+      return created;
+    } catch (error) {
+      this.safeConsoleWarn(
+        `[GatewayManager] Device identity setup failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return null;
     }
   }
 
@@ -1527,7 +1658,13 @@ export class GatewayManager {
       const evt = msg as unknown as EventFrame;
 
       if (evt.event === "connect.challenge") {
-        this.sendConnectFrame(token);
+        const payload = asRecord(evt.payload);
+        const nonce = asNonEmptyString(payload?.nonce);
+        if (!nonce) {
+          this.safeConsoleWarn("[GatewayManager] connect.challenge missing nonce.");
+          return;
+        }
+        this.sendConnectFrame(token, nonce);
         return;
       }
 
@@ -1568,8 +1705,36 @@ export class GatewayManager {
     }
   }
 
-  private sendConnectFrame(token: string): void {
+  private sendConnectFrame(token: string, nonce: string): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const role = "operator";
+    const scopes = [...GatewayManager.gatewayOperatorScopes];
+    const deviceIdentity = this.loadOrCreateGatewayDeviceIdentity();
+    const signedAtMs = Date.now();
+    const signatureToken = token.trim().length ? token.trim() : undefined;
+    const device = deviceIdentity
+      ? (() => {
+          const payload = buildDeviceAuthPayloadV3({
+            deviceId: deviceIdentity.deviceId,
+            clientId: "gateway-client",
+            clientMode: "backend",
+            role,
+            scopes,
+            signedAtMs,
+            token: signatureToken ?? null,
+            nonce,
+            platform: process.platform,
+            deviceFamily: "desktop",
+          });
+          return {
+            id: deviceIdentity.deviceId,
+            publicKey: publicKeyRawBase64UrlFromPem(deviceIdentity.publicKeyPem),
+            signature: signDevicePayload(deviceIdentity.privateKeyPem, payload),
+            signedAt: signedAtMs,
+            nonce,
+          };
+        })()
+      : undefined;
 
     const connectReq = {
       type: "req",
@@ -1586,8 +1751,9 @@ export class GatewayManager {
           mode: "backend",
         },
         auth: { token },
-        role: "operator",
-        scopes: ["operator.admin", "operator.read", "operator.write", "operator.approvals", "operator.pairing"],
+        role,
+        scopes,
+        ...(device ? { device } : {}),
       },
     };
 
