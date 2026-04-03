@@ -300,6 +300,28 @@ function parseApprovalResolved(payload: unknown): ParsedApprovalResolved | null 
   return { id, decision };
 }
 
+function decodeWsRawData(data: unknown): string {
+  if (typeof data === "string") {
+    return data;
+  }
+  if (Buffer.isBuffer(data)) {
+    return data.toString("utf8");
+  }
+  if (data instanceof ArrayBuffer) {
+    return Buffer.from(data).toString("utf8");
+  }
+  if (Array.isArray(data)) {
+    const chunks = data
+      .map((entry) => {
+        if (Buffer.isBuffer(entry)) return entry;
+        if (entry instanceof ArrayBuffer) return Buffer.from(entry);
+        return Buffer.from(String(entry), "utf8");
+      });
+    return Buffer.concat(chunks).toString("utf8");
+  }
+  return String(data);
+}
+
 export class GatewayManager {
   private static readonly gatewayOperatorScopes = [
     "operator.admin",
@@ -1552,12 +1574,16 @@ export class GatewayManager {
       });
 
       ws.on("message", (data) => {
-        const raw = typeof data === "string" ? data : data.toString("utf8");
+        const raw = decodeWsRawData(data);
         try {
           const parsed = JSON.parse(raw);
           this.handleWsMessage(parsed, token);
-        } catch {
-          // ignore parse errors
+        } catch (error) {
+          this.safeConsoleWarn(
+            `[GatewayManager] Ignoring non-JSON gateway frame during handshake: ${
+              error instanceof Error ? error.message : String(error)
+            } :: ${raw.slice(0, 180)}`
+          );
         }
       });
 
