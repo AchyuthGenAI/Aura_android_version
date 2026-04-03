@@ -203,12 +203,12 @@ export const MessageBubble = ({
         )}
         <div
           className={[
-            "message-bubble prose prose-invert max-w-none rounded-[22px] px-4 py-3 text-sm leading-6 shadow-sm",
+            "message-bubble msg-enter prose prose-invert max-w-none px-4 py-[10px] text-[14.5px] leading-relaxed shadow-sm",
             isUser
-              ? "rounded-br-md bg-aura-gradient text-white"
+              ? "rounded-[22px] rounded-br-[6px] bg-aura-gradient text-white shadow-[0_4px_16px_rgba(124,58,237,0.15)]"
               : theme === "light"
-                ? "rounded-bl-md border border-black/10 bg-white text-slate-800"
-                : "rounded-bl-md border border-white/10 bg-white/6 text-aura-text",
+                ? "rounded-[22px] rounded-bl-[6px] border border-black/10 bg-white text-slate-800"
+                : "rounded-[22px] rounded-bl-[6px] border border-white/10 bg-[#1e1c2e] text-aura-text shadow-[0_4px_24px_rgba(0,0,0,0.1)]",
             ""
           ].join(" ")}
         >
@@ -234,23 +234,23 @@ export const PendingMessageBubble = ({
   detail?: string;
 }): JSX.Element => {
   return (
-    <div className="flex w-full justify-start">
+    <div className="flex w-full justify-start msg-enter">
       <div className="flex max-w-[86%] gap-3">
-        <div className="mt-1">
+        <div className="mt-1 flex-shrink-0">
           <AuraLogoBlob size="xs" isTaskRunning />
         </div>
-        <div className="rounded-[22px] rounded-bl-md border border-aura-violet/20 bg-white/6 px-4 py-3 text-aura-text shadow-sm">
-          <div className="flex items-center gap-2">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-aura-violet/80">
+        <div className="rounded-[22px] rounded-bl-[6px] border border-aura-violet/20 bg-[#1e1c2e] px-4 py-2.5 text-aura-text shadow-[0_4px_24px_rgba(124,58,237,0.08)]">
+          <div className="flex items-center gap-[6px]">
+            <p className="text-[11px] font-bold uppercase tracking-widest text-[#bca5ff]">
               {title}
             </p>
-            <div className="flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-aura-violet/80 animate-bounce" style={{ animationDelay: "0ms" }} />
-              <span className="h-1.5 w-1.5 rounded-full bg-aura-violet/80 animate-bounce" style={{ animationDelay: "150ms" }} />
-              <span className="h-1.5 w-1.5 rounded-full bg-aura-violet/80 animate-bounce" style={{ animationDelay: "300ms" }} />
+            <div className="flex items-center gap-[3px] mt-[1px]">
+              <span className="h-[4px] w-[4px] rounded-full bg-[#bca5ff] animate-bounce" style={{ animationDelay: "0ms" }} />
+              <span className="h-[4px] w-[4px] rounded-full bg-[#bca5ff] animate-bounce" style={{ animationDelay: "150ms" }} />
+              <span className="h-[4px] w-[4px] rounded-full bg-[#bca5ff] animate-bounce" style={{ animationDelay: "300ms" }} />
             </div>
           </div>
-          {detail && <p className="mt-2 text-xs leading-5 text-aura-muted">{detail}</p>}
+          {detail && <p className="mt-1 text-[13px] text-aura-muted leading-snug truncate max-w-[200px]">{detail}</p>}
           <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/8">
             <div
               className="animate-shimmer h-full rounded-full bg-[linear-gradient(90deg,rgba(124,58,237,0.14),rgba(168,85,247,0.95),rgba(6,182,212,0.2))] bg-[length:200%_100%]"

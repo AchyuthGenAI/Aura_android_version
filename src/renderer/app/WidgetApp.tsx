@@ -4,6 +4,7 @@ import { AuraLogoBlob, MessageBubble, PendingMessageBubble, ToastViewport } from
 import { useAuraStore } from "@renderer/store/useAuraStore";
 import type { AuraStorageShape, WidgetBounds, WidgetVisibilityPayload, OverlayTab } from "@shared/types";
 import { VoicePanel } from "@renderer/components/VoicePanel";
+import { HistoryPanel } from "@renderer/components/HistoryPanel";
 import { useWindowInteraction } from "@renderer/hooks/useWindowInteraction";
 
 const COLLAPSED_SIZE = 84;
@@ -259,7 +260,7 @@ const WidgetApp = (): JSX.Element => {
   return (
     <div className="h-full w-full bg-transparent p-2">
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
-      <div className="relative flex h-full w-full flex-col overflow-hidden rounded-[32px] border border-white/10 bg-[#12111d] backdrop-blur-[60px]">
+      <div className="relative flex h-full w-full flex-col overflow-hidden rounded-[32px] glass-panel">
         {/* Soft radial background glow inside the container */}
         <div className="absolute inset-x-0 -top-[10%] h-[60%] bg-[#7c3aed]/15 blur-[100px] pointer-events-none" />
         
@@ -314,7 +315,7 @@ const WidgetApp = (): JSX.Element => {
         </div>
 
         {/* Content Area */}
-        <div className="flex min-h-0 flex-1 flex-col px-5 pb-5 pt-3 relative z-10">
+        <div className="flex min-h-0 flex-1 flex-col px-4 pb-3 pt-2 relative z-10">
           {!isAuthenticated ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-5 text-center">
               <AuraLogoBlob size="lg" />
@@ -342,15 +343,19 @@ const WidgetApp = (): JSX.Element => {
           ) : (
             <>
               {activeTab === "voice" ? (
-                <div className="flex-1 flex flex-col justify-center min-h-0">
+                <div key="voice" className="tab-enter flex-1 flex flex-col justify-center min-h-0">
                   <VoicePanel active={activeTab === "voice"} />
                 </div>
-              ) : activeTab === "history" || activeTab === "tools" ? (
-                <div className="flex-1 flex flex-col items-center justify-center min-h-0 text-aura-muted">
+              ) : activeTab === "history" ? (
+                <div key="history" className="tab-enter flex-1 flex flex-col min-h-0">
+                  <HistoryPanel />
+                </div>
+              ) : activeTab === "tools" ? (
+                <div key="tools" className="tab-enter flex-1 flex flex-col items-center justify-center min-h-0 text-aura-muted">
                     <p className="text-sm font-medium">Coming soon in Desktop...</p>
                 </div>
               ) : (
-                <div ref={messagesRef} className="custom-scroll min-h-0 flex-1 space-y-4 overflow-y-auto pr-2 pb-4">
+                <div key="chat" ref={messagesRef} className="tab-enter custom-scroll min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 pb-3">
                   {messages.length === 0 ? (
                     <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
                       <AuraLogoBlob size="lg" />
@@ -373,7 +378,7 @@ const WidgetApp = (): JSX.Element => {
               {/* Chat Pill Input (Only visible in Chat mode) */}
               {activeTab === "chat" && (
                 <div
-                  className="group relative mt-2 flex items-center rounded-full border border-white/5 bg-[#1e1c2e] px-4 py-3 transition-all focus-within:border-aura-violet/40 focus-within:bg-[#25223a]"
+                  className="group relative mt-2 flex items-center rounded-full border border-white/5 bg-[#1e1c2e] px-4 py-3 transition-all duration-200 ease-out focus-within:border-aura-violet/50 focus-within:bg-[#25223a] focus-within:shadow-[0_0_24px_rgba(124,58,237,0.15)] focus-within:scale-[1.01]"
                   onMouseDown={(event) => {
                     if ((event.target as HTMLElement | null)?.closest("button")) {
                       return;
@@ -439,7 +444,7 @@ const WidgetApp = (): JSX.Element => {
                       </button>
                     ) : (
                       <button
-                        className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${!inputValue.trim() ? "text-aura-muted bg-transparent hover:bg-white/10 hover:text-aura-text" : "bg-white/10 text-aura-text hover:bg-white/20"}`}
+                        className={`flex h-8 w-8 items-center justify-center rounded-full transition-all duration-200 ease-out active:scale-90 ${!inputValue.trim() ? "text-aura-muted bg-transparent hover:bg-white/10 hover:text-aura-text" : "bg-white/10 text-aura-text hover:bg-white/20 hover:shadow-[0_0_12px_rgba(124,58,237,0.3)]"}`}
                         onClick={() => void sendMessage("text")}
                         disabled={!inputValue.trim()}
                       >
@@ -454,7 +459,7 @@ const WidgetApp = (): JSX.Element => {
               )}
 
               {/* Bottom Navigation Area (Floating Pill Mode) */}
-              <div className="mt-4 flex items-center justify-between rounded-[24px] border border-white/10 bg-[#1a1926]/60 p-1.5 backdrop-blur-md shadow-lg">
+              <div className="mt-2 flex items-center justify-between rounded-[24px] border border-white/10 bg-[#1a1926]/60 p-1.5 backdrop-blur-md shadow-lg">
                 {[
                   { id: "voice", label: "Voice", icon: <><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></> },
                   { id: "chat", label: "Chat", icon: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/> },
@@ -464,7 +469,7 @@ const WidgetApp = (): JSX.Element => {
                   <button
                     key={tab.id}
                     onClick={() => setActiveTab(tab.id as OverlayTab)}
-                    className={`flex flex-1 flex-col items-center justify-center gap-1.5 rounded-[18px] py-3.5 transition-all ${activeTab === tab.id ? "bg-[#35235d] text-[#bca5ff] shadow-inner" : "text-aura-muted hover:bg-white/5 hover:text-aura-text"}`}
+                    className={`flex flex-1 flex-col items-center justify-center gap-1.5 rounded-[18px] py-3 transition-all duration-200 ease-out active:scale-[0.96] ${activeTab === tab.id ? "bg-[#35235d] text-[#bca5ff] shadow-inner border border-[#bca5ff]/20" : "text-aura-muted hover:bg-white/5 hover:text-aura-text border border-transparent"}`}
                   >
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       {tab.icon}
