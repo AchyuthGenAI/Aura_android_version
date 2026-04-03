@@ -76,8 +76,10 @@
   },
   "dependencies": {
     "@nut-tree-fork/nut-js": "^4.2.6",
+    "@types/node-cron": "^3.0.11",
     "dompurify": "^3.3.3",
     "marked": "^17.0.4",
+    "node-cron": "^4.2.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "ws": "^8.20.0",

@@ -40,6 +40,7 @@ export const IPC_CHANNELS = {
   automationStart: "aura:automation:start",
   automationStop: "aura:automation:stop",
   automationList: "aura:automation:list",
+  automationRunNow: "aura:automation:run-now",
   monitorStart: "aura:monitor:start",
   monitorStop: "aura:monitor:stop",
   monitorList: "aura:monitor:list",
