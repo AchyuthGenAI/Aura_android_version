@@ -138,6 +138,10 @@ function asNonEmptyString(value: unknown): string | null {
   return trimmed.length ? trimmed : null;
 }
 
+function isBrokenPipeError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { code?: string }).code === "EPIPE";
+}
+
 function parseApprovalRequested(event: string, payload: unknown): ParsedApprovalRequest | null {
   const root = asRecord(payload);
   if (!root) return null;
@@ -234,6 +238,26 @@ export class GatewayManager {
 
   setMonitorManager(mm: MonitorManager): void {
     this.monitorManager = mm;
+  }
+
+  private safeConsoleLog(line: string): void {
+    try {
+      console.log(line);
+    } catch (error) {
+      if (!isBrokenPipeError(error)) {
+        // Prevent logging failures from crashing the managed runtime process.
+      }
+    }
+  }
+
+  private safeConsoleWarn(line: string): void {
+    try {
+      console.warn(line);
+    } catch (error) {
+      if (!isBrokenPipeError(error)) {
+        // Prevent logging failures from crashing the managed runtime process.
+      }
+    }
   }
 
   private inferSurface(classification: Classification, pageContext: PageContext | null): OpenClawRunSurface {
@@ -438,13 +462,13 @@ export class GatewayManager {
       child.stdout?.on("data", (chunk: Buffer) => {
         const text = chunk.toString("utf8");
         appendOutput(text);
-        console.log(`[OpenClaw build:${command}] ${text.trimEnd()}`);
+        this.safeConsoleLog(`[OpenClaw build:${command}] ${text.trimEnd()}`);
       });
 
       child.stderr?.on("data", (chunk: Buffer) => {
         const text = chunk.toString("utf8");
         appendOutput(text);
-        console.warn(`[OpenClaw build:${command}] ${text.trimEnd()}`);
+        this.safeConsoleWarn(`[OpenClaw build:${command}] ${text.trimEnd()}`);
       });
 
       const timeout = setTimeout(() => {
@@ -1278,13 +1302,13 @@ export class GatewayManager {
       child.stderr?.on("data", (chunk: Buffer) => {
         const text = chunk.toString("utf8");
         stderr += text;
-        console.log(`[Gateway:stderr] ${text.trimEnd()}`);
+        this.safeConsoleLog(`[Gateway:stderr] ${text.trimEnd()}`);
         checkReady(text);
       });
 
       child.stdout?.on("data", (chunk: Buffer) => {
         const text = chunk.toString("utf8");
-        console.log(`[Gateway:stdout] ${text.trimEnd()}`);
+        this.safeConsoleLog(`[Gateway:stdout] ${text.trimEnd()}`);
         checkReady(text);
       });
 
@@ -1563,7 +1587,7 @@ export class GatewayManager {
         },
         auth: { token },
         role: "operator",
-        scopes: ["operator.admin"],
+        scopes: ["operator.admin", "operator.read", "operator.write"],
       },
     };
 
