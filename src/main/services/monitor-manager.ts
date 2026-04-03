@@ -1,7 +1,9 @@
+import { validate as cronValidate } from "node-cron";
 import { Notification } from "electron";
 
 import type {
   AutomationJob,
+  AutomationJobRun,
   AutomationJobUpdatedPayload,
   ExtensionMessage,
   PageMonitor,
@@ -15,6 +17,8 @@ type EmitFn = (message: ExtensionMessage<unknown>) => void;
 type DispatchJobRun = (job: AutomationJob) => Promise<{ messageId: string; taskId: string }>;
 
 const DEFAULT_INTERVAL_MINUTES = 30;
+const MAX_RUN_HISTORY = 50;
+const RETRY_BACKOFF_MS = 30_000;
 
 export class MonitorManager {
   private timers = new Map<string, NodeJS.Timeout>();
@@ -87,6 +91,11 @@ export class MonitorManager {
 
   async checkJob(id: string): Promise<void> {
     await this.runScheduledJob(id, { reschedule: true });
+  }
+
+  /** Immediately run a job regardless of its schedule. */
+  async runJobNow(id: string): Promise<void> {
+    await this.runScheduledJob(id, { reschedule: false });
   }
 
   private planNextRun(job: AutomationJob): void {
@@ -190,7 +199,7 @@ export class MonitorManager {
     return now + 60 * 60 * 1000;
   }
 
-  private async runScheduledJob(id: string, opts: { reschedule: boolean }): Promise<void> {
+  private async runScheduledJob(id: string, opts: { reschedule: boolean }, attempt = 0): Promise<void> {
     const before = this.store.getState().automationJobs.find((job) => job.id === id);
     if (!before || before.status === "paused") return;
 
@@ -208,7 +217,7 @@ export class MonitorManager {
       nextRunAt: undefined,
     });
 
-    const updated = await this.executeJob(id);
+    const updated = await this.executeJob(id, attempt);
     if (!updated || !opts.reschedule) return;
 
     const latest = this.store.getState().automationJobs.find((job) => job.id === id);
@@ -226,7 +235,7 @@ export class MonitorManager {
     this.planNextRun(latest);
   }
 
-  private async executeJob(id: string): Promise<AutomationJob | null> {
+  private async executeJob(id: string, attempt = 0): Promise<AutomationJob | null> {
     const job = this.store.getState().automationJobs.find((item) => item.id === id);
     if (!job) return null;
 
@@ -234,17 +243,17 @@ export class MonitorManager {
     if (job.kind === "watch") {
       const watchResult = await this.evaluateWatchJob(job);
       if (!watchResult.triggered) {
-        return this.patchJob(id, {
+        const run: AutomationJobRun = {
+          runId: `${job.id}:${now}`,
+          status: "done",
+          startedAt: now,
+          finishedAt: now,
+          summary: watchResult.summary,
+        };
+        return this.recordRunAndPatch(id, run, {
           status: "active",
           lastCheckedAt: now,
           updatedAt: now,
-          lastRun: {
-            runId: `${job.id}:${now}`,
-            status: "done",
-            startedAt: now,
-            finishedAt: now,
-            summary: watchResult.summary,
-          },
         });
       }
     }
@@ -259,18 +268,18 @@ export class MonitorManager {
       }
 
       const nextStatus = job.kind === "watch" ? "triggered" : "active";
-      const updated = this.patchJob(id, {
+      const run: AutomationJobRun = {
+        runId,
+        status: "done",
+        startedAt: now,
+        finishedAt: Date.now(),
+        summary,
+      };
+      const updated = this.recordRunAndPatch(id, run, {
         status: nextStatus,
         lastCheckedAt: now,
         updatedAt: now,
         triggerCount: (job.triggerCount ?? 0) + 1,
-        lastRun: {
-          runId,
-          status: "done",
-          startedAt: now,
-          finishedAt: Date.now(),
-          summary,
-        },
       });
 
       try {
@@ -302,18 +311,30 @@ export class MonitorManager {
       return updated;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const errorRun: AutomationJobRun = {
+        runId: `${job.id}:${now}`,
+        status: "error",
+        startedAt: now,
+        finishedAt: Date.now(),
+        error: message,
+        summary: "Automation run failed.",
+      };
+      this.recordRunAndPatch(id, errorRun, {
+        lastCheckedAt: now,
+        updatedAt: now,
+      });
+
+      // Retry with backoff if retries are configured
+      const maxRetries = job.schedule.retryCount ?? 0;
+      if (attempt < maxRetries) {
+        await new Promise<void>((resolve) => setTimeout(resolve, RETRY_BACKOFF_MS));
+        return this.executeJob(id, attempt + 1);
+      }
+
       return this.patchJob(id, {
         status: "error",
         lastCheckedAt: now,
         updatedAt: now,
-        lastRun: {
-          runId: `${job.id}:${now}`,
-          status: "error",
-          startedAt: now,
-          finishedAt: Date.now(),
-          error: message,
-          summary: "Automation run failed.",
-        },
       });
     }
   }
@@ -382,9 +403,18 @@ export class MonitorManager {
       };
     }
     if (mode === "cron") {
+      const cron = job.schedule.cron?.trim() || "0 * * * *";
+      if (!cronValidate(cron)) {
+        console.error(`[MonitorManager] Invalid cron expression for job "${job.id}": "${cron}". Falling back to interval.`);
+        return {
+          ...job.schedule,
+          mode: "interval",
+          intervalMinutes: Math.max(1, job.schedule.intervalMinutes ?? job.intervalMinutes ?? DEFAULT_INTERVAL_MINUTES),
+        };
+      }
       return {
         ...job.schedule,
-        cron: job.schedule.cron?.trim() || "0 * * * *",
+        cron,
       };
     }
     return {
@@ -392,6 +422,22 @@ export class MonitorManager {
       mode: "interval",
       intervalMinutes: Math.max(1, job.schedule.intervalMinutes ?? job.intervalMinutes ?? DEFAULT_INTERVAL_MINUTES),
     };
+  }
+
+  /**
+   * Append a run to the job's runHistory (capped at MAX_RUN_HISTORY) and apply
+   * any additional patch fields atomically.
+   */
+  private recordRunAndPatch(
+    id: string,
+    run: AutomationJobRun,
+    extra: Partial<AutomationJob> = {},
+  ): AutomationJob {
+    const jobs = this.store.getState().automationJobs;
+    const job = jobs.find((j) => j.id === id);
+    const existingHistory = job?.runHistory ?? [];
+    const runHistory = [...existingHistory, run].slice(-MAX_RUN_HISTORY);
+    return this.patchJob(id, { lastRun: run, runHistory, ...extra });
   }
 
   private patchJob(id: string, patch: Partial<AutomationJob>): AutomationJob {

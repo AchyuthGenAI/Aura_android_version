@@ -56,6 +56,7 @@ export interface AuraDesktopApi {
     start(job: AutomationJob): Promise<void>;
     stop(payload: { id: string }): Promise<void>;
     list(): Promise<AutomationJob[]>;
+    runNow(payload: { id: string }): Promise<void>;
   };
   monitor: {
     start(monitor: PageMonitor): Promise<void>;

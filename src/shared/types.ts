@@ -290,6 +290,7 @@ export interface AutomationSchedule {
   cron?: string;
   runAt?: number;
   timezone?: string;
+  retryCount?: number;
 }
 
 export interface AutomationJobRun {
@@ -319,6 +320,7 @@ export interface AutomationJob {
   skillId?: string;
   skillName?: string;
   lastRun?: AutomationJobRun;
+  runHistory?: AutomationJobRun[];
 }
 
 export type PageMonitor = AutomationJob;

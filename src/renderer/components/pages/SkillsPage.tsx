@@ -27,6 +27,7 @@ export const SkillsPage = (): JSX.Element => {
   const loadSkills = useAuraStore((state) => state.loadSkills);
   const setRoute = useAuraStore((state) => state.setRoute);
   const setInputValue = useAuraStore((state) => state.setInputValue);
+  const usedSkillIds = useAuraStore((state) => state.usedSkillIds);
   const [query, setQuery] = useState("");
 
   useEffect(() => {
@@ -95,7 +96,7 @@ export const SkillsPage = (): JSX.Element => {
               </div>
               <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
                 {categorySkills.map((skill) => (
-                  <Card key={skill.id} className="rounded-[28px] p-6">
+                  <Card key={skill.id} className={`rounded-[28px] p-6 transition ${usedSkillIds.includes(skill.id) ? "ring-1 ring-aura-violet/40" : ""}`}>
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex items-start gap-3">
                         <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[16px] bg-white/5 text-aura-violet">
@@ -106,7 +107,14 @@ export const SkillsPage = (): JSX.Element => {
                           <p className="mt-1 text-[11px] uppercase tracking-[0.18em] text-aura-violet">{skill.id}</p>
                         </div>
                       </div>
-                      <StatusPill label={skill.enabled ? "Ready" : "Disabled"} tone={skill.enabled ? "success" : "default"} />
+                      <div className="flex flex-col items-end gap-1">
+                        <StatusPill label={skill.enabled ? "Ready" : "Disabled"} tone={skill.enabled ? "success" : "default"} />
+                        {usedSkillIds.includes(skill.id) && (
+                          <span className="rounded-full bg-aura-violet/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-aura-violet">
+                            Used
+                          </span>
+                        )}
+                      </div>
                     </div>
 
                     <p className="mt-5 min-h-[72px] text-[14px] leading-7 text-aura-muted">{skill.description}</p>

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 
-import type { AutomationJob, AutomationJobKind } from "@shared/types";
+import type { AutomationJob, AutomationJobKind, AutomationJobRun } from "@shared/types";
 
 import { StatusPill } from "../primitives";
 import { Button, Card, SectionHeading, TextArea, TextInput } from "../shared";
@@ -20,7 +20,14 @@ const JOB_KIND_OPTIONS: Array<{ value: AutomationJobKind; label: string; detail:
   { value: "watch", label: "Watch Job", detail: "Observe a page and trigger when a condition is met." },
   { value: "recurring", label: "Recurring Task", detail: "Run the same managed task on an interval." },
   { value: "scheduled", label: "One-time Task", detail: "Queue a job to run once from the Automations workspace." },
-  { value: "cron", label: "Advanced Cron", detail: "Use cron syntax for advanced schedules." },
+  { value: "cron", label: "Cron Job", detail: "Schedule via a standard cron expression (e.g. '0 9 * * 1' = Monday 9am)." },
+];
+
+const RETRY_OPTIONS = [
+  { label: "No retries", value: 0 },
+  { label: "Retry once (30s)", value: 1 },
+  { label: "Retry twice (30s)", value: 2 },
+  { label: "Retry 3 times (30s)", value: 3 },
 ];
 
 const formatRelative = (ts?: number): string => {
@@ -44,12 +51,25 @@ const toLocalDateTimeInput = (ts: number): string => {
   return `${year}-${month}-${day}T${hours}:${minutes}`;
 };
 
+const formatTimestamp = (ts?: number): string => {
+  if (!ts) return "—";
+  return new Date(ts).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+};
+
+const runStatusTone = (status: AutomationJobRun["status"]): "success" | "warning" | "error" | "default" => {
+  if (status === "done") return "success";
+  if (status === "triggered") return "warning";
+  if (status === "error") return "error";
+  return "default";
+};
+
 export const MonitorsPage = (): JSX.Element => {
   const automationJobs = useAuraStore((state) => state.automationJobs);
   const saveAutomationJobs = useAuraStore((state) => state.saveAutomationJobs);
   const startAutomationJob = useAuraStore((state) => state.startAutomationJob);
   const stopAutomationJob = useAuraStore((state) => state.stopAutomationJob);
   const deleteAutomationJob = useAuraStore((state) => state.deleteAutomationJob);
+  const runAutomationJobNow = useAuraStore((state) => state.runAutomationJobNow);
   const [draft, setDraft] = useState({
     title: "",
     sourcePrompt: "",
@@ -59,8 +79,11 @@ export const MonitorsPage = (): JSX.Element => {
     intervalMinutes: 30,
     cron: "0 * * * *",
     runAt: toLocalDateTimeInput(Date.now() + 15 * 60 * 1000),
+    retryCount: 0,
   });
   const [saving, setSaving] = useState(false);
+  const [runningNow, setRunningNow] = useState<string | null>(null);
+  const [expandedHistory, setExpandedHistory] = useState<string | null>(null);
 
   const counts = useMemo(() => ({
     active: automationJobs.filter((job) => job.status === "active").length,
@@ -93,6 +116,7 @@ export const MonitorsPage = (): JSX.Element => {
           intervalMinutes: scheduleMode === "interval" ? draft.intervalMinutes : undefined,
           runAt: onceRunAt,
           cron: scheduleMode === "cron" ? draft.cron.trim() : undefined,
+          retryCount: draft.retryCount,
         },
         createdAt: now,
         updatedAt: now,
@@ -119,9 +143,19 @@ export const MonitorsPage = (): JSX.Element => {
         intervalMinutes: draft.intervalMinutes,
         cron: draft.cron,
         runAt: toLocalDateTimeInput(Date.now() + 15 * 60 * 1000),
+        retryCount: 0,
       });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRunNow = async (id: string): Promise<void> => {
+    setRunningNow(id);
+    try {
+      await runAutomationJobNow(id);
+    } finally {
+      setRunningNow(null);
     }
   };
 
@@ -217,8 +251,20 @@ export const MonitorsPage = (): JSX.Element => {
                     onChange={(value) => setDraft({ ...draft, cron: value })}
                     placeholder="0 * * * *"
                   />
+                  <p className="mt-1 text-xs text-aura-muted">Standard 5-field cron. Examples: <code className="text-cyan-400">0 9 * * 1-5</code> (weekdays 9am), <code className="text-cyan-400">*/30 * * * *</code> (every 30 min).</p>
                 </Field>
               )}
+              <Field label="On Error">
+                <select
+                  value={draft.retryCount}
+                  onChange={(event) => setDraft({ ...draft, retryCount: Number(event.target.value) })}
+                  className="w-full rounded-[16px] border border-white/[0.08] bg-black/20 px-4 py-3 text-[13px] font-medium text-aura-text outline-none focus:border-aura-violet/50"
+                >
+                  {RETRY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </Field>
             </div>
 
             <div className="mt-5">
@@ -281,8 +327,8 @@ export const MonitorsPage = (): JSX.Element => {
                     <MiniStat label="Triggers" value={String(job.triggerCount)} />
                   </div>
 
-                  <div className="mt-4 flex gap-2">
-                    {job.status === "active" ? (
+                  <div className="mt-4 flex gap-2 flex-wrap">
+                    {job.status === "active" || job.status === "running" ? (
                       <button
                         className="flex-1 rounded-[12px] border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-aura-muted transition hover:bg-white/10 hover:text-white"
                         onClick={() => void stopAutomationJob(job.id)}
@@ -298,12 +344,56 @@ export const MonitorsPage = (): JSX.Element => {
                       </button>
                     )}
                     <button
+                      className="flex-1 rounded-[12px] border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-xs font-medium text-cyan-300 transition hover:bg-cyan-500/20 disabled:opacity-50"
+                      onClick={() => void handleRunNow(job.id)}
+                      disabled={runningNow === job.id}
+                    >
+                      {runningNow === job.id ? "Running…" : "Run Now"}
+                    </button>
+                    <button
                       className="rounded-[12px] border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs font-medium text-red-300 transition hover:bg-red-500/15"
                       onClick={() => void deleteAutomationJob(job.id)}
                     >
                       Delete
                     </button>
                   </div>
+
+                  {(job.runHistory?.length ?? 0) > 0 && (
+                    <div className="mt-4">
+                      <button
+                        className="flex w-full items-center justify-between text-[11px] uppercase tracking-[0.14em] text-aura-muted hover:text-aura-text transition"
+                        onClick={() => setExpandedHistory(expandedHistory === job.id ? null : job.id)}
+                      >
+                        <span>Run History ({job.runHistory?.length ?? 0})</span>
+                        <svg
+                          width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                          className={`transition-transform ${expandedHistory === job.id ? "rotate-180" : ""}`}
+                        >
+                          <path d="M6 9l6 6 6-6"/>
+                        </svg>
+                      </button>
+                      {expandedHistory === job.id && (
+                        <div className="mt-3 max-h-[220px] space-y-2 overflow-y-auto">
+                          {[...(job.runHistory ?? [])].reverse().map((run) => (
+                            <div
+                              key={run.runId ?? run.startedAt}
+                              className="flex items-start justify-between gap-3 rounded-[14px] border border-white/[0.06] bg-black/10 px-3 py-2"
+                            >
+                              <div className="min-w-0">
+                                <p className="text-[12px] text-aura-muted">{formatTimestamp(run.startedAt)}</p>
+                                {run.summary && <p className="mt-1 line-clamp-2 text-[11px] text-aura-text/70">{run.summary}</p>}
+                                {run.error && <p className="mt-1 line-clamp-2 text-[11px] text-red-400">{run.error}</p>}
+                              </div>
+                              <StatusPill
+                                label={run.status}
+                                tone={runStatusTone(run.status)}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </Card>
               ))
             )}

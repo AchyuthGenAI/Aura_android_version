@@ -557,6 +557,9 @@ const createAppWindows = async (): Promise<void> => {
       activeMonitorManager!.unscheduleJob(payload.id);
     });
     ipcMain.handle(IPC_CHANNELS.automationList, async () => activeMonitorManager!.listJobs());
+    ipcMain.handle(IPC_CHANNELS.automationRunNow, async (_event, payload: { id: string }) => {
+      await activeMonitorManager!.runJobNow(payload.id);
+    });
     ipcMain.handle(IPC_CHANNELS.monitorStart, async (_event, monitor) => {
       activeMonitorManager!.scheduleMonitor(monitor as import("@shared/types").PageMonitor);
     });
