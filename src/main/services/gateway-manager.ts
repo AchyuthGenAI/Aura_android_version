@@ -1693,7 +1693,7 @@ export class GatewayManager {
           reject(new Error("WebSocket connection timed out."));
           ws.close();
         }
-      }, 15_000);
+      }, 90_000);
     });
   }
 
