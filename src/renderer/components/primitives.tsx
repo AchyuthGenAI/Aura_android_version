@@ -209,7 +209,7 @@ export const MessageBubble = ({
         )}
         <div
           className={[
-            "message-bubble msg-enter prose prose-invert max-w-none px-4 py-[10px] text-[14.5px] leading-relaxed shadow-sm",
+            "message-bubble flex flex-col gap-2 msg-enter prose prose-invert max-w-none px-4 py-[10px] text-[14.5px] leading-relaxed shadow-sm",
             isUser
               ? "rounded-[22px] rounded-br-[6px] bg-aura-gradient text-white shadow-[0_4px_16px_rgba(124,58,237,0.15)]"
               : theme === "light"
@@ -217,9 +217,13 @@ export const MessageBubble = ({
                 : "rounded-[22px] rounded-bl-[6px] border border-white/10 bg-[#1e1c2e] text-aura-text shadow-[0_4px_24px_rgba(0,0,0,0.1)]",
             ""
           ].join(" ")}
-          // By standardizing dangerouslySetInnerHTML, we can safely style raw HTML regardless of streaming state.
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
+        >
+          {message.attachments?.map((attachment, i) => (
+            <img key={i} src={attachment} alt="Attachment" className="max-w-[240px] rounded-xl object-contain shadow-md" />
+          ))}
+          {/* By standardizing dangerouslySetInnerHTML, we can safely style raw HTML regardless of streaming state. */}
+          {html && <div dangerouslySetInnerHTML={{ __html: html }} />}
+        </div>
       </div>
     </div>
   );

@@ -1173,6 +1173,7 @@ export class GatewayManager {
       content: request.message,
       timestamp: now(),
       source: request.source,
+      attachments: request.images,
     };
     session.messages.push(userMessage);
     this.persistCurrentSession(session);
@@ -1251,7 +1252,7 @@ export class GatewayManager {
         throw new Error("Managed OpenClaw runtime is unavailable. Restart the runtime from Settings and try again.");
       }
       // Route through OpenClaw agent (has skills, memory, browser tools, web search)
-      const responseText = await this.streamViaOpenClaw(messageId, request.message, "main", extraSystemPrompt);
+      const responseText = await this.streamViaOpenClaw(messageId, request.message, "main", extraSystemPrompt, request.images);
       this.handleChatSuccess(messageId, taskId, session, request, responseText);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1406,7 +1407,8 @@ export class GatewayManager {
     messageId: string,
     message: string,
     sessionKey: string,
-    extraSystemPrompt?: string
+    extraSystemPrompt?: string,
+    images?: string[]
   ): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       this.streamedText = "";
@@ -1416,11 +1418,19 @@ export class GatewayManager {
 
       const idempotencyKey = crypto.randomUUID();
 
+      const attachments = images?.map(img => {
+        const match = img.match(/^data:(image\/\w+);base64,/);
+        const mimeType = match?.[1] || "image/jpeg";
+        const content = img.replace(/^data:image\/\w+;base64,/, "");
+        return { mimeType, content, type: "image", fileName: `upload-${crypto.randomUUID().slice(0, 6)}.${mimeType.split("/")[1]}` };
+      });
+
       this.request<{ runId?: string }>("chat.send", {
         sessionKey,
         message,
         idempotencyKey,
-        ...(extraSystemPrompt ? { extraSystemPrompt } : {})
+        ...(extraSystemPrompt ? { extraSystemPrompt } : {}),
+        ...(attachments?.length ? { attachments } : {})
       }, { timeoutMs: 120_000 })
         .then((res) => {
           if (res?.runId) {

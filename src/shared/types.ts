@@ -128,6 +128,7 @@ export interface AuraSessionMessage {
   content: string;
   timestamp: number;
   source?: "text" | "voice";
+  attachments?: string[];
 }
 
 export interface AuraSession {
@@ -152,6 +153,7 @@ export interface ChatThreadMessage {
   role: "user" | "assistant" | "system";
   content: string;
   status?: "streaming" | "done" | "error" | "status";
+  attachments?: string[];
 }
 
 export type ToolName =
@@ -530,6 +532,7 @@ export interface ChatSendRequest {
   message: string;
   source: "text" | "voice";
   history?: Array<{ role: "user" | "assistant"; content: string }>;
+  images?: string[];
   sessionId?: string;
 }
 

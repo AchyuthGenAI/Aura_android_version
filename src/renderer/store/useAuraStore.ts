@@ -188,6 +188,7 @@ type AuraState = {
   pendingConfirmation: ConfirmActionPayload | null;
   lastError: TaskErrorPayload | null;
   inputValue: string;
+  activeImage: string | null;
   isLoading: boolean;
   automationJobs: AutomationJob[];
   monitors: PageMonitor[];
@@ -201,6 +202,7 @@ type AuraState = {
   dismissToast: (id: string) => void;
   clearActionFeed: () => void;
   setInputValue: (value: string) => void;
+  setActiveImage: (image: string | null) => void;
   setRoute: (route: AppRoute) => Promise<void>;
   setOverlayVisible: (value: boolean) => Promise<void>;
   setOverlayTab: (tab: OverlayTab) => void;
@@ -320,6 +322,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   pendingConfirmation: null,
   lastError: null,
   inputValue: "",
+  activeImage: null,
   isLoading: false,
   automationJobs: [],
   monitors: [],
@@ -328,8 +331,8 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   usedSkillIds: [],
   toasts: [],
   actionFeed: [],
-
   clearActionFeed: () => set({ actionFeed: [] }),
+  setActiveImage: (image) => set({ activeImage: image }),
 
   hydrate: async () => {
     set({ isHydrating: true });
@@ -751,6 +754,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       sessions: nextSessions,
       messages: [...state.messages, userMessage],
       inputValue: override ? state.inputValue : "",
+      activeImage: null,
       isLoading: true,
       lastError: null,
       route: state.route
@@ -766,6 +770,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
         message: text,
         source,
         sessionId: nextSession.id,
+        images: state.activeImage ? [state.activeImage] : undefined,
         history: state.messages
           .filter((entry) => entry.role !== "system")
           .slice(-10)

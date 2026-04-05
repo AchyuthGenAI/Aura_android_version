@@ -20,12 +20,14 @@ const WidgetApp = (): JSX.Element => {
   const runtimeStatus = useAuraStore((state) => state.runtimeStatus);
   const messages = useAuraStore((state) => state.messages);
   const inputValue = useAuraStore((state) => state.inputValue);
+  const activeImage = useAuraStore((state) => state.activeImage);
   const isLoading = useAuraStore((state) => state.isLoading);
   const hydrate = useAuraStore((state) => state.hydrate);
   const handleAppEvent = useAuraStore((state) => state.handleAppEvent);
   const dismissToast = useAuraStore((state) => state.dismissToast);
   const toasts = useAuraStore((state) => state.toasts);
   const setInputValue = useAuraStore((state) => state.setInputValue);
+  const setActiveImage = useAuraStore((state) => state.setActiveImage);
   const sendMessage = useAuraStore((state) => state.sendMessage);
   const stopMessage = useAuraStore((state) => state.stopMessage);
   const startNewSession = useAuraStore((state) => state.startNewSession);
@@ -36,9 +38,23 @@ const WidgetApp = (): JSX.Element => {
   const [activeTab, setActiveTab] = useState<OverlayTab>("chat");
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const positionRef = useRef(position);
   const expandedRef = useRef(expanded);
   const sizeRef = useRef(size);
+
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      if (typeof ev.target?.result === "string") {
+        setActiveImage(ev.target.result);
+      }
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
 
   useEffect(() => {
     void hydrate();
@@ -403,35 +419,55 @@ const WidgetApp = (): JSX.Element => {
                       <line x1="12" y1="19" x2="12" y2="22"/>
                     </svg>
                   </button>
-                  <textarea
-                    ref={textareaRef}
-                    value={inputValue}
-                    onChange={(event) => setInputValue(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && !event.shiftKey) {
-                        event.preventDefault();
-                        if (!isLoading && !isTaskActive) {
-                          void sendMessage("text");
+                  <div className="mx-3 flex-1 flex-col justify-center">
+                    {activeImage && (
+                      <div className="relative mb-2 mt-2 inline-block h-16 w-16 overflow-hidden rounded-xl border border-white/20 bg-black/40">
+                        <img src={activeImage} alt="Upload preview" className="h-full w-full object-cover" />
+                        <button 
+                          className="absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full bg-black/60 text-white hover:bg-red-500/80" 
+                          onClick={() => setActiveImage(null)}
+                        >
+                          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18" />
+                            <line x1="6" y1="6" x2="18" y2="18" />
+                          </svg>
+                        </button>
+                      </div>
+                    )}
+                    <textarea
+                      ref={textareaRef}
+                      value={inputValue}
+                      onChange={(event) => setInputValue(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && !event.shiftKey) {
+                          event.preventDefault();
+                          if (!isLoading && !isTaskActive && (inputValue.trim() || activeImage)) {
+                            void sendMessage("text");
+                          }
                         }
+                      }}
+                      autoFocus={expanded && activeTab === "chat"}
+                      id="aura-widget-input"
+                      placeholder={
+                        activeRun?.status === "running"
+                          ? "Aura is working on it..."
+                          : isLoading
+                            ? "Aura is generating a response..."
+                            : "Message Aura..."
                       }
-                    }}
-                    autoFocus={expanded && activeTab === "chat"}
-                    id="aura-widget-input"
-                    placeholder={
-                      activeRun?.status === "running"
-                        ? "Aura is working on it..."
-                        : isLoading
-                          ? "Aura is generating a response..."
-                          : "Message Aura..."
-                    }
-                    rows={1}
-                    className="mx-3 flex-1 resize-none bg-transparent text-[15px] leading-8 text-aura-text outline-none placeholder:text-aura-muted"
-                  />
-                  <div className="flex items-center gap-1.5">
-                    <button className="flex h-8 w-8 items-center justify-center rounded-full text-aura-muted hover:bg-white/10 hover:text-aura-text transition-colors">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-                        <circle cx="12" cy="13" r="4"/>
+                      rows={1}
+                      className="w-full resize-none bg-transparent text-[15px] leading-8 text-aura-text outline-none placeholder:text-aura-muted"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1.5 self-end pb-1">
+                    <button 
+                      className="flex h-8 w-8 items-center justify-center rounded-full text-aura-muted hover:bg-white/10 hover:text-aura-text transition-colors"
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                        <circle cx="8.5" cy="8.5" r="1.5"/>
+                        <polyline points="21 15 16 10 5 21"/>
                       </svg>
                     </button>
                     {isLoading ? (
@@ -447,7 +483,7 @@ const WidgetApp = (): JSX.Element => {
                       <button
                         className={`flex h-8 w-8 items-center justify-center rounded-full transition-all duration-200 ease-out active:scale-90 ${!inputValue.trim() ? "text-aura-muted bg-transparent hover:bg-white/10 hover:text-aura-text" : "bg-white/10 text-aura-text hover:bg-white/20 hover:shadow-[0_0_12px_rgba(124,58,237,0.3)]"}`}
                         onClick={() => void sendMessage("text")}
-                        disabled={!inputValue.trim()}
+                        disabled={!inputValue.trim() && !activeImage}
                       >
                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                            <line x1="5" y1="12" x2="19" y2="12" />
