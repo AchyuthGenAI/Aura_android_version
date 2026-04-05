@@ -1166,7 +1166,7 @@ export class GatewayManager {
     this.activeRunId = null;
     this.streamedText = "";
 
-    const session = this.ensureSession(request.message);
+    const session = this.ensureSession(request.message, request.sessionId);
     const userMessage: AuraSessionMessage = {
       id: crypto.randomUUID(),
       role: "user",
@@ -1874,11 +1874,11 @@ export class GatewayManager {
     // When it resolves, trigger the onConnected callback.
     const timeout = setTimeout(() => {
       this.pending.delete(connectReq.id);
-      console.warn("[GatewayManager] Connect request timed out (10s) — no response from gateway. Treating as connected.");
+      console.warn("[GatewayManager] Connect request timed out (90s) — no response from gateway. Treating as connected.");
       // The gateway IS listening (port opened, WS connected) but may not implement
       // the connect handshake response in all versions. Fall through to connected.
       this.onConnected?.();
-    }, 10_000);
+    }, 90_000);
 
     this.pending.set(connectReq.id, {
       resolve: () => {
@@ -2127,7 +2127,12 @@ export class GatewayManager {
     this.persistCurrentSession(session);
 
     this.emit({ type: "TASK_ERROR", payload: { taskId, code: "UNKNOWN", message: errorMessage } });
-    this.emit({ type: "LLM_DONE", payload: { messageId, fullText: "", cleanText: "" } });
+    
+    // Ensure the error is visible in the chat bubble instead of silently failing
+    const errorDisplay = `\n\n⚠️ **Error:** ${errorMessage}`;
+    this.streamedText += errorDisplay;
+    this.emit({ type: "LLM_TOKEN", payload: { messageId, token: errorDisplay } });
+    this.emit({ type: "LLM_DONE", payload: { messageId, fullText: this.streamedText, cleanText: this.streamedText } });
     this.patchActiveRun({
       runId: this.activeRunId ?? undefined,
       status: "error",
@@ -2143,29 +2148,46 @@ export class GatewayManager {
     });
   }
 
-  private ensureSession(command: string): AuraSession {
+  private ensureSession(command: string, customSessionId?: string): AuraSession {
+    const isBackground = customSessionId?.startsWith("automation:");
     const existing = this.store.getState().currentSession;
-    if (existing && !existing.endedAt) return existing;
+
+    if (!isBackground && existing && !existing.endedAt) return existing;
+
+    // Check if the background session already exists in history
+    if (customSessionId) {
+      const pastSession = this.store.getState().sessionHistory.find(s => s.id === customSessionId);
+      if (pastSession) return pastSession;
+    }
 
     const title = command.split(/\s+/).slice(0, 6).join(" ") || "New session";
     const session: AuraSession = {
-      id: crypto.randomUUID(),
+      id: customSessionId || crypto.randomUUID(),
       startedAt: now(),
       title,
       messages: [],
       pagesVisited: [],
     };
-    this.store.set("currentSession", session);
+    
+    if (!isBackground) {
+      this.store.set("currentSession", session);
+    }
     return session;
   }
 
   private persistCurrentSession(session: AuraSession): void {
+    const isBackground = session.id.startsWith("automation:");
     const tabs = this.browserController.getTabs();
     const currentUrl = tabs.tabs.find((t) => t.id === tabs.activeTabId)?.url;
+    
     if (currentUrl && !session.pagesVisited.includes(currentUrl)) {
       session.pagesVisited.push(currentUrl);
     }
-    this.store.set("currentSession", session);
+    
+    if (!isBackground) {
+      this.store.set("currentSession", session);
+    }
+    
     const history = this.store.getState().sessionHistory.filter((s) => s.id !== session.id);
     this.store.set("sessionHistory", [session, ...history].slice(0, 50));
   }

@@ -184,11 +184,12 @@ export const MessageBubble = ({
   const isStreaming = message.status === "streaming";
 
   const html = useMemo(() => {
-    if (isStreaming) {
-      return "";
-    }
     const raw = marked.parse(content || "", { breaks: true }) as string;
-    return DOMPurify.sanitize(raw);
+    const sanitized = DOMPurify.sanitize(raw);
+    if (isStreaming) {
+      return sanitized + `<span class="ml-1 inline-block h-3.5 w-1 animate-pulse align-baseline bg-[#bca5ff]"></span>`;
+    }
+    return sanitized;
   }, [content, isStreaming]);
 
   const isUser = message.role === "user";
@@ -197,8 +198,13 @@ export const MessageBubble = ({
     <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={`flex max-w-[86%] gap-3 ${isUser ? "flex-row-reverse" : "flex-row"}`}>
         {!isUser && (
-          <div className="mt-1">
+          <div className="mt-1 flex-shrink-0">
             <AuraLogoBlob size="xs" isTaskRunning={message.status === "streaming"} />
+          </div>
+        )}
+        {isUser && (
+          <div className="mt-1 flex flex-shrink-0 h-[28px] w-[28px] items-center justify-center rounded-full bg-gradient-to-br from-[#7c3aed] to-[#06b6d4] text-white shadow-md ring-1 ring-white/10">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
           </div>
         )}
         <div
@@ -211,16 +217,9 @@ export const MessageBubble = ({
                 : "rounded-[22px] rounded-bl-[6px] border border-white/10 bg-[#1e1c2e] text-aura-text shadow-[0_4px_24px_rgba(0,0,0,0.1)]",
             ""
           ].join(" ")}
-        >
-          {isStreaming ? (
-            <div className="whitespace-pre-wrap break-words">
-              {content}
-              <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse align-middle bg-aura-violet" />
-            </div>
-          ) : (
-            <div dangerouslySetInnerHTML={{ __html: html }} />
-          )}
-        </div>
+          // By standardizing dangerouslySetInnerHTML, we can safely style raw HTML regardless of streaming state.
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
       </div>
     </div>
   );
