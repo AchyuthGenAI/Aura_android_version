@@ -27,7 +27,7 @@ function MicLevelBars({ stream }: { stream: MediaStream | null }): JSX.Element {
     try {
       const ctx = new AudioContext();
       ctxRef.current = ctx;
-      const analyser = ctx.createAnalyser();
+     const analyser = ctx.createAnalyser();
       analyser.fftSize = 64;
       analyser.smoothingTimeConstant = 0.7;
       const source = ctx.createMediaStreamSource(stream);

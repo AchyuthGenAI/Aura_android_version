@@ -23,7 +23,7 @@ import type {
 import { BrowserController } from "./browser-controller";
 import { ConfigManager } from "./config-manager";
 import { AuraStore } from "./store";
-import { classify, type Classification } from "./intent-classifier";
+import { classifyFastPath, type Classification } from "./intent-classifier";
 import type { MonitorManager } from "./monitor-manager";
 
 import WebSocket from "ws";
@@ -349,6 +349,7 @@ export class GatewayManager {
   private chatDoneReject: ((err: Error) => void) | null = null;
 
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private keepAliveTimer: NodeJS.Timeout | null = null;
   private monitorManager: MonitorManager | null = null;
   private gatewayDeviceIdentity: GatewayDeviceIdentity | null = null;
   private readonly openClawBuildTimeoutMs = 12 * 60_000;
@@ -1171,22 +1172,9 @@ export class GatewayManager {
     const pageContext = await this.browserController.getPageContext();
     console.log(`[GatewayManager] pageContext url="${pageContext?.url ?? "none"}" title="${pageContext?.title ?? "none"}"`);
 
-    const groqConfig = this.configManager.readConfig();
-    const { provider: llmProvider, apiKey } = resolveProvider(
-      groqConfig.providers?.google?.apiKey,
-      groqConfig.providers?.groq?.apiKey,
-    );
-    console.log(`[GatewayManager] LLM provider=${llmProvider} apiKey resolved=${Boolean(apiKey)}`);
-
-    // ── Classify intent ──
-    let classification: Classification;
-    try {
-      classification = await classify(request.message, pageContext, apiKey);
-    } catch (err) {
-      console.warn("[GatewayManager] classify() threw:", err instanceof Error ? err.message : String(err));
-      classification = { intent: "query", confidence: 0.5 };
-    }
-    console.log(`[GatewayManager] classification intent="${classification.intent}" confidence=${classification.confidence} directAction=${JSON.stringify(classification.directAction ?? null)}`);
+    // ── Fast-path classify (<10ms, heuristic only, no LLM) ──
+    const classification = classifyFastPath(request.message, pageContext);
+    console.log(`[GatewayManager] fastPath intent="${classification.intent}" confidence=${classification.confidence} directAction=${JSON.stringify(classification.directAction ?? null)}`);
     const surface = this.inferSurface(classification, pageContext);
 
     this.setStatus({
@@ -1194,8 +1182,15 @@ export class GatewayManager {
       phase: "running",
       message: "Processing your request.",
     });
+
+    // Special local intents handled by Aura directly
     if (classification.intent === "monitor" && this.monitorManager) {
       console.log("[GatewayManager] -> handleMonitorIntent");
+      const groqConfig = this.configManager.readConfig();
+      const { apiKey } = resolveProvider(
+        groqConfig.providers?.google?.apiKey,
+        groqConfig.providers?.groq?.apiKey,
+      );
       return this.handleMonitorIntent(messageId, taskId, session, request, pageContext, apiKey);
     }
 
@@ -1204,8 +1199,15 @@ export class GatewayManager {
       return this.handleDesktopIntent(messageId, taskId, session, request);
     }
 
-    console.log("[GatewayManager] -> handleQueryIntent (managed OpenClaw)");
-    return this.handleQueryIntent(messageId, taskId, session, request, pageContext, undefined, surface);
+    // Everything else → OpenClaw agent (conversation, tasks, skills, browser actions)
+    const auraPrompt = `You are Aura, a premium desktop AI assistant powered by OpenClaw. Guidelines:
+- For simple questions or casual conversation, respond naturally and conversationally.
+- For actionable requests (automate, browse, search, code, file operations, etc.), use your available tools immediately. Prefer action over explanation.
+- When the user mentions a specific skill by name, use that skill.
+- Be concise but thorough. Show progress clearly during multi-step tasks.
+- You have full access to the user's desktop, browser, and installed skills.`;
+    console.log("[GatewayManager] -> streamViaOpenClaw (unified path)");
+    return this.handleQueryIntent(messageId, taskId, session, request, pageContext, auraPrompt, surface);
 
   }
 
@@ -1586,6 +1588,16 @@ export class GatewayManager {
         }
       };
 
+      // Start keep-alive heartbeat to prevent idle TCP drops
+      this.clearKeepAlive();
+      this.keepAliveTimer = setInterval(() => {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          try {
+            this.ws.ping();
+          } catch { /* ignore ping failures */ }
+        }
+      }, 15_000);
+
       const ws = new WebSocket(url, { maxPayload: 25 * 1024 * 1024 });
       this.ws = ws;
 
@@ -1608,6 +1620,7 @@ export class GatewayManager {
       });
 
       ws.on("close", () => {
+        this.clearKeepAlive();
         const wasConnected = this.connected;
         if (this.ws === ws) {
           this.ws = null;
@@ -1714,9 +1727,17 @@ export class GatewayManager {
       });
     }
 
+    this.clearKeepAlive();
     if (this.ws) {
       try { this.ws.close(); } catch { /* ignore */ }
       this.ws = null;
+    }
+  }
+
+  private clearKeepAlive(): void {
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = null;
     }
   }
 

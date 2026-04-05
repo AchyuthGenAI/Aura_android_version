@@ -119,7 +119,14 @@ Implemented in the codebase:
 - managed voice key behavior with no user-facing key editing path
 - confirmation pipeline wired to gateway approval events with native decisions (`allow-once`, `allow-always`, `deny`)
 - support-bundle export path from Settings for diagnostics/troubleshooting
-- completely overhauled the floating desktop Widget UI (added History and Tools panels, responsive chat bubbles, premium glassmorphism layout)
+- completely overhauled the floating desktop Widget UI (History/Tools panels, premium glassmorphism)
+
+Active integration work (see TASK.md for full checklist):
+- Unifying ALL chat through OpenClaw (removing dual LLM paths) — Phase 1
+- Performance optimization targeting <500ms time-to-first-token — Phase 4
+- Smarter task/conversation handling via system prompt engineering — Phase 5
+- Full skills integration with runtime indexing and UI launching — Phase 3
+- Natural language automation creation ("check X every hour") — Phase 2
 
 Still to deepen:
 - remove more dormant legacy execution code in the main process

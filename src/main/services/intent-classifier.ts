@@ -1,16 +1,17 @@
 /**
- * Intent classifier for Aura Desktop.
- * Classifies user messages into intents: query, task, navigate, autofill, monitor.
- * Heuristic-first (< 10ms), LLM fallback only if ambiguous.
+ * Fast-path intent classifier for Aura Desktop.
  *
- * Ported from aura-extension/src/background/heuristicClassifier.ts
- * with adaptations for the desktop task execution pipeline.
+ * Classifies user messages into special intents that bypass OpenClaw:
+ *   navigate, autofill, monitor, desktop → handled locally by Aura
+ *   openclaw → everything else, routed directly to OpenClaw agent
+ *
+ * Heuristic-only (<10ms). No LLM fallback — OpenClaw's agent handles
+ * all task-vs-conversation reasoning natively.
  */
 
 import type { PageContext } from "@shared/types";
-import { completeChat, resolveProvider } from "./llm-client";
 
-export type DesktopIntent = "query" | "task" | "navigate" | "autofill" | "monitor" | "desktop";
+export type DesktopIntent = "openclaw" | "navigate" | "autofill" | "monitor" | "desktop";
 
 export interface DirectAction {
   tool: string;
@@ -23,24 +24,12 @@ export interface Classification {
   directAction?: DirectAction;
 }
 
-// ── Regex patterns (ported from aura-extension) ─────────────────────────────
+// ── Regex patterns ──────────────────────────────────────────────────────────
 
 const NAVIGATE_RE = /\b(go to|open|visit|navigate to|take me to|load|launch)\b/i;
 const SEARCH_RE = /\b(search\s+(?:for|on)|google(?:\s+for)?|find on google|look up|look it up|bing)\b|\bsearch\b(?!\s+result)/i;
 const SCROLL_RE = /\b(scroll (up|down|to top|to bottom)|go to (top|bottom)|back to top)\b/i;
-const CLICK_RE = /\b(click|tap|press on)\b/i;
-const TYPE_RE = /\b(type|enter|fill|write)\b/i;
-const SELECT_RE = /\bselect\b/i;
-const CHECK_RE = /\b(check|uncheck)\b/i;
-const SUBMIT_RE = /\b(submit|send form)\b/i;
-const KEY_RE = /\b(press|hit)\s+(enter|tab|escape|esc|space)\b/i;
 const NAV_CTRL_RE = /\b(go back|back|go forward|forward|reload|refresh)\b/i;
-const SEND_RE = /\b(send|reply|message)\b/i;
-const FIND_RE = /\b(find on (this )?page|highlight|ctrl\+f|find text)\b/i;
-const DELEGATE_TASK_RE = /\b(?:find|get|show|buy|look for|search for|order|book|add)\s+me\b|\bcan\s+you\s+(?:find|get|show|look|search|buy|navigate|go|open|visit|order|book)\b/i;
-const ECOMMERCE_RE = /\b(add\s+to\s+(cart|bag|wishlist)|remove\s+from\s+(cart|bag)|checkout|place\s+(the\s+)?order|buy\s+(it|this|that|now)|purchase(\s+it)?|apply\s+(coupon|promo|code|discount)|proceed\s+to\s+checkout|complete\s+(the\s+)?purchase|sign\s+(in|up|out)|log\s+(in|out)|log\s+me\s+(in|out))\b/i;
-const CONTINUATION_RE = /^(?:then|now|also|next|after\s+that|and\s+then|and\s+also)\s+(?:click|open|go|search|navigate|add|buy|order|checkout|submit|fill|type|scroll|select|press|find|remove|apply|sign|log|proceed|complete|place)\b/i;
-const SUMMARIZE_RE = /\b(summarize|summarise|tldr|tl;dr|tl dr|sum up|give me a summary|brief me|overview of this|what (does|did) this (page|article|site|post) (say|cover|talk about)|key points|main points)\b/i;
 const MONITOR_RE = /\b(monitor|watch this page|track this page|alert me|notify me when|tell me when|let me know when|keep an eye|check this page|check for changes|watch for)\b/i;
 const DESKTOP_RE = /\b(open\s+(notepad|excel|word|vscode|vs\s*code|calculator|paint|cmd|terminal|powershell|file\s*explorer|explorer|chrome|firefox|spotify|discord|slack|steam|task\s*manager)|take\s+(a\s+)?screenshot|screenshot\s+of\s+(the\s+)?screen|click\s+on\s+(the\s+)?(desktop|screen|taskbar|start(\s*menu)?)|type\s+(on\s+)?(the\s+)?(desktop|screen)|move\s+(the\s+)?(mouse|cursor)\s+to|press\s+(windows|win)\s+key|minimize\s+(all|every)|show\s+desktop|desktop\s+(automation|control|takeover))\b/i;
 const AUTOFILL_RE = /\b(fill (this |the |out )?(form|fields?)|autofill|auto-fill|use my (profile|info|details|data)|fill with my (info|details|profile|data)|complete (the |this )?form|fill in (the |this )?form)\b/i;
@@ -75,7 +64,7 @@ const SITE_SEARCH_URLS: Record<string, string> = {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-const stripQuotes = (v: string): string => v.trim().replace(/^["'`""'']+|["'`""'']+$/g, "");
+const stripQuotes = (v: string): string => v.trim().replace(/^["'`\u201c\u201d\u2018\u2019]+|["'`\u201c\u201d\u2018\u2019]+$/g, "");
 
 function normalizeOpenTarget(value: string): string | null {
   const raw = stripQuotes(value).replace(/^(?:the|a|an)\s+/i, "").trim();
@@ -93,8 +82,7 @@ function normalizeOpenTarget(value: string): string | null {
 function tryExtractDirectAction(message: string): DirectAction | null {
   const t = message.trim();
 
-  // If the command contains continuation words, it's a multi-step task, not a single direct action.
-  // Exception: 'add to cart and checkout' etc. Let the task planner handle it.
+  // Multi-step → let OpenClaw handle it
   if (/\b(?:and\s+(?:then\s+)?|then\s+|next\s+|after\s+that)\b/i.test(t)) {
     return null;
   }
@@ -153,21 +141,16 @@ function tryExtractDirectAction(message: string): DirectAction | null {
   return null;
 }
 
-// ── Heuristic classifier ────────────────────────────────────────────────────
+// ── Main fast-path classifier ───────────────────────────────────────────────
 
-export function classifyHeuristic(message: string): Classification {
+/**
+ * Classify a user message using heuristics only (<10ms).
+ * Returns special intents for local handling, or "openclaw" for everything else.
+ *
+ * No LLM fallback — OpenClaw's agent handles task/conversation reasoning natively.
+ */
+export function classifyFastPath(message: string, _pageContext?: PageContext | null): Classification {
   const trimmed = message.trim();
-  const words = trimmed.split(/\s+/);
-
-  // Very short messages with no action verbs → query
-  if (words.length <= 3) {
-    const hasVerb =
-      NAVIGATE_RE.test(trimmed) || SEARCH_RE.test(trimmed) || SCROLL_RE.test(trimmed) ||
-      FIND_RE.test(trimmed) || CLICK_RE.test(trimmed) || TYPE_RE.test(trimmed) ||
-      SELECT_RE.test(trimmed) || CHECK_RE.test(trimmed) || SUBMIT_RE.test(trimmed) ||
-      KEY_RE.test(trimmed) || NAV_CTRL_RE.test(trimmed) || SEND_RE.test(trimmed);
-    if (!hasVerb) return { intent: "query", confidence: 0.9 };
-  }
 
   // Autofill — highest priority
   if (AUTOFILL_RE.test(trimmed)) return { intent: "autofill", confidence: 0.95 };
@@ -175,11 +158,8 @@ export function classifyHeuristic(message: string): Classification {
   // Monitor
   if (MONITOR_RE.test(trimmed)) return { intent: "monitor", confidence: 0.92 };
 
-  // Desktop automation (open native apps, take screenshots, mouse/keyboard control)
+  // Desktop automation
   if (DESKTOP_RE.test(trimmed)) return { intent: "desktop", confidence: 0.93 };
-
-  // Summarize → treat as query (LLM handles it)
-  if (SUMMARIZE_RE.test(trimmed)) return { intent: "query", confidence: 0.9 };
 
   // Try direct action extraction for navigate/scroll
   const direct = tryExtractDirectAction(trimmed);
@@ -187,95 +167,11 @@ export function classifyHeuristic(message: string): Classification {
     return { intent: "navigate", confidence: 0.95, directAction: direct };
   }
 
-  // General action patterns → task intent
-  if (CONTINUATION_RE.test(trimmed)) return { intent: "task", confidence: 0.9 };
-  if (ECOMMERCE_RE.test(trimmed)) return { intent: "task", confidence: 0.9 };
-  if (DELEGATE_TASK_RE.test(trimmed)) return { intent: "task", confidence: 0.85 };
-  if (CLICK_RE.test(trimmed)) return { intent: "task", confidence: 0.88 };
-  if (TYPE_RE.test(trimmed)) return { intent: "task", confidence: 0.85 };
-  if (SELECT_RE.test(trimmed)) return { intent: "task", confidence: 0.85 };
-  if (CHECK_RE.test(trimmed)) return { intent: "task", confidence: 0.85 };
-  if (SUBMIT_RE.test(trimmed)) return { intent: "task", confidence: 0.9 };
-  if (KEY_RE.test(trimmed)) return { intent: "task", confidence: 0.88 };
-  if (SEND_RE.test(trimmed)) return { intent: "task", confidence: 0.8 };
-  if (FIND_RE.test(trimmed)) return { intent: "task", confidence: 0.85 };
-
-  // Default: query
-  return { intent: "query", confidence: 0.7 };
+  // Everything else → OpenClaw handles it (conversation, tasks, skills, etc.)
+  return { intent: "openclaw", confidence: 1.0 };
 }
 
-// ── LLM fallback classifier ────────────────────────────────────────────────
-
-const CLASSIFIER_SYSTEM_PROMPT = `You are an intent classifier for Aura, an AI desktop assistant that can control a web browser.
-
-Classify the user's message into exactly one intent:
-- "query" — general question, conversation, explanation, summarization
-- "task" — requires multiple browser actions (click, type, fill, interact with page elements)
-- "navigate" — go to a URL or search for something
-- "autofill" — fill a form using the user's profile data
-- "monitor" — watch a page for changes and alert
-- "desktop" — interact with the Windows desktop, open native apps, or take screenshots
-
-Respond with ONLY the intent word, nothing else.`;
-
-export async function classifyWithLLM(
-  message: string,
-  pageContext: PageContext | null,
-  apiKey: string,
-): Promise<Classification> {
-  const contextHint = pageContext?.title
-    ? `\n[Current page: ${pageContext.title} — ${pageContext.url}]`
-    : "";
-
-  const result = await completeChat(apiKey, [
-    { role: "system", content: CLASSIFIER_SYSTEM_PROMPT },
-    { role: "user", content: `${message}${contextHint}` },
-  ], { maxTokens: 10, temperature: 0 });
-
-  const intent = result.trim().toLowerCase().replace(/[^a-z]/g, "") as DesktopIntent;
-  const valid: DesktopIntent[] = ["query", "task", "navigate", "autofill", "monitor", "desktop"];
-
-  if (valid.includes(intent)) {
-    return { intent, confidence: 0.8 };
-  }
-  return { intent: "query", confidence: 0.6 };
-}
-
-// ── Main classify function ──────────────────────────────────────────────────
-
-export async function classify(
-  message: string,
-  pageContext: PageContext | null,
-  apiKey: string,
-): Promise<Classification> {
-  const heuristic = classifyHeuristic(message);
-  console.log(`[IntentClassifier] heuristic: intent="${heuristic.intent}" confidence=${heuristic.confidence} for message="${message.slice(0, 80)}"`);
-
-  // High confidence → use heuristic result directly
-  if (heuristic.confidence >= 0.9) {
-    console.log(`[IntentClassifier] High confidence — using heuristic result`);
-    return heuristic;
-  }
-
-  // Low confidence → try LLM with timeout
-  console.log(`[IntentClassifier] Low confidence (${heuristic.confidence}) — calling LLM classifier...`);
-  try {
-    const llmResult = await Promise.race([
-      classifyWithLLM(message, pageContext, apiKey),
-      new Promise<Classification>((resolve) =>
-        setTimeout(() => { console.warn("[IntentClassifier] LLM timeout — using heuristic"); resolve(heuristic); }, 1500),
-      ),
-    ]);
-    console.log(`[IntentClassifier] LLM result: intent="${llmResult.intent}" confidence=${llmResult.confidence}`);
-    // If LLM returned a directAction-capable intent, try to extract it
-    if (llmResult.intent === "navigate" && !llmResult.directAction) {
-      const direct = tryExtractDirectAction(message);
-      if (direct) { llmResult.directAction = direct; console.log("[IntentClassifier] directAction extracted:", JSON.stringify(direct)); }
-    }
-    return llmResult;
-  } catch (err) {
-    console.warn("[IntentClassifier] LLM classify error:", err instanceof Error ? err.message : String(err));
-    // Any LLM error → use heuristic (safe default)
-    return heuristic;
-  }
-}
+// ── Legacy compatibility export ─────────────────────────────────────────────
+// Some callers may still reference `classify()`. Redirect to fast-path.
+export const classify = classifyFastPath;
+export const classifyHeuristic = classifyFastPath;

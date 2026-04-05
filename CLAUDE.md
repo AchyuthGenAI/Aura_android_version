@@ -20,42 +20,63 @@ npm run build
 aura-desktop/
 |-- src/
 |   |-- main/
-|   |   |-- index.ts
+|   |   |-- index.ts                    # Electron main entry, IPC handlers
 |   |   `-- services/
-|   |       |-- gateway-manager.ts
-|   |       |-- monitor-manager.ts
-|   |       |-- browser-controller.ts
-|   |       |-- desktop-controller.ts
-|   |       |-- store.ts
-|   |       `-- ...
+|   |       |-- gateway-manager.ts      # CENTRAL: OpenClaw lifecycle, WS, chat routing (2100+ lines)
+|   |       |-- intent-classifier.ts    # Fast-path heuristic classifier (navigate/monitor/desktop)
+|   |       |-- llm-client.ts           # Standalone Gemini/Groq client (monitor eval only)
+|   |       |-- monitor-manager.ts      # Cron/interval/once job scheduler
+|   |       |-- browser-controller.ts   # Embedded browser tab management
+|   |       |-- desktop-controller.ts   # Native desktop interactions
+|   |       |-- config-manager.ts       # App config, API keys, paths
+|   |       |-- store.ts               # JSON persistence layer
+|   |       `-- vision-agent.ts         # Desktop vision/screenshot analysis
 |   |-- preload/
 |   |   `-- index.ts
 |   |-- renderer/
 |   |   |-- app/
+|   |   |   `-- WidgetApp.tsx           # Floating desktop widget (Chat/Voice/History/Tools)
 |   |   |-- components/
+|   |   |   |-- HistoryPanel.tsx        # Unified chat/voice/task history timeline
+|   |   |   |-- ToolsPanel.tsx          # Skills/Monitors/Macros sub-tabs
+|   |   |   `-- primitives.tsx          # MessageBubble, PendingBubble, AuraLogoBlob
 |   |   |-- services/
 |   |   `-- store/
+|   |       `-- useAuraStore.ts         # Zustand store
 |   `-- shared/
 |       |-- ipc.ts
 |       `-- types.ts
-|-- PRD.md
-|-- PLAN.md
-|-- TASK.md
+|-- PRD.md          # Product requirements
+|-- PLAN.md         # Architecture & delivery plan (READ THIS FIRST)
+|-- TASK.md         # Task tracker with 5-phase integration plan
 `-- package.json
 ```
 
 ## Important Concepts
 
 ### 1. OpenClaw-first runtime
-`GatewayManager` is the main runtime service. It is responsible for:
-- detecting the bundled OpenClaw entrypoint
-- starting the gateway process
-- connecting over WebSocket
-- routing chat requests through OpenClaw
-- streaming status/tool/message events back to the renderer
+`GatewayManager` is the main runtime service. It:
+- Detects the bundled OpenClaw entrypoint (`d:\PV\Aura\openclaw-fork`)
+- Starts the gateway process (`node entry.js gateway run --port 18789`)
+- Connects over WebSocket (protocol v3, Ed25519 device auth)
+- Routes ALL chat requests through OpenClaw (no parallel LLM path)
+- Streams status/tool/message events back to the renderer
 
-### 2. Automations
-The product now uses an automation-job model rather than only page monitors.
+### 2. Chat routing (current architecture)
+```
+User message → classifyFastPath() [<10ms, regex only]
+  → navigate/scroll/back → instant local action
+  → monitor → local MonitorManager scheduling
+  → desktop → vision-agent loop
+  → EVERYTHING ELSE → streamViaOpenClaw("main") → OpenClaw agent handles it
+```
+
+**IMPORTANT**: Do NOT add new LLM calls in the main process for chat routing.
+All intelligence lives in OpenClaw's agent pipeline. Use `streamViaOpenClaw()`
+for any AI-powered task.
+
+### 3. Automations
+The product uses an automation-job model rather than only page monitors.
 
 Important types:
 - `AutomationJob`
@@ -63,28 +84,41 @@ Important types:
 - `AutomationJobRun`
 
 Compatibility note:
-- old persisted `monitors` data is still normalized into `automationJobs`
+- Old persisted `monitors` data is still normalized into `automationJobs`
+- `MonitorManager` handles interval, once, and cron-style schedules
+- Scheduled jobs dispatch through OpenClaw chat runs
 
-### 3. Renderer shell
-The renderer is now structured as a managed app shell:
-- sidebar navigation
-- shared top header in `MainSurface`
-- route-specific surfaces for Home, Browser, Desktop, Automations, Skills, History, Profile, and Settings
+### 4. Skills
+53 OpenClaw skills are installed in workspace:
+`%APPDATA%\aura-desktop\openclaw-home\.openclaw\workspace\skills\`
+
+Skills are loaded by OpenClaw at startup and available to its agent.
+The ToolsPanel in the Widget UI lists them for user discovery.
+
+### 5. Renderer shell
+The renderer has two surfaces:
+- **Main window**: sidebar navigation → Home, Browser, Desktop, Automations, Skills, History, Profile, Settings
+- **Widget window**: floating overlay → Chat, Voice, History, Tools tabs
+
+Both share `useAuraStore` (Zustand) for global state.
 
 ## Editing Guidance
 
-- prefer updating shared contracts when changing cross-process behavior
-- keep runtime details in the main process and avoid leaking managed secrets to the renderer
-- preserve storage compatibility when changing persisted models
-- use `apply_patch` for source edits
+- **All chat goes through OpenClaw** — never add a parallel LLM path for conversation
+- Only use local LLM calls (`llm-client.ts`) for fast utility tasks (monitor condition eval)
+- Prefer updating shared contracts when changing cross-process behavior
+- Keep runtime details in the main process; don't leak secrets to the renderer
+- Preserve storage compatibility when changing persisted models
+- Maintain the premium "Achyuth UI" design language (glassmorphism, spring-loaded buttons, rich gradients)
 
-## Current Product Direction
+## Active Development
 
-The repo is completing its migration toward a cleaner managed-runtime model with OpenClaw. When editing:
-- prefer OpenClaw execution paths over local fallback execution
-- treat user-facing settings as a runtime dashboard, not a raw config editor
-- prefer “automation jobs” wording over “monitors” in new UX unless you are touching compatibility code
-- maintain the highly polished "Achyuth UI" design language in the Renderer components (glassmorphism overlays, spring-loaded buttons, rich responsive gradients).
+See `TASK.md` for the 5-phase OpenClaw integration plan:
+- Phase 1 (P0): Unify all chat through OpenClaw — IN PROGRESS
+- Phase 4 (P0): Performance <500ms TTFT — IN PROGRESS
+- Phase 5 (P1): Smarter intent via system prompt
+- Phase 3 (P1): Skills integration
+- Phase 2 (P2): Automation from chat
 
 ## Verification Baseline
 
