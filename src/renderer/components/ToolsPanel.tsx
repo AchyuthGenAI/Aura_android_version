@@ -121,17 +121,32 @@ export const ToolsPanel = (): JSX.Element => {
         {/* MONITORS TAB */}
         {activeTab === "monitors" && (
           monitors.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full gap-3 text-center py-16">
-              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/5">
+            <div className="flex flex-col items-center justify-center h-full gap-3 text-center py-12">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/5 text-aura-muted">
                 <MonitorIcon />
               </div>
               <div>
-                <p className="text-sm font-medium text-aura-muted">No monitors running</p>
-                <p className="text-xs text-white/30 mt-1">Set up page tracking in the main app</p>
+                <p className="text-sm font-medium text-aura-muted">No automations running</p>
+                <p className="text-xs text-white/30 mt-1 max-w-[200px] mb-4">Schedule recurring jobs or monitor pages</p>
+                <button
+                  onClick={() => setInputValue("Schedule an automation to: ")}
+                  className="px-4 py-2 bg-aura-primary text-white text-xs font-semibold rounded-full shadow-[0_0_15px_rgba(138,43,226,0.4)] transition-transform hover:scale-105 active:scale-95"
+                >
+                  Create Automation
+                </button>
               </div>
             </div>
           ) : (
             <div className="space-y-1 mt-1">
+              <div className="flex justify-between items-center px-2 py-1 mb-2">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-500/70">Active Jobs</span>
+                <button 
+                  onClick={() => setInputValue("Schedule an automation to: ")}
+                  className="text-[10px] font-bold uppercase tracking-wide text-aura-primary hover:text-aura-secondary transition-colors bg-white/5 px-2 py-1 rounded-md"
+                >
+                  + New
+                </button>
+              </div>
               {monitors.map((m) => (
                 <div key={m.id} className="flex items-center justify-between rounded-[16px] px-3 py-3 bg-white/[0.02] border border-white/5">
                   <div className="flex items-center gap-3 min-w-0">

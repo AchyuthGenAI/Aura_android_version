@@ -12,7 +12,8 @@ import { ConfigManager } from "./services/config-manager";
 import { DesktopController } from "./services/desktop-controller";
 import { GatewayManager } from "./services/gateway-manager";
 import { MonitorManager } from "./services/monitor-manager";
-
+import { AutomationBridge } from "./services/automation-bridge";
+import { completeChat, resolveProvider } from "./services/llm-client";
 import { SkillRegistry } from "./services/skill-registry";
 import { AuraStore } from "./services/store";
 
@@ -365,6 +366,9 @@ const createAppWindows = async (): Promise<void> => {
       });
     });
     activeGatewayManager.setMonitorManager(activeMonitorManager);
+
+    const automationBridge = new AutomationBridge(activeMonitorManager);
+    activeGatewayManager.setAutomationBridge(automationBridge);
 
     activeDesktopController = new DesktopController();
 

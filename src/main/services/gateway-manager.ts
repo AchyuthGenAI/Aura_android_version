@@ -26,6 +26,7 @@ import { AuraStore } from "./store";
 import { classifyFastPath, type Classification } from "./intent-classifier";
 import type { MonitorManager } from "./monitor-manager";
 import type { SkillRegistry } from "./skill-registry";
+import type { AutomationBridge } from "./automation-bridge";
 
 import WebSocket from "ws";
 import { completeChat, resolveGroqApiKey, resolveGeminiApiKey, resolveProvider } from "./llm-client";
@@ -352,6 +353,7 @@ export class GatewayManager {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private keepAliveTimer: NodeJS.Timeout | null = null;
   private monitorManager: MonitorManager | null = null;
+  private automationBridge: AutomationBridge | null = null;
   private gatewayDeviceIdentity: GatewayDeviceIdentity | null = null;
   private readonly openClawBuildTimeoutMs = 12 * 60_000;
   private lastBundleIntegrityMissingFiles: string[] = [];
@@ -361,6 +363,10 @@ export class GatewayManager {
 
   setMonitorManager(mm: MonitorManager): void {
     this.monitorManager = mm;
+  }
+
+  setAutomationBridge(ab: AutomationBridge): void {
+    this.automationBridge = ab;
   }
 
   private safeConsoleLog(line: string): void {
@@ -1218,6 +1224,10 @@ export class GatewayManager {
       }
     }
 
+    if (this.automationBridge) {
+      auraPrompt += "\n\n" + this.automationBridge.getSystemPromptExtension();
+    }
+
     console.log("[GatewayManager] -> streamViaOpenClaw (unified path)");
     return this.handleQueryIntent(messageId, taskId, session, request, pageContext, auraPrompt, surface);
 
@@ -1904,6 +1914,43 @@ export class GatewayManager {
       // Extract and emit tool_use blocks for live automation visualization
       const toolBlocks = extractToolUseBlocks(payload);
       for (const block of toolBlocks) {
+        // --- Added: Intercept automations and bypass openclaw execution ---
+        if (this.automationBridge && this.automationBridge.interceptToolBlock(block.tool, block.input || {})) {
+          // If intercepted, artificially complete it for the UI and skip sending back to OpenClaw
+          this.emit({
+            type: "TOOL_USE",
+            payload: {
+              tool: block.tool,
+              toolUseId: block.toolUseId,
+              runId: payload.runId ?? this.activeRunId ?? undefined,
+              taskId: this.activeRun?.taskId ?? undefined,
+              messageId: this.activeMessageId ?? undefined,
+              surface: "automation",
+              action: "create",
+              params: block.input,
+              status: "done",
+              timestamp: now(),
+            },
+          });
+          // Also echo a fake tool_result back to the agent so it knows it succeeded
+          this.request("chat.send", {
+            sessionKey: this.activeRun?.sessionId || "generic_session",
+            messages: [
+              {
+                role: "tool",
+                content: [
+                  {
+                    type: "tool_result",
+                    tool_use_id: block.toolUseId,
+                    content: "Automation job scheduled successfully."
+                  }
+                ]
+              }
+            ]
+          }).catch(() => {});
+          continue;
+        }
+
         const action = typeof block.input?.action === "string" ? block.input.action : "execute";
         const surface = this.inferToolSurface(block.tool);
         
