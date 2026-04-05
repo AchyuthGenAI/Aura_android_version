@@ -1167,16 +1167,19 @@ export class GatewayManager {
     this.streamedText = "";
 
     const session = this.ensureSession(request.message, request.sessionId);
-    const userMessage: AuraSessionMessage = {
-      id: crypto.randomUUID(),
-      role: "user",
-      content: request.message,
-      timestamp: now(),
-      source: request.source,
-      attachments: request.images,
-    };
-    session.messages.push(userMessage);
-    this.persistCurrentSession(session);
+    const lastMsg = session.messages.length > 0 ? session.messages[session.messages.length - 1] : null;
+    if (!lastMsg || lastMsg.role !== "user" || lastMsg.content !== request.message) {
+      const userMessage: AuraSessionMessage = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: request.message,
+        timestamp: now(),
+        source: request.source,
+        attachments: request.images,
+      };
+      session.messages.push(userMessage);
+      this.persistCurrentSession(session);
+    }
 
     const pageContext = await this.browserController.getPageContext();
     console.log(`[GatewayManager] pageContext url="${pageContext?.url ?? "none"}" title="${pageContext?.title ?? "none"}"`);

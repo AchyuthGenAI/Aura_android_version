@@ -434,6 +434,7 @@ const WidgetApp = (): JSX.Element => {
                         </button>
                       </div>
                     )}
+                    <input type="file" ref={fileInputRef} onChange={handleImageUpload} accept="image/*" style={{ display: "none" }} />
                     <textarea
                       ref={textareaRef}
                       value={inputValue}
