@@ -61,7 +61,8 @@ const api: AuraDesktopApi = {
     requestPermission: (payload) => ipcRenderer.invoke(IPC_CHANNELS.browserPermissionsRequest, payload)
   },
   skills: {
-    list: () => ipcRenderer.invoke(IPC_CHANNELS.skillsList)
+    list: () => ipcRenderer.invoke(IPC_CHANNELS.skillsList),
+    get: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.skillsGet, id)
   },
   config: {
     get: () => ipcRenderer.invoke(IPC_CHANNELS.configGet),

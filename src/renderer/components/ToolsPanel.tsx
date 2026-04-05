@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 import type { AuraMacro, PageMonitor, AutomationJob, SkillSummary, ToolsSubTab } from "@shared/types";
 import { AuraLogoBlob } from "@renderer/components/primitives";
@@ -35,15 +35,21 @@ const TABS: { id: ToolsSubTab; label: string; icon: JSX.Element }[] = [
 /* ─── Main Component ──────────────────────────────────────────────── */
 export const ToolsPanel = (): JSX.Element => {
   const [activeTab, setActiveTab] = useState<ToolsSubTab>("quick");
+  const [skills, setSkills] = useState<SkillSummary[]>([]);
   
   const monitors = useAuraStore((s) => s.monitors);
   const macros = useAuraStore((s) => s.macros);
-  const skills = useAuraStore((s) => s.skills);
   const sendMessage = useAuraStore((s) => s.sendMessage);
   const setInputValue = useAuraStore((s) => s.setInputValue);
 
+  useEffect(() => {
+    if (activeTab === "quick" && skills.length === 0) {
+      window.auraDesktop?.skills?.list().then(setSkills).catch(console.error);
+    }
+  }, [activeTab, skills.length]);
+
   // Group quick skills
-  const availableSkills = skills.filter((s) => s.enabled);
+  const availableSkills = skills;
 
   const handleQuickSkill = (skill: SkillSummary) => {
     // Quickly preload a skill command for the user in the main widget state

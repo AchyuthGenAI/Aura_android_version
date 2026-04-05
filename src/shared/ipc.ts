@@ -31,6 +31,7 @@ export const IPC_CHANNELS = {
   browserCaptureScreenshot: "aura:browser:capture-screenshot",
   browserPermissionsRequest: "aura:browser:permissions-request",
   skillsList: "aura:skills:list",
+  skillsGet: "aura:skills:get",
   configGet: "aura:config:get",
   configSetApiKey: "aura:config:set-api-key",
   configSetModel: "aura:config:set-model",

@@ -80,6 +80,7 @@ export interface AuraDesktopApi {
   };
   skills: {
     list(): Promise<SkillSummary[]>;
+    get(id: string): Promise<SkillSummary | undefined>;
   };
   config: {
     get(): Promise<OpenClawConfig>;

@@ -25,6 +25,7 @@ import { ConfigManager } from "./config-manager";
 import { AuraStore } from "./store";
 import { classifyFastPath, type Classification } from "./intent-classifier";
 import type { MonitorManager } from "./monitor-manager";
+import type { SkillRegistry } from "./skill-registry";
 
 import WebSocket from "ws";
 import { completeChat, resolveGroqApiKey, resolveGeminiApiKey, resolveProvider } from "./llm-client";
@@ -493,6 +494,7 @@ export class GatewayManager {
     private readonly store: AuraStore,
     private readonly browserController: BrowserController,
     private readonly emit: (message: ExtensionMessage<unknown>) => void,
+    private readonly skillRegistry?: SkillRegistry,
     private readonly isPackagedApp = false,
   ) {
     if (!this.isPackagedApp) {
@@ -1200,12 +1202,22 @@ export class GatewayManager {
     }
 
     // Everything else → OpenClaw agent (conversation, tasks, skills, browser actions)
-    const auraPrompt = `You are Aura, a premium desktop AI assistant powered by OpenClaw. Guidelines:
+    let auraPrompt = `You are Aura, a premium desktop AI assistant powered by OpenClaw. Guidelines:
 - For simple questions or casual conversation, respond naturally and conversationally.
 - For actionable requests (automate, browse, search, code, file operations, etc.), use your available tools immediately. Prefer action over explanation.
 - When the user mentions a specific skill by name, use that skill.
 - Be concise but thorough. Show progress clearly during multi-step tasks.
 - You have full access to the user's desktop, browser, and installed skills.`;
+
+    // Inject discovered skills into prompt
+    if (this.skillRegistry) {
+      const skills = this.skillRegistry.getSkills();
+      if (skills.length > 0) {
+        const skillsList = skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");
+        auraPrompt += `\n\nAvailable Active Skills in your workspace:\n${skillsList}`;
+      }
+    }
+
     console.log("[GatewayManager] -> streamViaOpenClaw (unified path)");
     return this.handleQueryIntent(messageId, taskId, session, request, pageContext, auraPrompt, surface);
 

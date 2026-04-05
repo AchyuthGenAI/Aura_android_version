@@ -12,6 +12,8 @@ import { ConfigManager } from "./services/config-manager";
 import { DesktopController } from "./services/desktop-controller";
 import { GatewayManager } from "./services/gateway-manager";
 import { MonitorManager } from "./services/monitor-manager";
+
+import { SkillRegistry } from "./services/skill-registry";
 import { AuraStore } from "./services/store";
 
 const COLLAPSED_WIDGET_SIZE = 84;
@@ -32,6 +34,7 @@ let widgetWindow: BrowserWindow | null = null;
 let activeGatewayManager: GatewayManager | null = null;
 let activeMonitorManager: MonitorManager | null = null;
 let activeDesktopController: DesktopController | null = null;
+let activeSkillRegistry: SkillRegistry | null = null;
 let isQuitting = false;
 let isCreatingWindows = false;
 
@@ -333,12 +336,17 @@ const createAppWindows = async (): Promise<void> => {
     const browserController = new BrowserController(mainWindow, browserViewPreloadPath, emit);
     const authService = new AuthService(app.getPath("userData"), store);
     const configManager = new ConfigManager(app.getPath("userData"));
+    
+    activeSkillRegistry = new SkillRegistry(configManager);
+    void activeSkillRegistry.initialize();
+
     activeGatewayManager = new GatewayManager(
       resolveOpenClawRootCandidates(),
       configManager,
       store,
       browserController,
       emit,
+      activeSkillRegistry,
       app.isPackaged,
     );
     activeMonitorManager = new MonitorManager(browserController, store, emit, async (job) => {
