@@ -12,6 +12,8 @@ import type {
   ExtensionMessage,
   GatewayStatus,
   OpenClawConfig,
+  OpenClawSessionDetail,
+  OpenClawSessionSummary,
   PageContext,
   PageMonitor,
   ProviderInfo,
@@ -55,8 +57,14 @@ export interface AuraDesktopApi {
   automation: {
     start(job: AutomationJob): Promise<void>;
     stop(payload: { id: string }): Promise<void>;
+    delete(payload: { id: string }): Promise<void>;
     list(): Promise<AutomationJob[]>;
     runNow(payload: { id: string }): Promise<void>;
+  };
+  sessions: {
+    create(payload?: { title?: string }): Promise<{ sessionKey: string }>;
+    list(): Promise<OpenClawSessionSummary[]>;
+    get(sessionKey: string): Promise<OpenClawSessionDetail | null>;
   };
   monitor: {
     start(monitor: PageMonitor): Promise<void>;

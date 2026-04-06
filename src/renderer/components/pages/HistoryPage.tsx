@@ -2,7 +2,6 @@ import { useState } from "react";
 
 import { useAuraStore } from "@renderer/store/useAuraStore";
 import { SectionHeading } from "../shared";
-import type { AuraSession } from "@shared/types";
 
 const formatDate = (ts: number): string => {
   const d = new Date(ts);
@@ -18,7 +17,8 @@ const formatDate = (ts: number): string => {
 export const HistoryPage = (): JSX.Element => {
   const sessions = useAuraStore((s) => s.sessions);
   const loadSession = useAuraStore((s) => s.loadSession);
-  const [selected, setSelected] = useState<AuraSession | null>(sessions[0] ?? null);
+  const [selectedId, setSelectedId] = useState<string | null>(sessions[0]?.id ?? null);
+  const selected = sessions.find((session) => session.id === selectedId) ?? sessions[0] ?? null;
 
   if (sessions.length === 0) {
     return (
@@ -39,7 +39,7 @@ export const HistoryPage = (): JSX.Element => {
           {sessions.map((session) => (
             <button
               key={session.id}
-              onClick={() => setSelected(session)}
+              onClick={() => setSelectedId(session.id)}
               className={`w-full rounded-[20px] border px-4 py-3 text-left transition-all ${
                 selected?.id === session.id
                   ? "border-aura-violet/30 bg-aura-violet/10 text-aura-text"

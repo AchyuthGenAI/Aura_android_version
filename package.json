@@ -12,13 +12,14 @@
     "dev:main": "tsup --watch",
     "dev:electron": "wait-on http-get://127.0.0.1:5173 file:dist/main.cjs && node scripts/dev-electron.cjs",
     "dev:electron:debug": "wait-on http-get://127.0.0.1:5173 file:dist/main.cjs && AURA_OPEN_DEVTOOLS=1 node scripts/dev-electron.cjs",
-    "build:openclaw": "cd ../openclaw-fork && pnpm install && pnpm build",
+    "build:openclaw": "cd vendor/openclaw && pnpm install && pnpm build",
     "build": "npm run build:openclaw && npm run build:main && npm run build:renderer",
     "build:main": "tsup",
     "build:renderer": "vite build",
     "generate:icons": "powershell -ExecutionPolicy Bypass -File .\\scripts\\generate-windows-icon.ps1",
-    "package:win": "npm run generate:icons && electron-builder --win nsis",
-    "package:win:dir": "npm run generate:icons && electron-builder --win dir",
+    "prepackage": "cd vendor/openclaw && pnpm prune --prod || npm prune --production",
+    "package:win": "npm run prepackage && npm run generate:icons && electron-builder --win nsis",
+    "package:win:dir": "npm run prepackage && npm run generate:icons && electron-builder --win dir",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview"
   },
@@ -31,48 +32,69 @@
       "package.json"
     ],
     "directories": {
-      "buildResources": "build"
+      "buildResources": "build",
+      "output": "release"
     },
     "extraResources": [
       {
-        "from": "../openclaw-fork/openclaw.mjs",
+        "from": "vendor/openclaw/openclaw.mjs",
         "to": "openclaw-src/openclaw.mjs"
       },
       {
-        "from": "../openclaw-fork/package.json",
+        "from": "vendor/openclaw/package.json",
         "to": "openclaw-src/package.json"
       },
       {
-        "from": "../openclaw-fork/dist",
+        "from": "vendor/openclaw/dist",
         "to": "openclaw-src/dist",
         "filter": [
           "**/*"
         ]
       },
       {
-        "from": "../openclaw-fork/assets",
+        "from": "vendor/openclaw/assets",
         "to": "openclaw-src/assets",
         "filter": [
           "**/*"
         ]
       },
       {
-        "from": "../openclaw-fork/skills",
+        "from": "vendor/openclaw/skills",
         "to": "openclaw-src/skills",
         "filter": [
           "**/*"
         ]
+      },
+      {
+        "from": "vendor/openclaw/node_modules",
+        "to": "openclaw-src/node_modules",
+        "filter": [
+          "**/*",
+          "!.cache/**",
+          "!.package-lock.json"
+        ]
       }
+    ],
+    "asarUnpack": [
+      "node_modules/@nut-tree-fork/**",
+      "node_modules/koffi/**"
     ],
     "win": {
       "target": "nsis",
       "icon": "icon.ico"
     },
     "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
       "installerIcon": "icon.ico",
       "uninstallerIcon": "icon.ico",
-      "installerHeaderIcon": "icon.ico"
-    }
+      "installerHeaderIcon": "icon.ico",
+      "deleteAppDataOnUninstall": false,
+      "shortcutName": "Aura Desktop"
+    },
+    "copyright": "Copyright (c) 2025 Persist Ventures",
+    "publish": null
   },
   "dependencies": {
     "@nut-tree-fork/nut-js": "^4.2.6",

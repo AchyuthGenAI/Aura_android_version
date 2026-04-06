@@ -4,17 +4,26 @@ import path from "node:path";
 import { app, BrowserWindow, ipcMain, screen } from "electron";
 
 import { IPC_CHANNELS } from "@shared/ipc";
-import type { ApprovalDecision, AuraStorageShape, ExtensionMessage, SkillSummary, SupportBundleExport, WidgetBounds } from "@shared/types";
+import type {
+  ApprovalDecision,
+  AuraStorageShape,
+  AutomationJob,
+  AutomationJobRun,
+  ExtensionMessage,
+  OpenClawCronJob,
+  OpenClawCronRun,
+  OpenClawSkillEntry,
+  OpenClawToolEntry,
+  SkillSummary,
+  SupportBundleExport,
+  WidgetBounds,
+} from "@shared/types";
 
 import { AuthService } from "./services/auth-service";
 import { BrowserController } from "./services/browser-controller";
 import { ConfigManager } from "./services/config-manager";
 import { DesktopController } from "./services/desktop-controller";
 import { GatewayManager } from "./services/gateway-manager";
-import { MonitorManager } from "./services/monitor-manager";
-import { AutomationBridge } from "./services/automation-bridge";
-import { completeChat, resolveProvider } from "./services/llm-client";
-import { SkillRegistry } from "./services/skill-registry";
 import { AuraStore } from "./services/store";
 
 const COLLAPSED_WIDGET_SIZE = 84;
@@ -33,9 +42,7 @@ app.commandLine.appendSwitch("use-fake-ui-for-media-stream");
 let mainWindow: BrowserWindow | null = null;
 let widgetWindow: BrowserWindow | null = null;
 let activeGatewayManager: GatewayManager | null = null;
-let activeMonitorManager: MonitorManager | null = null;
 let activeDesktopController: DesktopController | null = null;
-let activeSkillRegistry: SkillRegistry | null = null;
 let isQuitting = false;
 let isCreatingWindows = false;
 
@@ -73,8 +80,9 @@ const resolveOpenClawRootCandidates = (): string[] => {
 
   return Array.from(
     new Set([
-      path.join(appPath, "..", "openclaw-fork"),
-      path.join(appPath, "..", "..", "openclaw-fork"),
+      path.join(appPath, "vendor", "openclaw"),
+      path.join(appPath, "..", "vendor", "openclaw"),
+      path.join(appPath, "..", "..", "vendor", "openclaw"),
       path.join(process.resourcesPath, "openclaw-src"),
       path.join(appPath, "openclaw-src"),
       path.join(appPath, "..", "openclaw-src"),
@@ -88,42 +96,79 @@ const findOpenClawRoot = (): string | null =>
     fs.existsSync(path.join(candidate, "openclaw.mjs"))
   ) ?? null;
 
-const readSkillSummary = (skillDirPath: string): SkillSummary | null => {
-  const skillFilePath = path.join(skillDirPath, "SKILL.md");
-  if (!fs.existsSync(skillFilePath)) {
-    return null;
+const toTimestamp = (value: unknown, fallback: number): number => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) return parsed;
   }
+  return fallback;
+};
 
-  const text = fs.readFileSync(skillFilePath, "utf8");
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const name = lines[0]?.replace(/^#+\s*/, "") || path.basename(skillDirPath);
-  const description = lines.find((line) => !line.startsWith("#")) || "Bundled OpenClaw skill";
+const mapCronRunToAutomationRun = (run: OpenClawCronRun): AutomationJobRun => ({
+  runId: run.id,
+  status:
+    run.status === "done" || run.status === "running" || run.status === "error" || run.status === "cancelled"
+      ? run.status
+      : "idle",
+  startedAt: toTimestamp(run.startedAt, Date.now()),
+  finishedAt: run.finishedAt ? toTimestamp(run.finishedAt, Date.now()) : undefined,
+  summary: run.summary,
+  error: run.error,
+});
+
+const mapCronJobToAutomation = (job: OpenClawCronJob, runs: OpenClawCronRun[] = []): AutomationJob => {
+  const createdAt = toTimestamp(job.createdAt, Date.now());
+  const updatedAt = toTimestamp(job.updatedAt, createdAt);
+  const runHistory = runs.map(mapCronRunToAutomationRun);
+  const lastRun = runHistory.length ? runHistory[runHistory.length - 1] : undefined;
 
   return {
-    id: path.basename(skillDirPath),
-    name,
-    description,
-    path: skillDirPath,
-    bundled: true,
-    enabled: true
+    id: job.id,
+    title: job.name || job.prompt?.slice(0, 60) || "Automation",
+    kind: "cron",
+    sourcePrompt: job.prompt,
+    url: typeof job.delivery?.url === "string" ? job.delivery.url : undefined,
+    schedule: {
+      mode: "cron",
+      cron: job.schedule,
+    },
+    createdAt,
+    updatedAt,
+    lastCheckedAt: job.lastRunAt ? toTimestamp(job.lastRunAt, 0) : 0,
+    nextRunAt: job.nextRunAt ? toTimestamp(job.nextRunAt, updatedAt) : undefined,
+    status: job.enabled ? "active" : "paused",
+    triggerCount: runHistory.length,
+    lastRun,
+    runHistory,
   };
 };
 
-const listBundledSkills = (openClawRoot: string | null): SkillSummary[] => {
-  if (!openClawRoot) {
-    return [];
+const mapToolsAndSkillsToSkillSummaries = (
+  tools: OpenClawToolEntry[],
+  skills: OpenClawSkillEntry[],
+): SkillSummary[] => {
+  const skillByName = new Map<string, OpenClawSkillEntry>();
+  const skillById = new Map<string, OpenClawSkillEntry>();
+
+  for (const skill of skills) {
+    skillByName.set(skill.name.toLowerCase(), skill);
+    skillById.set(skill.id.toLowerCase(), skill);
   }
 
-  const skillsRoot = path.join(openClawRoot, "skills");
-  if (!fs.existsSync(skillsRoot)) {
-    return [];
-  }
-
-  return fs
-    .readdirSync(skillsRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => readSkillSummary(path.join(skillsRoot, entry.name)))
-    .filter((skill): skill is SkillSummary => Boolean(skill))
+  return tools
+    .map((tool) => {
+      const matched = skillByName.get(tool.name.toLowerCase()) ?? skillById.get(tool.name.toLowerCase());
+      const pathValue = matched?.path ?? (typeof tool.source === "string" ? tool.source : "");
+      return {
+        id: matched?.id ?? tool.name,
+        name: matched?.name ?? tool.name,
+        description: matched?.description ?? tool.description ?? "OpenClaw capability",
+        path: pathValue,
+        bundled: pathValue.toLowerCase().includes("skill"),
+        enabled: matched?.enabled ?? tool.enabled ?? true,
+      };
+    })
     .sort((a, b) => a.name.localeCompare(b.name));
 };
 
@@ -326,7 +371,7 @@ const createAppWindows = async (): Promise<void> => {
     //       setPermissionCheckHandler uses Chromium names ("audioCapture", "videoCapture")
     const ALLOWED_REQUEST_PERMISSIONS = new Set(["media", "microphone", "camera", "mediaKeySystem"]);
     const ALLOWED_CHECK_PERMISSIONS = new Set(["media", "microphone", "camera", "audioCapture", "videoCapture", "mediaKeySystem"]);
-    // Both windows share the same defaultSession — set handlers once on the session
+    // Both windows share the same defaultSession â€” set handlers once on the session
     mainWindow.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
       callback(ALLOWED_REQUEST_PERMISSIONS.has(permission));
     });
@@ -338,37 +383,14 @@ const createAppWindows = async (): Promise<void> => {
     const authService = new AuthService(app.getPath("userData"), store);
     const configManager = new ConfigManager(app.getPath("userData"));
     
-    activeSkillRegistry = new SkillRegistry(configManager);
-    void activeSkillRegistry.initialize();
-
     activeGatewayManager = new GatewayManager(
       resolveOpenClawRootCandidates(),
       configManager,
       store,
       browserController,
       emit,
-      activeSkillRegistry,
       app.isPackaged,
     );
-    activeMonitorManager = new MonitorManager(browserController, store, emit, async (job) => {
-      const promptParts = [job.sourcePrompt];
-      if (job.url) {
-        promptParts.push(`Target URL: ${job.url}`);
-      }
-      if (job.condition) {
-        promptParts.push(`Condition: ${job.condition}`);
-      }
-      const message = promptParts.filter(Boolean).join("\n\n");
-      return activeGatewayManager!.sendChat({
-        message,
-        source: "text",
-        sessionId: `automation:${job.id}`,
-      });
-    });
-    activeGatewayManager.setMonitorManager(activeMonitorManager);
-
-    const automationBridge = new AutomationBridge(activeMonitorManager);
-    activeGatewayManager.setAutomationBridge(automationBridge);
 
     activeDesktopController = new DesktopController();
 
@@ -411,23 +433,7 @@ const createAppWindows = async (): Promise<void> => {
           settings: storageState.settings,
           permissions: storageState.permissions,
           activeRoute: storageState.activeRoute,
-          sessionCount: storageState.sessionHistory.length + (storageState.currentSession ? 1 : 0),
-          currentSession: storageState.currentSession
-            ? {
-                id: storageState.currentSession.id,
-                title: storageState.currentSession.title,
-                startedAt: storageState.currentSession.startedAt,
-                endedAt: storageState.currentSession.endedAt,
-                messageCount: storageState.currentSession.messages.length,
-              }
-            : null,
-          recentSessions: storageState.sessionHistory.slice(0, 20).map((session) => ({
-            id: session.id,
-            title: session.title,
-            startedAt: session.startedAt,
-            endedAt: session.endedAt,
-            messageCount: session.messages.length,
-          })),
+          currentSessionKey: storageState.currentSessionKey,
           history: storageState.history.slice(0, 50),
           automationJobs: storageState.automationJobs.slice(0, 50),
         },
@@ -454,7 +460,29 @@ const createAppWindows = async (): Promise<void> => {
       };
     };
 
-    // ── Desktop IPC handlers ───────────────────────────────────────────────
+    // â”€â”€ Desktop IPC handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    const listAutomationJobs = async (): Promise<AutomationJob[]> => {
+      if (!activeGatewayManager) return [];
+      const jobs = await activeGatewayManager.cronList();
+      const runs = await Promise.all(
+        jobs.map(async (job) => ({
+          id: job.id,
+          runs: await activeGatewayManager!.cronRuns(job.id).catch(() => [] as OpenClawCronRun[]),
+        })),
+      );
+      const runMap = new Map(runs.map((entry) => [entry.id, entry.runs]));
+      return jobs.map((job) => mapCronJobToAutomation(job, runMap.get(job.id) ?? []));
+    };
+
+    const listSkillSummaries = async (): Promise<SkillSummary[]> => {
+      if (!activeGatewayManager) return [];
+      const [tools, skills] = await Promise.all([
+        activeGatewayManager.toolsCatalog().catch(() => [] as OpenClawToolEntry[]),
+        activeGatewayManager.skillsStatus().catch(() => [] as OpenClawSkillEntry[]),
+      ]);
+      return mapToolsAndSkillsToSkillSummaries(tools, skills);
+    };
+
     ipcMain.handle(IPC_CHANNELS.desktopScreenshot, async () =>
       activeDesktopController!.captureScreenshot()
     );
@@ -562,23 +590,67 @@ const createAppWindows = async (): Promise<void> => {
       const decision = payload.decision ?? (payload.confirmed ? "allow-once" : "deny");
       await activeGatewayManager!.resolveChatConfirmation(payload.requestId, decision);
     });
-    ipcMain.handle(IPC_CHANNELS.automationStart, async (_event, job) => {
-      activeMonitorManager!.scheduleJob(job as import("@shared/types").AutomationJob);
+    ipcMain.handle(IPC_CHANNELS.sessionsCreate, async (_event, payload?: { title?: string }) => {
+      if (!activeGatewayManager) throw new Error("Gateway not ready");
+      return activeGatewayManager.sessionsCreate(payload);
+    });
+    ipcMain.handle(IPC_CHANNELS.sessionsList, async () => {
+      if (!activeGatewayManager) return [];
+      return activeGatewayManager.sessionsList().catch(() => []);
+    });
+    ipcMain.handle(IPC_CHANNELS.sessionsGet, async (_event, sessionKey: string) => {
+      if (!activeGatewayManager) return null;
+      return activeGatewayManager.sessionsGet(sessionKey).catch(() => null);
+    });
+    ipcMain.handle(IPC_CHANNELS.automationStart, async (_event, job: AutomationJob) => {
+      if (!activeGatewayManager) throw new Error("Gateway not ready");
+      const existing = (await activeGatewayManager.cronList()).find((entry) => entry.id === job.id);
+      if (existing) {
+        await activeGatewayManager.cronUpdate(job.id, {
+          name: job.title,
+          prompt: job.sourcePrompt,
+          schedule: job.schedule.cron ?? existing.schedule,
+          enabled: true,
+        });
+        return;
+      }
+      await activeGatewayManager.cronAdd({
+        name: job.title,
+        prompt: job.sourcePrompt,
+        schedule: job.schedule.cron ?? `*/${job.schedule.intervalMinutes ?? job.intervalMinutes ?? 60} * * * *`,
+        sessionKey: store.getState().currentSessionKey ?? undefined,
+        delivery: job.url ? { url: job.url } : undefined,
+      });
     });
     ipcMain.handle(IPC_CHANNELS.automationStop, async (_event, payload: { id: string }) => {
-      activeMonitorManager!.unscheduleJob(payload.id);
+      if (!activeGatewayManager) throw new Error("Gateway not ready");
+      await activeGatewayManager.cronUpdate(payload.id, { enabled: false });
     });
-    ipcMain.handle(IPC_CHANNELS.automationList, async () => activeMonitorManager!.listJobs());
+    ipcMain.handle(IPC_CHANNELS.automationDelete, async (_event, payload: { id: string }) => {
+      if (!activeGatewayManager) throw new Error("Gateway not ready");
+      await activeGatewayManager.cronRemove(payload.id);
+    });
+    ipcMain.handle(IPC_CHANNELS.automationList, async () => listAutomationJobs().catch(() => []));
     ipcMain.handle(IPC_CHANNELS.automationRunNow, async (_event, payload: { id: string }) => {
-      await activeMonitorManager!.runJobNow(payload.id);
+      if (!activeGatewayManager) throw new Error("Gateway not ready");
+      await activeGatewayManager.cronRun(payload.id);
     });
-    ipcMain.handle(IPC_CHANNELS.monitorStart, async (_event, monitor) => {
-      activeMonitorManager!.scheduleMonitor(monitor as import("@shared/types").PageMonitor);
+    ipcMain.handle(IPC_CHANNELS.monitorStart, async (_event, monitor: AutomationJob) => {
+      if (!activeGatewayManager) throw new Error("Gateway not ready");
+      const schedule = monitor.schedule.cron ?? `*/${monitor.schedule.intervalMinutes ?? monitor.intervalMinutes ?? 60} * * * *`;
+      await activeGatewayManager.cronAdd({
+        name: monitor.title,
+        prompt: monitor.sourcePrompt,
+        schedule,
+        sessionKey: store.getState().currentSessionKey ?? undefined,
+        delivery: monitor.url ? { url: monitor.url } : undefined,
+      });
     });
     ipcMain.handle(IPC_CHANNELS.monitorStop, async (_event, payload: { id: string }) => {
-      activeMonitorManager!.unscheduleMonitor(payload.id);
+      if (!activeGatewayManager) throw new Error("Gateway not ready");
+      await activeGatewayManager.cronUpdate(payload.id, { enabled: false });
     });
-    ipcMain.handle(IPC_CHANNELS.monitorList, async () => store.getState().monitors);
+    ipcMain.handle(IPC_CHANNELS.monitorList, async () => listAutomationJobs().catch(() => []));
     ipcMain.handle(IPC_CHANNELS.configGet, async () => configManager.readConfig());
     ipcMain.handle(IPC_CHANNELS.configSetApiKey, async (_event, payload: { provider: string; apiKey: string }) => {
       configManager.setApiKey(payload.provider, payload.apiKey);
@@ -611,7 +683,11 @@ const createAppWindows = async (): Promise<void> => {
       store.set("permissions", nextPermissions);
       return nextPermissions;
     });
-    ipcMain.handle(IPC_CHANNELS.skillsList, async () => listBundledSkills(findOpenClawRoot()));
+    ipcMain.handle(IPC_CHANNELS.skillsList, async () => listSkillSummaries().catch(() => []));
+    ipcMain.handle(IPC_CHANNELS.skillsGet, async (_event, id: string) => {
+      const skills = await listSkillSummaries().catch(() => []);
+      return skills.find((skill) => skill.id === id || skill.name === id) ?? null;
+    });
 
     ipcMain.on(IPC_CHANNELS.internalBrowserSelection, (event, payload) => {
       browserController.handleSelectionEvent(event.sender.id, payload as { text: string; x: number; y: number } | null);
@@ -646,7 +722,6 @@ const createAppWindows = async (): Promise<void> => {
 
     await browserController.initialize();
     await activeGatewayManager!.bootstrap();
-    activeMonitorManager!.start();
 
     if (!launchedAsWidgetOnly && !mainWindow.isVisible()) {
       mainWindow.show();
@@ -674,7 +749,6 @@ void app.whenReady().then(() => {
 
 app.on("before-quit", () => {
   isQuitting = true;
-  activeMonitorManager?.stop();
   void activeGatewayManager?.shutdown();
 });
 

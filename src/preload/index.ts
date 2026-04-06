@@ -37,8 +37,14 @@ const api: AuraDesktopApi = {
   automation: {
     start: (job) => ipcRenderer.invoke(IPC_CHANNELS.automationStart, job),
     stop: (payload) => ipcRenderer.invoke(IPC_CHANNELS.automationStop, payload),
+    delete: (payload: { id: string }) => ipcRenderer.invoke(IPC_CHANNELS.automationDelete, payload),
     list: () => ipcRenderer.invoke(IPC_CHANNELS.automationList),
     runNow: (payload: { id: string }) => ipcRenderer.invoke(IPC_CHANNELS.automationRunNow, payload)
+  },
+  sessions: {
+    create: (payload?: { title?: string }) => ipcRenderer.invoke(IPC_CHANNELS.sessionsCreate, payload),
+    list: () => ipcRenderer.invoke(IPC_CHANNELS.sessionsList),
+    get: (sessionKey: string) => ipcRenderer.invoke(IPC_CHANNELS.sessionsGet, sessionKey)
   },
   monitor: {
     start: (monitor) => ipcRenderer.invoke(IPC_CHANNELS.monitorStart, monitor),

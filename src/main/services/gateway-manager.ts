@@ -5,15 +5,19 @@ import { spawn, type ChildProcess } from "node:child_process";
 
 import type {
   ApprovalDecision,
-  AuraSession,
-  AuraSessionMessage,
   ConfirmActionPayload,
-  OpenClawRun,
-  OpenClawRunSurface,
   BootstrapState,
   ChatSendRequest,
   ExtensionMessage,
   GatewayStatus,
+  OpenClawCronJob,
+  OpenClawCronRun,
+  OpenClawRun,
+  OpenClawRunSurface,
+  OpenClawSessionDetail,
+  OpenClawSessionSummary,
+  OpenClawSkillEntry,
+  OpenClawToolEntry,
   PageContext,
   RuntimeDiagnostics,
   RuntimeStatus,
@@ -23,13 +27,10 @@ import type {
 import { BrowserController } from "./browser-controller";
 import { ConfigManager } from "./config-manager";
 import { AuraStore } from "./store";
-import { classifyFastPath, type Classification } from "./intent-classifier";
-import type { MonitorManager } from "./monitor-manager";
-import type { SkillRegistry } from "./skill-registry";
-import type { AutomationBridge } from "./automation-bridge";
+import { classifyFastPath, type Classification, type DirectAction } from "./intent-classifier";
 
 import WebSocket from "ws";
-import { completeChat, resolveGroqApiKey, resolveGeminiApiKey, resolveProvider } from "./llm-client";
+import { resolveGroqApiKey, resolveGeminiApiKey } from "./llm-client";
 
 const now = (): number => Date.now();
 
@@ -352,22 +353,12 @@ export class GatewayManager {
 
   private reconnectTimer: NodeJS.Timeout | null = null;
   private keepAliveTimer: NodeJS.Timeout | null = null;
-  private monitorManager: MonitorManager | null = null;
-  private automationBridge: AutomationBridge | null = null;
   private gatewayDeviceIdentity: GatewayDeviceIdentity | null = null;
   private readonly openClawBuildTimeoutMs = 12 * 60_000;
   private lastBundleIntegrityMissingFiles: string[] = [];
   private bootstrapDeadlineMs = 120_000;
   private gatewayPortWaitTimeoutMs = 75_000;
   private gatewayReadyHintTimeoutMs = 20_000;
-
-  setMonitorManager(mm: MonitorManager): void {
-    this.monitorManager = mm;
-  }
-
-  setAutomationBridge(ab: AutomationBridge): void {
-    this.automationBridge = ab;
-  }
 
   private safeConsoleLog(line: string): void {
     try {
@@ -447,8 +438,7 @@ export class GatewayManager {
   }
 
   private inferSurface(classification: Classification, pageContext: PageContext | null): OpenClawRunSurface {
-    if (classification.intent === "desktop") return "desktop";
-    if (classification.intent === "monitor") return "automation";
+    if (classification.intent === "navigate") return "browser";
     if (pageContext?.url) return "browser";
     return "chat";
   }
@@ -500,7 +490,6 @@ export class GatewayManager {
     private readonly store: AuraStore,
     private readonly browserController: BrowserController,
     private readonly emit: (message: ExtensionMessage<unknown>) => void,
-    private readonly skillRegistry?: SkillRegistry,
     private readonly isPackagedApp = false,
   ) {
     if (!this.isPackagedApp) {
@@ -1000,7 +989,7 @@ export class GatewayManager {
           console.log(`[GatewayManager] Probing port ${port}...`);
           const alreadyUp = await this.probePort(port);
           if (alreadyUp) {
-            console.log(`[GatewayManager] Port ${port} already in use — connecting to existing gateway.`);
+            console.log(`[GatewayManager] Port ${port} already in use Ã¢â‚¬â€ connecting to existing gateway.`);
             await this.connectWebSocketWithRetry(3);
           } else {
             console.log(`[GatewayManager] Port ${port} is not open yet; checking gateway process state...`);
@@ -1019,7 +1008,7 @@ export class GatewayManager {
             if (!portOpen) {
               throw new Error(`Gateway process started but port ${port} never opened within ${Math.round(portWaitTimeoutMs / 1000)}s`);
             }
-            console.log(`[GatewayManager] Port ${port} is open — connecting WebSocket...`);
+            console.log(`[GatewayManager] Port ${port} is open Ã¢â‚¬â€ connecting WebSocket...`);
             await this.connectWebSocketWithRetry(3);
           }
           console.log(`[GatewayManager] WebSocket connected! connected=${this.connected}`);
@@ -1128,9 +1117,79 @@ export class GatewayManager {
       message: "Response stopped.",
     });
   }
+  async cronAdd(params: Record<string, unknown>): Promise<OpenClawCronJob> {
+    return this.request<OpenClawCronJob>("cron.add", params);
+  }
 
-  async sendChat(request: ChatSendRequest): Promise<{ messageId: string; taskId: string }> {
-    console.log(`\n[GatewayManager] sendChat — message="${request.message.slice(0, 80)}" source=${request.source}`);
+  async cronList(): Promise<OpenClawCronJob[]> {
+    const result = await this.request<{ jobs?: OpenClawCronJob[] } | OpenClawCronJob[]>("cron.list", {});
+    return Array.isArray(result) ? result : result?.jobs ?? [];
+  }
+
+  async cronUpdate(id: string, params: Record<string, unknown>): Promise<OpenClawCronJob | null> {
+    const result = await this.request<OpenClawCronJob | { job?: OpenClawCronJob } | null>("cron.update", { id, ...params });
+    const root = asRecord(result);
+    if (root && "job" in root) {
+      return (root.job as OpenClawCronJob | null | undefined) ?? null;
+    }
+    return (result as OpenClawCronJob | null) ?? null;
+  }
+
+  async cronRemove(id: string): Promise<void> {
+    await this.request("cron.remove", { id });
+  }
+
+  async cronRun(id: string): Promise<void> {
+    await this.request("cron.run", { id });
+  }
+
+  async cronRuns(id: string): Promise<OpenClawCronRun[]> {
+    const result = await this.request<{ runs?: OpenClawCronRun[] } | OpenClawCronRun[]>("cron.runs", { id });
+    return Array.isArray(result) ? result : result?.runs ?? [];
+  }
+
+  async cronStatus(id: string): Promise<Record<string, unknown> | null> {
+    return this.request<Record<string, unknown> | null>("cron.status", { id });
+  }
+
+  async toolsCatalog(): Promise<OpenClawToolEntry[]> {
+    const result = await this.request<{ tools?: OpenClawToolEntry[] } | OpenClawToolEntry[]>("tools.catalog", {});
+    return Array.isArray(result) ? result : result?.tools ?? [];
+  }
+
+  async skillsStatus(): Promise<OpenClawSkillEntry[]> {
+    const result = await this.request<{ skills?: OpenClawSkillEntry[] } | OpenClawSkillEntry[]>("skills.status", {});
+    return Array.isArray(result) ? result : result?.skills ?? [];
+  }
+
+  async skillsInstall(id: string): Promise<void> {
+    await this.request("skills.install", { id });
+  }
+
+  async sessionsCreate(params?: { title?: string }): Promise<{ sessionKey: string }> {
+    const result = await this.request<{ sessionKey?: string; id?: string }>("sessions.create", params ?? {});
+    const sessionKey = asNonEmptyString(result?.sessionKey) ?? asNonEmptyString(result?.id);
+    if (!sessionKey) {
+      throw new Error("sessions.create did not return a session key.");
+    }
+    return { sessionKey };
+  }
+
+  async sessionsList(): Promise<OpenClawSessionSummary[]> {
+    const result = await this.request<{ sessions?: OpenClawSessionSummary[] } | OpenClawSessionSummary[]>("sessions.list", {});
+    return Array.isArray(result) ? result : result?.sessions ?? [];
+  }
+
+  async sessionsGet(sessionKey: string): Promise<OpenClawSessionDetail | null> {
+    const result = await this.request<OpenClawSessionDetail | { session?: OpenClawSessionDetail } | null>("sessions.get", { sessionKey });
+    const root = asRecord(result);
+    if (root && "session" in root) {
+      return (root.session as OpenClawSessionDetail | null | undefined) ?? null;
+    }
+    return (result as OpenClawSessionDetail | null) ?? null;
+  }
+    async sendChat(request: ChatSendRequest): Promise<{ messageId: string; taskId: string }> {
+    console.log(`\n[GatewayManager] sendChat Ã¢â‚¬â€ message="${request.message.slice(0, 80)}" source=${request.source}`);
     console.log(`[GatewayManager] connected=${this.connected} phase=${this.runtimeStatus.phase}`);
 
     const preflightBlocker = await this.getChatPreflightBlocker();
@@ -1166,25 +1225,9 @@ export class GatewayManager {
     this.activeRunId = null;
     this.streamedText = "";
 
-    const session = this.ensureSession(request.message, request.sessionId);
-    const lastMsg = session.messages.length > 0 ? session.messages[session.messages.length - 1] : null;
-    if (!lastMsg || lastMsg.role !== "user" || lastMsg.content !== request.message) {
-      const userMessage: AuraSessionMessage = {
-        id: crypto.randomUUID(),
-        role: "user",
-        content: request.message,
-        timestamp: now(),
-        source: request.source,
-        attachments: request.images,
-      };
-      session.messages.push(userMessage);
-      this.persistCurrentSession(session);
-    }
-
     const pageContext = await this.browserController.getPageContext();
     console.log(`[GatewayManager] pageContext url="${pageContext?.url ?? "none"}" title="${pageContext?.title ?? "none"}"`);
 
-    // ── Fast-path classify (<10ms, heuristic only, no LLM) ──
     const classification = classifyFastPath(request.message, pageContext);
     console.log(`[GatewayManager] fastPath intent="${classification.intent}" confidence=${classification.confidence} directAction=${JSON.stringify(classification.directAction ?? null)}`);
     const surface = this.inferSurface(classification, pageContext);
@@ -1195,54 +1238,24 @@ export class GatewayManager {
       message: "Processing your request.",
     });
 
-    // Special local intents handled by Aura directly
-    if (classification.intent === "monitor" && this.monitorManager) {
-      console.log("[GatewayManager] -> handleMonitorIntent");
-      const groqConfig = this.configManager.readConfig();
-      const { apiKey } = resolveProvider(
-        groqConfig.providers?.google?.apiKey,
-        groqConfig.providers?.groq?.apiKey,
-      );
-      return this.handleMonitorIntent(messageId, taskId, session, request, pageContext, apiKey);
+    if (classification.intent === "navigate" && classification.directAction) {
+      return this.handleNavigateAction(messageId, taskId, request, classification.directAction);
     }
 
-    if (classification.intent === "desktop") {
-      console.log("[GatewayManager] -> handleDesktopIntent");
-      return this.handleDesktopIntent(messageId, taskId, session, request);
-    }
-
-    // Everything else → OpenClaw agent (conversation, tasks, skills, browser actions)
-    let auraPrompt = `You are Aura, a premium desktop AI assistant powered by OpenClaw. Guidelines:
-- For simple questions or casual conversation, respond naturally and conversationally.
-- For actionable requests (automate, browse, search, code, file operations, etc.), use your available tools immediately. Prefer action over explanation.
-- When the user mentions a specific skill by name, use that skill.
-- Be concise but thorough. Show progress clearly during multi-step tasks.
-- You have full access to the user's desktop, browser, and installed skills.`;
-
-    // Inject discovered skills into prompt
-    if (this.skillRegistry) {
-      const skills = this.skillRegistry.getSkills();
-      if (skills.length > 0) {
-        const skillsList = skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");
-        auraPrompt += `\n\nAvailable Active Skills in your workspace:\n${skillsList}`;
-      }
-    }
-
-    if (this.automationBridge) {
-      auraPrompt += "\n\n" + this.automationBridge.getSystemPromptExtension();
-    }
+    const auraPrompt = `You are Aura, a premium desktop AI assistant. You take action - don't just explain.
+Be concise but thorough. When the user asks you to do something recurring or scheduled, use your cron tools.
+When they ask about the web, use your browser tools. For desktop tasks, use your desktop tools.
+Always prefer action over explanation.`;
 
     console.log("[GatewayManager] -> streamViaOpenClaw (unified path)");
-    return this.handleQueryIntent(messageId, taskId, session, request, pageContext, auraPrompt, surface);
-
+    return this.handleQueryIntent(messageId, taskId, request, pageContext, auraPrompt, surface);
   }
 
-  // ── Query intent: stream LLM response ──────────────────────────────────────
+  // Ã¢â€â‚¬Ã¢â€â‚¬ Query intent: stream LLM response Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
-  private async handleQueryIntent(
+    private async handleQueryIntent(
     messageId: string,
     taskId: string,
-    session: AuraSession,
     request: ChatSendRequest,
     pageContext: PageContext | null,
     extraSystemPrompt?: string,
@@ -1254,12 +1267,17 @@ export class GatewayManager {
       if (!this.connected) {
         throw new Error("Managed OpenClaw runtime is unavailable. Restart the runtime from Settings and try again.");
       }
-      // Route through OpenClaw agent (has skills, memory, browser tools, web search)
-      const responseText = await this.streamViaOpenClaw(messageId, request.message, "main", extraSystemPrompt, request.images);
-      this.handleChatSuccess(messageId, taskId, session, request, responseText);
+      const responseText = await this.streamViaOpenClaw(
+        messageId,
+        request.message,
+        request.sessionId ?? "main",
+        extraSystemPrompt,
+        request.images,
+      );
+      this.handleChatSuccess(messageId, taskId, request, responseText);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
-      this.handleChatError(messageId, taskId, session, message);
+      this.handleChatError(messageId, taskId, request, message);
     }
 
     this.activeMessageId = null;
@@ -1268,141 +1286,51 @@ export class GatewayManager {
     return { messageId, taskId };
   }
 
-
-  // ── Monitor intent: extract params and schedule a PageMonitor ────────────
-
-  private async handleMonitorIntent(
+  private async handleNavigateAction(
     messageId: string,
     taskId: string,
-    session: AuraSession,
     request: ChatSendRequest,
-    pageContext: PageContext | null,
-    apiKey: string,
+    directAction: DirectAction,
   ): Promise<{ messageId: string; taskId: string }> {
-    this.beginRun(taskId, messageId, request.sessionId, request.message, "automation");
-    const currentUrl = pageContext?.url ?? "";
-    const currentTitle = pageContext?.title ?? "current page";
-
-    // Use LLM to extract URL, condition, and interval from the user's message
-    let url = currentUrl;
-    let condition = request.message;
-    let intervalMinutes = 30;
+    this.beginRun(taskId, messageId, request.sessionId, request.message, "browser");
 
     try {
-      const extraction = await completeChat(
-        apiKey,
-        [
-          {
-            role: "system",
-            content:
-              `Extract a monitor configuration from the user's message. ` +
-              `Current page URL: ${currentUrl || "none"}. ` +
-              `Respond ONLY with valid JSON, no markdown: ` +
-              `{"url":"<url>","condition":"<plain-english condition>","intervalMinutes":<number>}. ` +
-              `If no URL is mentioned, use the current page URL. ` +
-              `intervalMinutes should be a reasonable check frequency (5, 15, 30, 60, 120, 360, 1440).`,
-          },
-          { role: "user", content: request.message },
-        ],
-        { model: "llama-3.1-8b-instant", maxTokens: 120, temperature: 0 },
-      );
-      const parsed = JSON.parse(extraction.trim()) as { url?: string; condition?: string; intervalMinutes?: number };
-      if (parsed.url) url = parsed.url;
-      if (parsed.condition) condition = parsed.condition;
-      if (parsed.intervalMinutes && parsed.intervalMinutes > 0) intervalMinutes = parsed.intervalMinutes;
-    } catch {
-      // LLM extraction failed — use sensible defaults
+      let responseText = "Done.";
+      switch (directAction.tool) {
+        case "navigate": {
+          const url = typeof directAction.params.url === "string" ? directAction.params.url : "";
+          await this.browserController.navigate({ url });
+          responseText = url ? `Opened ${url}.` : "Opened the requested page.";
+          break;
+        }
+        case "scroll":
+          await this.browserController.runDomAction({ action: "scroll", params: directAction.params });
+          responseText = "Scrolled the page.";
+          break;
+        case "back":
+          await this.browserController.back();
+          responseText = "Went back.";
+          break;
+        case "forward":
+          await this.browserController.forward();
+          responseText = "Went forward.";
+          break;
+        case "reload":
+          await this.browserController.reload();
+          responseText = "Reloaded the page.";
+          break;
+      }
+
+      this.handleChatSuccess(messageId, taskId, request, responseText);
+    } catch (err) {
+      this.handleChatError(messageId, taskId, request, err instanceof Error ? err.message : String(err));
     }
 
-    if (!url) {
-      const responseText = "I need a URL for this watch automation. Open the page you want to track first, or tell me the URL.";
-      const noUrlMsg: AuraSessionMessage = {
-        id: crypto.randomUUID(), role: "assistant", content: responseText, timestamp: now(), source: request.source,
-      };
-      session.messages.push(noUrlMsg);
-      session.endedAt = now();
-      this.persistCurrentSession(session);
-      this.emit({ type: "LLM_DONE", payload: { messageId, fullText: responseText, cleanText: responseText } });
-      this.patchActiveRun({
-        status: "error",
-        completedAt: now(),
-        error: responseText,
-      });
-      this.activeRun = null;
-      this.setStatus({ ...this.runtimeStatus, phase: "ready", gatewayConnected: this.connected, degraded: !this.connected, lastCheckedAt: Date.now(), message: "Managed OpenClaw runtime is online." });
-      return { messageId, taskId };
-    }
-
-    const monitor = {
-      id: crypto.randomUUID(),
-      title: condition.slice(0, 60),
-      kind: "watch" as const,
-      sourcePrompt: request.message,
-      url,
-      condition,
-      intervalMinutes,
-      schedule: {
-        mode: "interval" as const,
-        intervalMinutes,
-      },
-      createdAt: now(),
-      updatedAt: now(),
-      lastCheckedAt: 0,
-      nextRunAt: now() + intervalMinutes * 60 * 1000,
-      status: "active" as const,
-      triggerCount: 0,
-    };
-
-    // Persist to store and schedule the job through the shared automation layer.
-    this.monitorManager!.scheduleJob(monitor);
-
-    const intervalLabel = intervalMinutes >= 60
-      ? `every ${intervalMinutes / 60} hour${intervalMinutes / 60 !== 1 ? "s" : ""}`
-      : `every ${intervalMinutes} minutes`;
-    const responseText =
-      `Automation created. I'll check "${url}" ${intervalLabel} and notify you when: ${condition}. ` +
-      `You can manage it in the Automations tab.`;
-
-    // Persist the response as a chat message
-    const assistantMessage: AuraSessionMessage = {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content: responseText,
-      timestamp: now(),
-      source: request.source,
-    };
-    session.messages.push(assistantMessage);
-    session.endedAt = now();
-    this.persistCurrentSession(session);
-
-    this.emit({
-      type: "LLM_DONE",
-      payload: { messageId, fullText: responseText, cleanText: responseText },
-    });
-    this.patchActiveRun({
-      status: "done",
-      completedAt: now(),
-      summary: responseText,
-    });
+    this.activeMessageId = null;
+    this.activeRunId = null;
     this.activeRun = null;
-    this.setStatus({ ...this.runtimeStatus, phase: "ready", gatewayConnected: this.connected, degraded: !this.connected, lastCheckedAt: Date.now(), message: "Managed OpenClaw runtime is online." });
-
     return { messageId, taskId };
   }
-
-  // ── Desktop intent: vision-action loop ──────────────────────────────────
-
-  private async handleDesktopIntent(
-    messageId: string,
-    taskId: string,
-    session: AuraSession,
-    request: ChatSendRequest,
-  ): Promise<{ messageId: string; taskId: string }> {
-    const desktopPersona = "You are currently operating in native Windows desktop mode. Use OpenClaw desktop tools, verify the screen after meaningful actions, and narrate progress clearly.";
-    return this.handleQueryIntent(messageId, taskId, session, request, null, desktopPersona, "desktop");
-
-  }
-
 
   // --- Private: OpenClaw Gateway Chat ---
 
@@ -1685,7 +1613,7 @@ export class GatewayManager {
         // Auto-reconnect after a successful connection drops
         if (wasConnected && this.gatewayProcess !== null) {
           this.reconnectTimer = setTimeout(() => {
-            console.log("[GatewayManager] WebSocket dropped — reconnecting...");
+            console.log("[GatewayManager] WebSocket dropped Ã¢â‚¬â€ reconnecting...");
             this.connectWebSocket().catch((e) => {
               console.warn("[GatewayManager] Reconnect failed:", (e as Error).message);
             });
@@ -1887,7 +1815,7 @@ export class GatewayManager {
     // When it resolves, trigger the onConnected callback.
     const timeout = setTimeout(() => {
       this.pending.delete(connectReq.id);
-      console.warn("[GatewayManager] Connect request timed out (90s) — no response from gateway. Treating as connected.");
+      console.warn("[GatewayManager] Connect request timed out (90s) Ã¢â‚¬â€ no response from gateway. Treating as connected.");
       // The gateway IS listening (port opened, WS connected) but may not implement
       // the connect handshake response in all versions. Fall through to connected.
       this.onConnected?.();
@@ -1924,46 +1852,9 @@ export class GatewayManager {
         });
       }
 
-      // Extract and emit tool_use blocks for live automation visualization
+            // Extract and emit tool_use blocks for live automation visualization
       const toolBlocks = extractToolUseBlocks(payload);
       for (const block of toolBlocks) {
-        // --- Added: Intercept automations and bypass openclaw execution ---
-        if (this.automationBridge && this.automationBridge.interceptToolBlock(block.tool, block.input || {})) {
-          // If intercepted, artificially complete it for the UI and skip sending back to OpenClaw
-          this.emit({
-            type: "TOOL_USE",
-            payload: {
-              tool: block.tool,
-              toolUseId: block.toolUseId,
-              runId: payload.runId ?? this.activeRunId ?? undefined,
-              taskId: this.activeRun?.taskId ?? undefined,
-              messageId: this.activeMessageId ?? undefined,
-              surface: "automation",
-              action: "create",
-              params: block.input,
-              status: "done",
-              timestamp: now(),
-            },
-          });
-          // Also echo a fake tool_result back to the agent so it knows it succeeded
-          this.request("chat.send", {
-            sessionKey: this.activeRun?.sessionId || "generic_session",
-            messages: [
-              {
-                role: "tool",
-                content: [
-                  {
-                    type: "tool_result",
-                    tool_use_id: block.toolUseId,
-                    content: "Automation job scheduled successfully."
-                  }
-                ]
-              }
-            ]
-          }).catch(() => {});
-          continue;
-        }
-
         const action = typeof block.input?.action === "string" ? block.input.action : "execute";
         const surface = this.inferToolSurface(block.tool);
         
@@ -2043,7 +1934,7 @@ export class GatewayManager {
     }
 
     if (state === "aborted") {
-      // User cancelled — resolve with whatever streamed so far
+      // User cancelled Ã¢â‚¬â€ resolve with whatever streamed so far
       if (this.chatDoneResolve) {
         const resolve = this.chatDoneResolve;
         this.chatDoneResolve = null;
@@ -2079,26 +1970,14 @@ export class GatewayManager {
     return promise;
   }
 
-  // --- Private: Chat Helpers ---
+    // --- Private: Chat Helpers ---
 
   private handleChatSuccess(
     messageId: string,
     taskId: string,
-    session: AuraSession,
     request: ChatSendRequest,
     responseText: string,
   ): void {
-    const assistantMessage: AuraSessionMessage = {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      content: responseText,
-      timestamp: now(),
-      source: request.source,
-    };
-    session.messages.push(assistantMessage);
-    session.endedAt = now();
-    this.persistCurrentSession(session);
-
     this.store.set("history", [
       { id: taskId, command: request.message, result: responseText, status: "done", createdAt: now() },
       ...this.store.getState().history,
@@ -2128,7 +2007,7 @@ export class GatewayManager {
   private handleChatError(
     messageId: string,
     taskId: string,
-    session: AuraSession,
+    _request: ChatSendRequest,
     errorMessage: string,
   ): void {
     this.store.set("history", [
@@ -2136,13 +2015,9 @@ export class GatewayManager {
       ...this.store.getState().history,
     ]);
 
-    session.endedAt = now();
-    this.persistCurrentSession(session);
-
     this.emit({ type: "TASK_ERROR", payload: { taskId, code: "UNKNOWN", message: errorMessage } });
-    
-    // Ensure the error is visible in the chat bubble instead of silently failing
-    const errorDisplay = `\n\n⚠️ **Error:** ${errorMessage}`;
+
+    const errorDisplay = `\n\nError: ${errorMessage}`;
     this.streamedText += errorDisplay;
     this.emit({ type: "LLM_TOKEN", payload: { messageId, token: errorDisplay } });
     this.emit({ type: "LLM_DONE", payload: { messageId, fullText: this.streamedText, cleanText: this.streamedText } });
@@ -2160,51 +2035,6 @@ export class GatewayManager {
       error: errorMessage,
     });
   }
-
-  private ensureSession(command: string, customSessionId?: string): AuraSession {
-    const isBackground = customSessionId?.startsWith("automation:");
-    const existing = this.store.getState().currentSession;
-
-    if (!isBackground && existing && !existing.endedAt) return existing;
-
-    // Check if the background session already exists in history
-    if (customSessionId) {
-      const pastSession = this.store.getState().sessionHistory.find(s => s.id === customSessionId);
-      if (pastSession) return pastSession;
-    }
-
-    const title = command.split(/\s+/).slice(0, 6).join(" ") || "New session";
-    const session: AuraSession = {
-      id: customSessionId || crypto.randomUUID(),
-      startedAt: now(),
-      title,
-      messages: [],
-      pagesVisited: [],
-    };
-    
-    if (!isBackground) {
-      this.store.set("currentSession", session);
-    }
-    return session;
-  }
-
-  private persistCurrentSession(session: AuraSession): void {
-    const isBackground = session.id.startsWith("automation:");
-    const tabs = this.browserController.getTabs();
-    const currentUrl = tabs.tabs.find((t) => t.id === tabs.activeTabId)?.url;
-    
-    if (currentUrl && !session.pagesVisited.includes(currentUrl)) {
-      session.pagesVisited.push(currentUrl);
-    }
-    
-    if (!isBackground) {
-      this.store.set("currentSession", session);
-    }
-    
-    const history = this.store.getState().sessionHistory.filter((s) => s.id !== session.id);
-    this.store.set("sessionHistory", [session, ...history].slice(0, 50));
-  }
-
   private setStatus(next: RuntimeStatus): void {
     this.runtimeStatus = next;
     this.emit({ type: "RUNTIME_STATUS", payload: { status: this.runtimeStatus } });

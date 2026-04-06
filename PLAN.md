@@ -1,154 +1,242 @@
-# Aura Desktop Architecture And Delivery Plan
+# Aura Desktop Architecture & Delivery Plan
 
-## Current Direction
+## Vision
 
-Aura Desktop is a managed OpenClaw desktop client — a single app that wraps
-OpenClaw as its execution engine. Users interact only with Aura's UI; OpenClaw
-runs silently in the background handling all AI tasks, automations, and skills.
+Aura Desktop is a **thin UI/UX wrapper** around OpenClaw. OpenClaw is the brain —
+it understands intent, schedules jobs, manages skills, controls the browser and
+desktop, and handles all AI reasoning. Aura is the shell — it manages windows,
+renders chat, and gives users a beautiful, normie-friendly interface.
 
-The current architecture target is:
-- OpenClaw as the **sole** execution engine (no parallel LLM paths)
-- Electron main process as runtime/bootstrap/orchestration shell
-- React renderer as the managed control surface
-- Local persistence for sessions, profile, settings, and automation jobs
+**One rule**: if OpenClaw already does it, Aura must not re-implement it.
 
 ## Architecture Snapshot
 
-### Main Process
+### What OpenClaw Provides (the brain)
 
-Core responsibilities:
-- Bootstrap and monitor the packaged OpenClaw gateway
-- Expose IPC for chat, browser, desktop, storage, and automations
-- Persist local application state
-- Manage BrowserView and local desktop helpers
-- Fast-path classify special intents (navigate, monitor, autofill) before OpenClaw
+OpenClaw runs as a local gateway process on port 18789. It exposes a full
+WebSocket RPC API that Aura connects to. Key capabilities:
 
-Key services:
-- `GatewayManager` (2100+ lines, central orchestrator)
-  - Runtime lifecycle (bootstrap, spawn, connect, reconnect)
-  - WebSocket connection (protocol v3, Ed25519 device auth)
-  - OpenClaw chat dispatch via `streamViaOpenClaw()`
-  - Streaming events into renderer state (`LLM_TOKEN`, `LLM_DONE`, `RUN_STATUS`, `TOOL_USE`)
-  - Fast-path intent routing for navigate/monitor/desktop
-- `MonitorManager`
-  - Local scheduling/orchestration for automation jobs
-  - Supports interval, once, and cron-style schedules
-  - Dispatches scheduled runs through OpenClaw
-- `BrowserController`
-  - Embedded browser tabs
-  - Page context and bounds sync
-- `AuraStore`
-  - JSON persistence and compatibility migration
-- `IntentClassifier` (being simplified to fast-path only)
-  - Heuristic regex patterns for instant actions (<10ms)
-  - Previously had LLM fallback — being removed in Phase 1
+| Domain | OpenClaw RPC Methods | What it does |
+|--------|---------------------|--------------|
+| **Chat** | `chat.send`, `chat.abort`, `chat.history`, `chat.inject` | Full AI agent with tool use, streaming, multi-turn |
+| **Cron/Scheduling** | `cron.add`, `cron.list`, `cron.remove`, `cron.update`, `cron.run`, `cron.runs`, `cron.status` | Native recurring job scheduler with cron expressions |
+| **Sessions** | `sessions.create`, `sessions.list`, `sessions.get`, `sessions.send`, `sessions.delete`, `sessions.subscribe` | Session management, history, persistence |
+| **Skills** | `skills.install`, `skills.status`, `skills.update`, `skills.bins` | Skill installation, status, workspace management |
+| **Tools** | `tools.catalog`, `tools.effective` | Tool discovery, runtime tool availability |
+| **Models** | `models.list` | Available model enumeration |
+| **Voice/TTS** | `talk.mode`, `talk.speak`, `talk.config`, `tts.enable`, `tts.convert`, `tts.providers` | Voice input/output, speech synthesis |
+| **Desktop** | `node.invoke`, `node.list`, `node.describe`, `node.event` | Desktop node control (click, type, screenshot) |
+| **Browser** | Built into agent tools | Web browsing, page reading, form filling |
+| **Approvals** | `exec.approval.request`, `exec.approval.resolve`, `plugin.approval.*` | User consent for dangerous actions |
+| **Status** | `status.request`, `usage.cost`, `usage.status` | Health checks, usage tracking |
+| **Logs** | `logs.tail` | Real-time gateway log streaming |
+| **Config** | `config.get`, `config.schema.*` | Runtime configuration |
 
-### Renderer
+OpenClaw's agent natively understands user intent. When a user says "send me AI
+news every hour", the agent decides on its own to use the cron tool. When a user
+says "open YouTube", the agent uses browser tools. Aura does not need to classify
+intent — that is OpenClaw's job.
 
-Core responsibilities:
-- Present a chat-first UI
-- Visualize live tool and task events
-- Expose browser, desktop, skills, profile, settings, history, and automations surfaces
-- Keep one app shell across all routes
+### What Aura Provides (the shell)
 
-Key state:
-- `runtimeStatus`
-- `bootstrapState`
-- `messages`
-- `activeRun`
-- `recentRuns`
-- `recentRunEvents`
-- `automationJobs`
-- `actionFeed`
+Aura is responsible only for things OpenClaw cannot do — managing the Electron
+app shell and presenting a polished user interface:
 
-### Chat Flow (Target Architecture After Phase 1)
+| Aura Responsibility | Implementation |
+|---------------------|----------------|
+| **Window management** | Main window + floating widget, always-on-top, taskbar integration |
+| **OpenClaw lifecycle** | Spawn gateway process, connect WebSocket, reconnect on crash |
+| **Device auth** | Ed25519 key generation, protocol v3 handshake |
+| **API key management** | Write auth-profiles.json so OpenClaw can use Gemini/Groq/etc. |
+| **Instant navigation** | Fast-path regex for "open youtube" / "scroll down" (<10ms, no LLM) |
+| **Embedded browser** | BrowserView for in-app web browsing with page context |
+| **Chat rendering** | Token-by-token streaming, message bubbles, markdown rendering |
+| **Run visualization** | Tool use events, active run banners, progress indicators |
+| **Approval UI** | Render exec/plugin approval requests, relay user decisions |
+| **Settings dashboard** | Runtime health, diagnostics, API key config, support bundle export |
+| **System tray** | Launch on startup, widget-only mode, quit |
+| **Local persistence** | Widget position/size, theme, user preferences (not session data) |
+
+### What Aura Must NOT Do
+
+- **Re-implement cron scheduling** — use `cron.add` / `cron.list` / `cron.remove`
+- **Re-implement skill discovery** — use `tools.catalog` / `skills.status`
+- **Re-implement session management** — use `sessions.*` RPCs
+- **Classify intent with regex/LLM before OpenClaw** — only fast-path for instant nav
+- **Run separate LLM calls** — all AI goes through `chat.send`
+- **Maintain its own job/run database** — OpenClaw has `cron.runs`, `sessions.*`
+
+## Chat Flow (Target Architecture)
 
 ```
-User sends message
-  → classifyFastPath() (<10ms, regex only)
-  → If navigate/scroll/back → instant local action (no LLM)
-  → If monitor → handleMonitorIntent() (local scheduling)
-  → Everything else → streamViaOpenClaw("main")
-      → OpenClaw agent decides: converse OR use tools
-      → Streaming events back via WebSocket
-      → Renderer shows tokens in real-time
+User sends message in Aura UI
+  → classifyFastPath() [<10ms, regex only]
+  → "open youtube" / "scroll down" / "go back" → instant local action (no LLM)
+  → EVERYTHING ELSE → GatewayManager.streamViaOpenClaw()
+      → WebSocket → chat.send → OpenClaw agent pipeline
+      → Agent understands intent natively:
+          → conversation? → responds with text
+          → needs to browse? → uses browser tools
+          → needs desktop action? → uses desktop/node tools
+          → needs scheduling? → uses cron tool (cron.add)
+          → needs a skill? → invokes the skill
+      → Streaming events back: chat deltas, tool_use, approvals
+      → Aura renders everything in real-time in the chat UI
 ```
 
-## Implemented Upgrade Work
+## Main Process Services
 
-### Runtime And Contracts
-- Extended shared runtime diagnostics and status types
-- Added automation job types and compatibility mapping from legacy monitor data
-- Exposed automation IPC through main process, preload, and renderer API
-- Removed legacy `TASK_PROGRESS`/`AuraTask` contracts and dropped dormant `task-executor`
-- Moved confirmation IPC to `chat.confirmAction`
+### GatewayManager (central — `gateway-manager.ts`)
 
-### Main Process
-- Improved managed runtime bootstrap/status reporting
-- Tightened gateway status updates for connect, reconnect, stop, and error cases
-- Unified automation job scheduling through shared monitor/automation storage
-- Wired gateway approval request/resolution events into renderer confirmation flow
-- Added WebSocket retry loop with resilient bootstrapping
-- Upgraded automation scheduler for interval, one-time, and cron-style schedules
+Core responsibilities:
+- Spawn OpenClaw gateway as child process (`ELECTRON_RUN_AS_NODE=1`)
+- WebSocket connection with protocol v3 device auth
+- `chat.send` dispatch and streaming event handling
+- Crash recovery with auto-restart (3 attempts, exponential backoff)
+- RPC proxy for `cron.*`, `skills.*`, `sessions.*`, `tools.*` to renderer
+- Fast-path intent bypass for instant navigation only
 
-### Renderer And UX
-- Rebuilt Settings into a managed runtime dashboard
-- Replaced monitor-only framing with an Automations workspace
-- Rebuilt Skills into a searchable categorized catalog
-- Upgraded Home, Browser, Desktop, and main shell layout
-- Aligned consent/chat copy with the OpenClaw-first product model
-- Shifted chat/widget/live banner UI from legacy task progress to run-native timeline events
-- Aligned voice mode lifecycle with OpenClaw run/tool events
-- Completely overhauled the floating desktop Widget UI:
-  - Added HistoryPanel (unified chat/voice/task timeline)
-  - Added ToolsPanel (Skills, Monitors, Macros sub-tabs)
-  - Premium glassmorphism, responsive chat bubbles, micro-animations
+### ConfigManager (`config-manager.ts`)
 
-## Active Work — 5-Phase OpenClaw Full Integration
+- Manage `openclaw.json` config (port, auth, model defaults)
+- Write API key auth-profiles for OpenClaw agents
+- No model selection UI — OpenClaw handles model routing
 
-### Phase 1: Unify Chat Through OpenClaw (P0) — IN PROGRESS
-- Remove dual LLM path (intent classifier LLM fallback + llm-client.ts streaming)
-- Strip intent-classifier to fast-path only
-- Send everything non-special directly to OpenClaw
+### BrowserController (`browser-controller.ts`)
 
-### Phase 4: Performance <500ms TTFT (P0) — IN PROGRESS
-- Optimistic UI rendering
-- WebSocket keep-alive heartbeat
-- Session pre-warming
+- Manage BrowserView tabs within the Electron main window
+- Provide page context (URL, title, visible text) to the chat flow
+- Handle navigation, back/forward, reload from fast-path
 
-### Phase 5: Smarter Intent (P1) — PLANNED
-- System prompt engineering instead of separate classifier
+### DesktopController (`desktop-controller.ts`)
 
-### Phase 3: Skills Integration (P1) — PLANNED
-- skill-registry.ts runtime index
-- Skills manifest injection into OpenClaw prompt
+- Native desktop interactions via `@nut-tree-fork/nut-js`
+- Screenshot, click, type, key press, window management
+- Exposed as IPC for the renderer to call directly
 
-### Phase 2: Automation from Chat (P2) — PLANNED
-- automation-bridge.ts for OpenClaw tool call interception
-- Scheduled prompt-based jobs
+### AuraStore (`store.ts`)
 
-## Remaining Older Work
+- Local JSON persistence for Aura-specific state only:
+  - Widget position, size, expanded state
+  - Theme, notification preferences
+  - User profile (for autofill)
+  - Auth state
+- NOT for session history or cron jobs (those live in OpenClaw)
 
-- Remove dormant legacy direct-execution branches in `GatewayManager`
-- Show richer run history in renderer
-- Validate bundled runtime assets more explicitly at startup
-- Verify packaged behavior on clean Windows machines
+## Renderer
 
-## Working Rules For This Repo
+### Surfaces
 
-- Treat OpenClaw as the product engine and Aura as the shell
-- **All chat goes through OpenClaw** — no parallel LLM paths for conversation
-- Only use local LLM calls for fast utility tasks (monitor condition eval, parameter extraction)
-- Prefer updating shared contracts before adding UI-only behavior
-- Preserve backwards compatibility for stored monitor data
-- Avoid exposing raw provider/gateway configuration in user-facing UX
+- **Main window**: sidebar → Home, Browser, Desktop, Automations, Skills, History, Profile, Settings
+- **Widget window**: floating overlay → Chat, Voice, History, Tools tabs
+
+Both share `useAuraStore` (Zustand) for UI state.
+
+### Chat UI
+
+The chat interface is the primary surface. Users interact with Aura by typing
+or speaking naturally. The LLM (via OpenClaw) understands intent and takes
+action — no manual setup, no keyword matching, no separate "Automations tab"
+required for creating jobs.
+
+Chat bubbles render:
+- Streamed text (token-by-token)
+- Tool use events (browser actions, desktop actions, cron operations)
+- Inline automation confirmation cards
+- Approval prompts (exec/plugin)
+
+### Automations View
+
+Shows cron jobs fetched from OpenClaw via `cron.list` / `cron.runs`.
+Users can also create automations manually here, but the primary path is chat.
+
+### Skills View
+
+Shows available skills from `tools.catalog` / `skills.status`.
+Tapping a skill pre-fills the chat with a usage example.
+
+## Migration Plan — From Dual-Brain to Thin Wrapper
+
+### Phase 1: Wire Aura to OpenClaw Native APIs (P0 — ACTIVE)
+
+**Goal**: Replace Aura's re-implemented services with OpenClaw RPC calls.
+
+1. **Cron**: Replace `MonitorManager` + `AutomationBridge` with `cron.add` / `cron.list` / `cron.remove` RPCs
+2. **Skills**: Replace `SkillRegistry` disk scan with `tools.catalog` / `skills.status` RPCs
+3. **Sessions**: Replace `AuraStore` session persistence with `sessions.list` / `sessions.get` RPCs
+4. **Intent**: Strip fast-path classifier to navigate/scroll only — remove monitor, desktop, autofill branches
+5. **System prompt**: Remove the fake `create_automation` XML tool instruction — OpenClaw has native cron
+
+### Phase 2: Simplify Gateway Manager (P0)
+
+**Goal**: Reduce `gateway-manager.ts` from 2200+ lines to ~800 by removing
+duplicated handlers.
+
+1. Remove `handleMonitorIntent()` — OpenClaw handles scheduling natively
+2. Remove `handleDesktopIntent()` — OpenClaw handles desktop tools natively
+3. Remove `AutomationBridge` system prompt injection — not needed with native cron
+4. Remove standalone `llm-client.ts` calls for monitor condition eval — OpenClaw does this
+5. Keep only: lifecycle, WebSocket, `chat.send`, streaming events, fast-path nav, approval relay
+
+### Phase 3: Chat-First UX (P1)
+
+**Goal**: Make the chat interface feel like the only thing the user needs.
+
+1. Smart placeholder text and suggestion chips
+2. Inline automation/cron confirmation cards in chat bubbles
+3. Inline skill invocation from chat
+4. Real-time tool use visualization (browser actions, desktop actions)
+
+### Phase 4: Performance (P1)
+
+**Goal**: <500ms time-to-first-token.
+
+1. Optimistic "thinking" UI on send (before IPC round-trip)
+2. WebSocket keep-alive heartbeat (already implemented)
+3. Session key caching
+4. Gateway pre-warming after bootstrap
+
+### Phase 5: Polish & Packaging (P2)
+
+**Goal**: Ship a production `.exe` installer.
+
+1. NSIS installer with proper icons, shortcuts, install directory selection
+2. OpenClaw `node_modules` bundled in `extraResources` (already configured)
+3. Native module asar unpacking (`@nut-tree-fork`, `koffi`)
+4. Auto-update infrastructure (future)
+5. Code signing (future)
+
+## Working Rules
+
+1. **Aura is the shell, OpenClaw is the brain** — never re-implement what OpenClaw provides
+2. **All chat goes through `chat.send`** — no parallel LLM paths, no local intent classification beyond instant nav
+3. **Use OpenClaw RPCs** — `cron.*` for scheduling, `skills.*` for skills, `sessions.*` for history
+4. **Fast-path is for instant actions only** — "open youtube", "scroll down", "go back" — things that don't need AI
+5. **Maintain the premium UI** — glassmorphism, spring-loaded buttons, rich gradients ("Achyuth UI" design language)
+6. **Don't expose raw config** — users see health dashboards, not JSON editors
+
+## OpenClaw Runtime Location
+
+- Dev source: `vendor/openclaw`
+- Packaged app bundle: `openclaw-src` inside Aura's installed resources
+- Runtime home: `%APPDATA%\aura-desktop\openclaw-home\`
+- Config: `%APPDATA%\aura-desktop\openclaw-home\.openclaw\openclaw.json`
+- Skills workspace: `%APPDATA%\aura-desktop\openclaw-home\.openclaw\workspace\skills\`
+- Cron jobs: `%APPDATA%\aura-desktop\openclaw-home\.openclaw\cron\jobs.json`
+- Task runs: `%APPDATA%\aura-desktop\openclaw-home\.openclaw\tasks\runs.sqlite`
+- Auth profiles: `%APPDATA%\aura-desktop\openclaw-home\.openclaw\agents\main\agent\auth-profiles.json`
 
 ## Verification
 
-Current verification baseline:
-- `npm run typecheck`
+```bash
+npm run typecheck     # Type safety
+npm run build         # Full production build
+npm run package:win   # Windows NSIS installer
+```
 
-Desired next verification layers:
-- packaged bootstrap smoke test
-- automation scheduling smoke test
-- TTFT measurement (<500ms target)
+Smoke tests:
+- Gateway bootstraps and connects (`[GatewayManager] WebSocket connected!`)
+- Chat message streams response from OpenClaw
+- "open youtube" navigates instantly (fast-path)
+- "send me news every hour" → OpenClaw creates a cron job (not Aura's MonitorManager)
+- Packaged `.exe` starts on a clean Windows machine

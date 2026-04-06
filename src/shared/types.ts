@@ -140,6 +140,81 @@ export interface AuraSession {
   pagesVisited: string[];
 }
 
+export interface OpenClawCronJob {
+  id: string;
+  name?: string;
+  prompt: string;
+  schedule: string;
+  enabled: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+  lastRunAt?: string;
+  nextRunAt?: string;
+  sessionKey?: string;
+  delivery?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface OpenClawCronRun {
+  id: string;
+  jobId: string;
+  status: string;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+  summary?: string;
+  [key: string]: unknown;
+}
+
+export interface OpenClawToolEntry {
+  name: string;
+  description?: string;
+  category?: string;
+  source?: string;
+  enabled?: boolean;
+  [key: string]: unknown;
+}
+
+export interface OpenClawSkillEntry {
+  id: string;
+  name: string;
+  description?: string;
+  path?: string;
+  enabled?: boolean;
+  [key: string]: unknown;
+}
+
+export interface OpenClawSessionMessage {
+  id?: string;
+  role?: string;
+  text?: string;
+  content?: string | Array<{ type?: string; text?: string; [key: string]: unknown }>;
+  createdAt?: string;
+  timestamp?: string;
+  source?: string;
+  [key: string]: unknown;
+}
+
+export interface OpenClawSessionSummary {
+  sessionKey: string;
+  title?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  lastMessageAt?: string;
+  messageCount?: number;
+  messages?: OpenClawSessionMessage[];
+  [key: string]: unknown;
+}
+
+export interface OpenClawSessionDetail {
+  sessionKey: string;
+  title?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  messages?: OpenClawSessionMessage[];
+  [key: string]: unknown;
+}
+
 export interface HistoryEntry {
   id: string;
   command: string;
@@ -283,7 +358,7 @@ export interface PageContext {
 }
 
 export type AutomationJobKind = "watch" | "scheduled" | "recurring" | "cron";
-export type AutomationJobStatus = "active" | "paused" | "triggered" | "idle" | "running" | "error";
+export type AutomationJobStatus = "active" | "paused" | "pending" | "triggered" | "idle" | "running" | "error";
 export type AutomationScheduleMode = "interval" | "once" | "cron";
 
 export interface AutomationSchedule {
@@ -390,6 +465,7 @@ export interface AuraStorageShape {
   profile: UserProfile;
   settings: AuraSettings;
   permissions: PermissionState[];
+  currentSessionKey: string | null;
   currentSession: AuraSession | null;
   sessionHistory: AuraSession[];
   history: HistoryEntry[];

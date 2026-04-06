@@ -99,6 +99,7 @@ export const createDefaultStorage = (): AuraStorageShape => ({
     widgetOnlyOnStartup: true
   },
   permissions: defaultPermissions(),
+  currentSessionKey: null,
   currentSession: null,
   sessionHistory: [],
   history: [],

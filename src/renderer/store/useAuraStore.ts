@@ -22,6 +22,9 @@ import type {
   ExtensionMessage,
   HistoryEntry,
   OpenClawRun,
+  OpenClawSessionDetail,
+  OpenClawSessionMessage,
+  OpenClawSessionSummary,
   OverlayTab,
   PageContext,
   PageMonitor,
@@ -58,17 +61,90 @@ const mapSessionMessages = (messages: AuraSessionMessage[]): ChatThreadMessage[]
     status: "done"
   }));
 
-const mergeSessions = (storage: AuraStorageShape): AuraSession[] => {
-  const seen = new Map<string, AuraSession>();
-  if (storage.currentSession) {
-    seen.set(storage.currentSession.id, storage.currentSession);
+const toTimestamp = (value: unknown, fallback: number): number => {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed)) return parsed;
   }
-  for (const session of storage.sessionHistory) {
-    if (!seen.has(session.id)) {
-      seen.set(session.id, session);
-    }
+  return fallback;
+};
+
+const getOpenClawMessageText = (message: OpenClawSessionMessage): string => {
+  if (typeof message.text === "string" && message.text) return message.text;
+  if (typeof message.content === "string") return message.content;
+  if (Array.isArray(message.content)) {
+    return message.content
+      .filter((entry) => typeof entry?.text === "string")
+      .map((entry) => entry.text ?? "")
+      .join("");
   }
-  return [...seen.values()].sort((a, b) => b.startedAt - a.startedAt);
+  return "";
+};
+
+const normalizeOpenClawMessage = (message: OpenClawSessionMessage, index: number): AuraSessionMessage => ({
+  id: typeof message.id === "string" ? message.id : `message-${index}`,
+  role: message.role === "assistant" ? "assistant" : "user",
+  content: getOpenClawMessageText(message),
+  timestamp: toTimestamp(message.createdAt ?? message.timestamp, now()),
+  source: message.source === "voice" ? "voice" : "text",
+});
+
+const normalizeOpenClawSessionSummary = (session: OpenClawSessionSummary): AuraSession => ({
+  id: session.sessionKey,
+  startedAt: toTimestamp(session.createdAt ?? session.updatedAt ?? session.lastMessageAt, now()),
+  endedAt: session.updatedAt ? toTimestamp(session.updatedAt, now()) : undefined,
+  title: session.title,
+  messages: Array.isArray(session.messages)
+    ? session.messages.map(normalizeOpenClawMessage).filter((message) => message.content)
+    : [],
+  pagesVisited: [],
+});
+
+const normalizeOpenClawSessionDetail = (
+  detail: OpenClawSessionDetail,
+  fallback?: AuraSession | null,
+): AuraSession => {
+  const messages = Array.isArray(detail.messages)
+    ? detail.messages.map(normalizeOpenClawMessage).filter((message) => message.content)
+    : (fallback?.messages ?? []);
+  const title = detail.title ?? fallback?.title ?? messages.find((message) => message.role === "user")?.content.slice(0, 48) ?? "Session";
+  return {
+    id: detail.sessionKey,
+    startedAt: toTimestamp(detail.createdAt ?? fallback?.startedAt, now()),
+    endedAt: detail.updatedAt ? toTimestamp(detail.updatedAt, now()) : fallback?.endedAt,
+    title,
+    messages,
+    pagesVisited: fallback?.pagesVisited ?? [],
+  };
+};
+
+const upsertSession = (sessions: AuraSession[], session: AuraSession): AuraSession[] =>
+  [session, ...sessions.filter((entry) => entry.id !== session.id)]
+    .sort((left, right) => (right.endedAt ?? right.startedAt) - (left.endedAt ?? left.startedAt));
+
+const buildRemoteSessionState = async (
+  preferredSessionId: string | null,
+): Promise<Pick<AuraState, "sessions" | "currentSessionId" | "messages">> => {
+  const summaries = await window.auraDesktop.sessions.list();
+  let sessions = summaries.map(normalizeOpenClawSessionSummary);
+  const selectedId = preferredSessionId ?? sessions[0]?.id ?? null;
+  if (!selectedId) {
+    return { sessions, currentSessionId: null, messages: [] };
+  }
+
+  const detail = await window.auraDesktop.sessions.get(selectedId);
+  if (!detail) {
+    return { sessions, currentSessionId: selectedId, messages: [] };
+  }
+
+  const normalized = normalizeOpenClawSessionDetail(detail, sessions.find((session) => session.id === selectedId) ?? null);
+  sessions = upsertSession(sessions, normalized);
+  return {
+    sessions,
+    currentSessionId: normalized.id,
+    messages: mapSessionMessages(normalized.messages),
+  };
 };
 
 const createToast = (tone: ToastNotice["tone"], title: string, message?: string): ToastNotice => ({
@@ -242,8 +318,6 @@ type AuraState = {
 };
 
 const applyStorageState = (set: (partial: Partial<AuraState>) => void, storage: AuraStorageShape): void => {
-  const sessions = mergeSessions(storage);
-  const currentSession = storage.currentSession ?? sessions[0] ?? null;
   set({
     authState: storage.authState,
     onboarded: storage.onboarded,
@@ -258,12 +332,8 @@ const applyStorageState = (set: (partial: Partial<AuraState>) => void, storage: 
     overlaySize: storage.overlaySize,
     bubblePosition: storage.bubblePosition,
     bubbleTooltipSeen: storage.bubbleTooltipSeen,
-    sessions,
-    currentSessionId: currentSession?.id ?? null,
-    messages: currentSession ? mapSessionMessages(currentSession.messages) : [],
+    currentSessionId: storage.currentSessionKey ?? storage.currentSession?.id ?? null,
     history: storage.history,
-    automationJobs: storage.automationJobs?.length ? storage.automationJobs : storage.monitors,
-    monitors: storage.monitors,
     macros: storage.macros
   });
 };
@@ -336,16 +406,19 @@ export const useAuraStore = create<AuraState>((set, get) => ({
 
   hydrate: async () => {
     set({ isHydrating: true });
-    const [storage, authState, runtimeStatus, browserTabs, skills] = await Promise.all([
-      window.auraDesktop.storage.get(),
+    const storage = await window.auraDesktop.storage.get() as AuraStorageShape;
+    const preferredSessionId = storage.currentSessionKey ?? storage.currentSession?.id ?? null;
+    const [authState, runtimeStatus, browserTabs, skills, automationJobs, remoteSessions] = await Promise.all([
       window.auraDesktop.auth.getState(),
       window.auraDesktop.runtime.getStatus(),
       window.auraDesktop.browser.getTabs(),
-      window.auraDesktop.skills.list()
+      window.auraDesktop.skills.list(),
+      window.auraDesktop.automation.list(),
+      buildRemoteSessionState(preferredSessionId),
     ]);
 
     applyStorageState(set, {
-      ...(storage as AuraStorageShape),
+      ...storage,
       authState
     });
 
@@ -364,6 +437,11 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       browserTabs: browserTabs.tabs,
       activeBrowserTabId: browserTabs.activeTabId,
       omniboxValue: browserTabs.tabs.find((tab) => tab.id === browserTabs.activeTabId)?.url ?? "",
+      sessions: remoteSessions.sessions,
+      currentSessionId: remoteSessions.currentSessionId,
+      messages: remoteSessions.messages,
+      automationJobs,
+      monitors: automationJobs,
       skills,
       isHydrating: false,
       hydrated: true
@@ -418,7 +496,12 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       }
 
       set({ messages, isLoading: false });
-      void syncPersistedState(set);
+      void Promise.all([
+        syncPersistedState(set),
+        buildRemoteSessionState(get().currentSessionId).then((remoteSessionState) => {
+          set(remoteSessionState);
+        }),
+      ]);
       return;
     }
 
@@ -469,7 +552,12 @@ export const useAuraStore = create<AuraState>((set, get) => ({
         messages: nextMessages,
         toasts: [...state.toasts, createToast("error", "Task failed", payload.message)]
       }));
-      void syncPersistedState(set);
+      void Promise.all([
+        syncPersistedState(set),
+        buildRemoteSessionState(get().currentSessionId).then((remoteSessionState) => {
+          set(remoteSessionState);
+        }),
+      ]);
       return;
     }
 
@@ -656,42 +744,35 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   },
 
   saveMonitors: async (value) => {
-    const nextState = await window.auraDesktop.storage.set({ monitors: value, automationJobs: value });
-    applyStorageState(set, nextState);
+    set({ monitors: value, automationJobs: value });
   },
 
   saveAutomationJobs: async (value) => {
-    const nextState = await window.auraDesktop.storage.set({ automationJobs: value, monitors: value });
-    applyStorageState(set, nextState);
+    set({ automationJobs: value, monitors: value });
   },
 
   startAutomationJob: async (job) => {
-    const automationJobs = get().automationJobs.map((item) =>
-      item.id === job.id ? { ...item, status: "active" as const } : item
-    );
-    const nextState = await window.auraDesktop.storage.set({ automationJobs, monitors: automationJobs });
-    applyStorageState(set, nextState);
     await window.auraDesktop.automation.start(job);
+    const automationJobs = await window.auraDesktop.automation.list();
+    set({ automationJobs, monitors: automationJobs });
   },
 
   stopAutomationJob: async (id) => {
-    const automationJobs = get().automationJobs.map((item) =>
-      item.id === id ? { ...item, status: "paused" as const } : item
-    );
-    const nextState = await window.auraDesktop.storage.set({ automationJobs, monitors: automationJobs });
-    applyStorageState(set, nextState);
     await window.auraDesktop.automation.stop({ id });
+    const automationJobs = await window.auraDesktop.automation.list();
+    set({ automationJobs, monitors: automationJobs });
   },
 
   deleteAutomationJob: async (id) => {
-    await window.auraDesktop.automation.stop({ id });
-    const automationJobs = get().automationJobs.filter((item) => item.id !== id);
-    const nextState = await window.auraDesktop.storage.set({ automationJobs, monitors: automationJobs });
-    applyStorageState(set, nextState);
+    await window.auraDesktop.automation.delete({ id });
+    const automationJobs = await window.auraDesktop.automation.list();
+    set({ automationJobs, monitors: automationJobs });
   },
 
   runAutomationJobNow: async (id) => {
     await window.auraDesktop.automation.runNow({ id });
+    const automationJobs = await window.auraDesktop.automation.list();
+    set({ automationJobs, monitors: automationJobs });
   },
 
   startMonitor: async (monitor) => {
@@ -718,7 +799,10 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       return;
     }
 
-    const sessionId = state.currentSessionId ?? crypto.randomUUID();
+    const sessionId = state.currentSessionId
+      ?? (await window.auraDesktop.sessions.create({
+        title: text.split(/\s+/).slice(0, 6).join(" ") || "New session",
+      })).sessionKey;
     const session = state.sessions.find((entry) => entry.id === sessionId) ?? {
       id: sessionId,
       startedAt: now(),
@@ -760,10 +844,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       route: state.route
     });
 
-    await window.auraDesktop.storage.set({
-      currentSession: nextSession,
-      sessionHistory: nextSessions
-    });
+    await window.auraDesktop.storage.set({ currentSessionKey: nextSession.id });
 
     try {
       await window.auraDesktop.chat.send({
@@ -814,6 +895,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   startNewSession: async () => {
     set({
       currentSessionId: null,
+      sessions: get().sessions,
       messages: [],
       inputValue: "",
       activeRun: null,
@@ -821,25 +903,23 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       lastError: null,
       isLoading: false
     });
-    await window.auraDesktop.storage.set({ currentSession: null });
+    await window.auraDesktop.storage.set({ currentSessionKey: null, currentSession: null });
   },
 
   loadSession: async (sessionId) => {
-    const session = get().sessions.find((entry) => entry.id === sessionId);
-    if (!session) {
-      return;
-    }
+    const remoteSessionState = await buildRemoteSessionState(sessionId);
 
     set({
-      currentSessionId: session.id,
-      messages: mapSessionMessages(session.messages),
+      sessions: remoteSessionState.sessions,
+      currentSessionId: remoteSessionState.currentSessionId,
+      messages: remoteSessionState.messages,
       route: "home",
       activeRun: null,
       actionFeed: [],
       lastError: null
     });
 
-    await window.auraDesktop.storage.set({ currentSession: session, activeRoute: "home" });
+    await window.auraDesktop.storage.set({ currentSessionKey: sessionId, activeRoute: "home" });
   },
 
   browserNewTab: async (url = "https://www.google.com") => {
