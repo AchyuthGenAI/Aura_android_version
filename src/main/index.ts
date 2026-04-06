@@ -12,6 +12,7 @@ import type {
   ExtensionMessage,
   OpenClawCronJob,
   OpenClawCronRun,
+  OpenClawSessionCreateParams,
   OpenClawSkillEntry,
   OpenClawToolEntry,
   SkillSummary,
@@ -590,7 +591,7 @@ const createAppWindows = async (): Promise<void> => {
       const decision = payload.decision ?? (payload.confirmed ? "allow-once" : "deny");
       await activeGatewayManager!.resolveChatConfirmation(payload.requestId, decision);
     });
-    ipcMain.handle(IPC_CHANNELS.sessionsCreate, async (_event, payload?: { title?: string }) => {
+    ipcMain.handle(IPC_CHANNELS.sessionsCreate, async (_event, payload?: OpenClawSessionCreateParams) => {
       if (!activeGatewayManager) throw new Error("Gateway not ready");
       return activeGatewayManager.sessionsCreate(payload);
     });

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 import { IPC_CHANNELS } from "@shared/ipc";
 import type { AuraDesktopApi } from "@renderer/services/desktop-api";
+import type { OpenClawSessionCreateParams } from "@shared/types";
 
 const api: AuraDesktopApi = {
   auth: {
@@ -42,7 +43,7 @@ const api: AuraDesktopApi = {
     runNow: (payload: { id: string }) => ipcRenderer.invoke(IPC_CHANNELS.automationRunNow, payload)
   },
   sessions: {
-    create: (payload?: { title?: string }) => ipcRenderer.invoke(IPC_CHANNELS.sessionsCreate, payload),
+    create: (payload?: OpenClawSessionCreateParams) => ipcRenderer.invoke(IPC_CHANNELS.sessionsCreate, payload),
     list: () => ipcRenderer.invoke(IPC_CHANNELS.sessionsList),
     get: (sessionKey: string) => ipcRenderer.invoke(IPC_CHANNELS.sessionsGet, sessionKey)
   },

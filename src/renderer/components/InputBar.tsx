@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 
 import { useAuraStore } from "@renderer/store/useAuraStore";
+import { getChatComposerPlaceholder } from "./ChatAssistCards";
 
 export const InputBar = ({ compact = false }: { compact?: boolean }): JSX.Element => {
   const inputValue = useAuraStore((s) => s.inputValue);
@@ -64,13 +65,7 @@ export const InputBar = ({ compact = false }: { compact?: boolean }): JSX.Elemen
             ta.style.height = Math.min(ta.scrollHeight, 140) + 'px';
           }}
           onKeyDown={handleKeyDown}
-          placeholder={
-            activeRun?.status === "running"
-              ? "Aura is working on it..."
-              : isLoading
-                  ? "Aura is generating a response..."
-                  : "Ask me anything, or tell me what to do..."
-          }
+          placeholder={getChatComposerPlaceholder(activeRun, isLoading)}
           rows={1}
           className="w-full resize-none rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm text-aura-text outline-none transition placeholder:text-aura-muted focus:border-aura-violet/50 focus:bg-white/8"
           style={{ minHeight: compact ? 36 : 44, maxHeight: 140 }}

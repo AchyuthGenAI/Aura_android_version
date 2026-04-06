@@ -1,406 +1,383 @@
-# Implementation Prompt: Aura Desktop Thin Wrapper Migration
+# Implementation Prompt: Post-Chat Stabilization and Validation
 
-You are working on **Aura Desktop**, an Electron app that wraps OpenClaw (an AI gateway) as its execution engine. Your job is to complete the **Phase 1 & Phase 2 migration** — replacing Aura's duplicated local services with OpenClaw's native RPC calls over WebSocket.
-
-Read `PLAN.md`, `TASK.md`, `CLAUDE.md`, and `PRD.md` first — they contain the full architecture and task checklist.
-
----
-
-## What You're Changing
-
-Aura currently re-implements features that OpenClaw already provides natively over its WebSocket API. You need to:
-
-1. **Replace local cron/automation with OpenClaw's native `cron.*` RPCs**
-2. **Replace local skill registry with OpenClaw's `tools.catalog` / `skills.status` RPCs**
-3. **Strip the intent classifier to navigate-only**
-4. **Remove dead handler methods from GatewayManager**
-5. **Update the renderer to fetch data from OpenClaw RPCs instead of local store**
+You are working on **Aura Desktop**, an Electron app that wraps OpenClaw (a
+local AI gateway) as its execution engine. Read `PLAN.md`, `TASK.md`, and
+`CLAUDE.md` first — they contain the full architecture, current state, and
+editing guidance.
 
 ---
 
-## Context: How the WebSocket RPC Works
+## Current Handoff Status
 
-`GatewayManager` (in `src/main/services/gateway-manager.ts`) already has a working `request<T>(method, params, opts)` method that sends JSON-RPC requests over WebSocket and returns a Promise. Example of existing usage:
+The large migration work is already in place:
 
-```typescript
-// This already works — sends a JSON frame and resolves when gateway responds
-await this.request("chat.send", { sessionKey, message, idempotencyKey });
-await this.request("chat.abort", { runId });
-await this.request("exec.approval.resolve", { id, decision });
-```
+- OpenClaw now lives inside this repo under `vendor/openclaw`
+- Packaged Aura bundles OpenClaw into `openclaw-src`
+- Aura is now a thin wrapper for OpenClaw cron, skills, tools, and sessions
+- `GatewayManager` is the central OpenClaw lifecycle and RPC bridge
+- `MonitorManager`, `AutomationBridge`, and `SkillRegistry` were removed from the live path
+- Session content is intended to be OpenClaw-authored, while Aura only keeps lightweight local UI state
+- The renderer already has chat-first UX work in place:
+  - `ChatAssistCards.tsx`
+  - suggestion chips
+  - richer pending states
+  - a chat-first `HomePage`
 
-The pattern to add new RPC calls is simply adding public methods that call `this.request()`:
-
-```typescript
-async cronList(): Promise<CronJob[]> {
-  const result = await this.request<{ jobs: CronJob[] }>("cron.list", {});
-  return result.jobs;
-}
-```
+Important: the chat unblock pass is now implemented. The next coding agent should treat chat send as working and continue from stabilization plus packaged validation.
 
 ---
 
-## Step-by-Step Implementation
+## Current Status
 
-### Step 1: Add OpenClaw RPC types to `src/shared/types.ts`
+The unblock-and-stabilize pass is now in place, and chat should be able to send messages again. The next priorities are packaged validation, session-key caching, and gateway pre-warming.
 
-Add these types for the OpenClaw cron and tools API responses. The exact shapes come from OpenClaw's gateway — use permissive types since we don't control the schema:
+### What Changed
+
+The recent pass changed the live behavior in these important ways:
+
+1. Aura sends `{ title: "..." }` — OpenClaw rejects `title` as unexpected
+2. Even without `title`, the response extraction looks for `sessionKey` but
+   OpenClaw returns `key`
+3. **The call is unnecessary** — `chat.send` auto-creates sessions if the
+   sessionKey doesn't exist
+
+---
+
+## Current Priorities
+
+1. Validate dev chat/session behavior end to end
+2. Validate the packaged Aura + bundled OpenClaw path
+3. Implement session-key caching and gateway pre-warming
+4. Continue with installer and ship polish
+
+### Note
+
+Historical implementation notes below are preserved for context, but the chat-unblock pass has already been applied in the current repo state.
+
+---
+
+## Implementation Order
+
+1. Fix the blocking chat bug first
+2. Smoke test basic messaging immediately
+3. Then fix the two known follow-up chat correctness issues
+4. Only after that continue with performance and packaged validation
+
+---
+
+## Step 1: Fix `sendMessage` — Remove `sessions.create` Dependency
+
+**File:** `src/renderer/store/useAuraStore.ts`
+
+Find the `sendMessage` method (around line 813). The broken code is:
 
 ```typescript
-// OpenClaw native cron job (from cron.list / cron.add responses)
-export interface OpenClawCronJob {
-  id: string;
-  name?: string;
-  prompt: string;
-  schedule: string; // cron expression like "0 * * * *"
-  enabled: boolean;
-  createdAt?: string;
-  updatedAt?: string;
-  lastRunAt?: string;
-  nextRunAt?: string;
-  sessionKey?: string;
-  delivery?: Record<string, unknown>;
-  [key: string]: unknown; // OpenClaw may add fields
-}
+const sessionId = state.currentSessionId
+  ?? (await window.auraDesktop.sessions.create({
+    title: text.split(/\s+/).slice(0, 6).join(" ") || "New session",
+  })).sessionKey;
+```
 
-// OpenClaw cron run result (from cron.runs response)
-export interface OpenClawCronRun {
-  id: string;
-  jobId: string;
-  status: string;
-  startedAt: string;
-  finishedAt?: string;
-  error?: string;
-  [key: string]: unknown;
-}
+**Replace with:**
 
-// OpenClaw tool catalog entry (from tools.catalog response)
-export interface OpenClawToolEntry {
-  name: string;
-  description?: string;
-  category?: string;
-  source?: string;
-  enabled?: boolean;
-  [key: string]: unknown;
-}
+```typescript
+const sessionId = state.currentSessionId ?? crypto.randomUUID();
+```
 
-// OpenClaw skill entry (from skills.status response)
-export interface OpenClawSkillEntry {
-  id: string;
-  name: string;
-  description?: string;
-  path?: string;
-  enabled?: boolean;
-  [key: string]: unknown;
+This generates a local session key when none exists. `chat.send` will
+auto-create the session in OpenClaw when it receives this key.
+
+**Why this works:** OpenClaw's `chat.send` handler calls
+`appendAssistantTranscriptMessage()` with `createIfMissing: true`, which
+creates the transcript file and session on demand. The session key just needs
+to be a valid string — OpenClaw doesn't require it to be pre-registered.
+
+### Also in `sendMessage`:
+
+The local session title derivation should stay for the optimistic UI:
+
+```typescript
+const session = state.sessions.find((entry) => entry.id === sessionId) ?? {
+  id: sessionId,
+  startedAt: now(),
+  title: text.split(/\s+/).slice(0, 6).join(" ") || "New session",
+  messages: [],
+  pagesVisited: []
+};
+```
+
+This is fine — it creates a local placeholder that will be replaced by server
+data when `buildRemoteSessionState` runs after `LLM_DONE`.
+
+---
+
+## Step 2: Fix `sessionsCreate` in GatewayManager (for explicit use)
+
+**File:** `src/main/services/gateway-manager.ts`
+
+The `sessionsCreate` method (around line 1172) has already been partially
+fixed. The current code sends `{}` to OpenClaw (good) and tries to extract the
+key from `root.key` first (good). But verify it looks like this:
+
+```typescript
+async sessionsCreate(_params?: { title?: string }): Promise<{ sessionKey: string }> {
+  const result = await this.request<Record<string, unknown>>("sessions.create", {});
+  const root = result && typeof result === "object" ? result : {};
+  const sessionKey =
+    asNonEmptyString(root.key)
+    ?? asNonEmptyString(root.sessionKey)
+    ?? asNonEmptyString(root.session_key)
+    ?? asNonEmptyString(root.sessionId)
+    ?? asNonEmptyString(root.id);
+  if (!sessionKey) {
+    throw new Error("sessions.create did not return a session key.");
+  }
+  return { sessionKey };
 }
 ```
 
-### Step 2: Add cron/tools/skills RPC methods to GatewayManager
+The key extraction order is important: `key` first (that's what OpenClaw
+returns), then fallbacks for safety.
 
-In `src/main/services/gateway-manager.ts`, add these public methods. Put them near the existing `stopResponse()` / `sendChat()` public methods:
+**Note:** After Step 1, `sessionsCreate` is no longer called from
+`sendMessage`. It still exists for the `startNewSession` flow and any future
+explicit session creation, but it's no longer on the critical chat path.
+
+---
+
+## Step 3: Verify `streamViaOpenClaw` Session Handling
+
+**File:** `src/main/services/gateway-manager.ts`
+
+Check the `handleQueryIntent` method (around line 1266). It passes the
+session key to `streamViaOpenClaw`:
 
 ```typescript
-// ── OpenClaw Native Cron RPCs ──────────────────────────────────────────────
-
-async cronAdd(params: {
-  name?: string;
-  prompt: string;
-  schedule: string;
-  sessionKey?: string;
-  delivery?: Record<string, unknown>;
-}): Promise<OpenClawCronJob> {
-  return this.request<OpenClawCronJob>("cron.add", params);
-}
-
-async cronList(): Promise<OpenClawCronJob[]> {
-  const result = await this.request<{ jobs: OpenClawCronJob[] }>("cron.list", {});
-  return result?.jobs ?? [];
-}
-
-async cronRemove(jobId: string): Promise<void> {
-  await this.request("cron.remove", { id: jobId });
-}
-
-async cronUpdate(jobId: string, patch: Partial<{ prompt: string; schedule: string; enabled: boolean }>): Promise<OpenClawCronJob> {
-  return this.request<OpenClawCronJob>("cron.update", { id: jobId, ...patch });
-}
-
-async cronRun(jobId: string): Promise<void> {
-  await this.request("cron.run", { id: jobId });
-}
-
-async cronRuns(jobId: string): Promise<OpenClawCronRun[]> {
-  const result = await this.request<{ runs: OpenClawCronRun[] }>("cron.runs", { id: jobId });
-  return result?.runs ?? [];
-}
-
-async cronStatus(): Promise<Record<string, unknown>> {
-  return this.request<Record<string, unknown>>("cron.status", {});
-}
-
-// ── OpenClaw Native Tools/Skills RPCs ──────────────────────────────────────
-
-async toolsCatalog(): Promise<OpenClawToolEntry[]> {
-  const result = await this.request<{ tools: OpenClawToolEntry[] }>("tools.catalog", {});
-  return result?.tools ?? [];
-}
-
-async skillsStatus(): Promise<OpenClawSkillEntry[]> {
-  const result = await this.request<{ skills: OpenClawSkillEntry[] }>("skills.status", {});
-  return result?.skills ?? [];
-}
-
-async skillsInstall(url: string): Promise<unknown> {
-  return this.request("skills.install", { url });
-}
-
-// ── OpenClaw Native Session RPCs ───────────────────────────────────────────
-
-async sessionsList(): Promise<unknown[]> {
-  const result = await this.request<{ sessions: unknown[] }>("sessions.list", {});
-  return result?.sessions ?? [];
-}
-
-async sessionsGet(sessionKey: string): Promise<unknown> {
-  return this.request("sessions.get", { sessionKey });
-}
+const responseText = await this.streamViaOpenClaw(
+  messageId,
+  request.message,
+  request.sessionId ?? "main",  // ← fallback to "main" if no sessionId
+  extraSystemPrompt,
+  request.images,
+);
 ```
 
-Add the necessary type imports at the top of the file:
+This is correct — `request.sessionId` comes from the renderer's
+`chat.send({ sessionId: nextSession.id })` call, and now `nextSession.id`
+will always be either the current session or a fresh UUID.
+
+Find `streamViaOpenClaw` and verify it passes `sessionKey` to the
+`chat.send` RPC:
 
 ```typescript
-import type { OpenClawCronJob, OpenClawCronRun, OpenClawToolEntry, OpenClawSkillEntry } from "@shared/types";
+this.request<{ runId?: string }>("chat.send", {
+  sessionKey,     // ← must be present
+  message,
+  idempotencyKey,
+  ...
+})
 ```
 
-### Step 3: Rewire IPC handlers in `src/main/index.ts`
+This should already be correct. Just verify it.
 
-Find the IPC handler section in `index.ts` (search for `ipcMain.handle`). Replace the automation/skills IPC handlers to use the new GatewayManager RPC methods instead of MonitorManager/SkillRegistry:
+---
 
-**Automation IPC** — replace the handlers that call `activeMonitorManager`:
+## Step 4: Fix the `sessions.create` IPC Handler
+
+**File:** `src/main/index.ts`
+
+Find the `sessionsCreate` IPC handler (around line 593):
 
 ```typescript
-// BEFORE (calls local MonitorManager):
-ipcMain.handle(IPC_CHANNELS.automationStart, (_, job) => activeMonitorManager?.scheduleJob(job));
-ipcMain.handle(IPC_CHANNELS.automationStop, (_, { id }) => activeMonitorManager?.unscheduleJob(id));
-ipcMain.handle(IPC_CHANNELS.automationList, () => activeMonitorManager?.listJobs() ?? []);
-ipcMain.handle(IPC_CHANNELS.automationRunNow, (_, { id }) => activeMonitorManager?.runJobNow(id));
-
-// AFTER (calls OpenClaw cron RPCs):
-ipcMain.handle(IPC_CHANNELS.automationStart, async (_, params) => {
+ipcMain.handle(IPC_CHANNELS.sessionsCreate, async (_event, payload?: { title?: string }) => {
   if (!activeGatewayManager) throw new Error("Gateway not ready");
-  return activeGatewayManager.cronAdd({
-    name: params.title || params.name,
-    prompt: params.sourcePrompt || params.prompt || params.message,
-    schedule: params.schedule?.cron || `*/${params.schedule?.intervalMinutes || 60} * * * *`,
+  return activeGatewayManager.sessionsCreate(payload);
+});
+```
+
+This is fine as-is since `sessionsCreate` now ignores the params. But after
+Step 1, this handler is no longer called from `sendMessage`. It may still be
+called from `startNewSession` if that also uses `sessions.create` — check
+that flow too.
+
+Look at `startNewSession` in the store (around line 914):
+
+```typescript
+startNewSession: async () => {
+  set({
+    currentSessionId: null,
+    sessions: get().sessions,
+    messages: [],
+    inputValue: "",
+    activeRun: null,
+    actionFeed: [],
+    lastError: null,
+    isLoading: false
   });
-});
-ipcMain.handle(IPC_CHANNELS.automationStop, async (_, { id }) => {
-  if (!activeGatewayManager) throw new Error("Gateway not ready");
-  return activeGatewayManager.cronRemove(id);
-});
-ipcMain.handle(IPC_CHANNELS.automationList, async () => {
-  if (!activeGatewayManager) return [];
-  try { return await activeGatewayManager.cronList(); } catch { return []; }
-});
-ipcMain.handle(IPC_CHANNELS.automationRunNow, async (_, { id }) => {
-  if (!activeGatewayManager) throw new Error("Gateway not ready");
-  return activeGatewayManager.cronRun(id);
-});
+  await window.auraDesktop.storage.set({ currentSessionKey: null });
+},
 ```
 
-**Skills IPC** — replace the handlers that call `activeSkillRegistry`:
+This just clears the state — it doesn't call `sessions.create`. Good. When
+the user sends the next message, `sendMessage` will generate a new UUID.
+
+---
+
+## Step 5: Verify Session Refresh After Chat Completes
+
+In `useAuraStore.ts`, the `LLM_DONE` event handler (around line 500) already
+refreshes sessions:
 
 ```typescript
-// BEFORE:
-// SkillRegistry registers its own ipcMain.handle("skills.list") and ("skills.get")
-
-// AFTER (in index.ts, replace or ensure these exist):
-ipcMain.handle(IPC_CHANNELS.skillsList, async () => {
-  if (!activeGatewayManager) return [];
-  try { return await activeGatewayManager.toolsCatalog(); } catch { return []; }
-});
-ipcMain.handle(IPC_CHANNELS.skillsGet, async (_, id: string) => {
-  if (!activeGatewayManager) return null;
-  try {
-    const tools = await activeGatewayManager.toolsCatalog();
-    return tools.find(t => t.name === id) ?? null;
-  } catch { return null; }
-});
+if (message.type === "LLM_DONE") {
+  // ... finalize message ...
+  set({ messages, isLoading: false });
+  void buildRemoteSessionState(get().currentSessionId).then((remoteSessionState) => {
+    set(remoteSessionState);
+  });
+  return;
+}
 ```
 
-### Step 4: Remove MonitorManager, AutomationBridge, SkillRegistry instantiation
+This calls `sessions.list` and `sessions.get` to refresh from OpenClaw after
+each completed response. This is where the server-assigned session title gets
+picked up. Verify this is still working correctly.
 
-In `src/main/index.ts`, find and remove:
+---
 
-1. The `MonitorManager` import and `activeMonitorManager` variable
-2. The `AutomationBridge` import and instantiation
-3. The `SkillRegistry` import, `activeSkillRegistry` variable, and `void activeSkillRegistry.initialize()`
-4. The `activeGatewayManager.setMonitorManager(activeMonitorManager)` call
-5. The `activeGatewayManager.setAutomationBridge(automationBridge)` call
-6. The `activeGatewayManager.onGatewayReconnected` callback that calls `resumePendingJobs`
-7. The `listBundledSkills()` function and `readSkillSummary()` function (if only used for SkillRegistry)
+## Step 6: Smoke Test
 
-Keep the `import { completeChat, resolveProvider } from "./services/llm-client"` ONLY if it's used elsewhere in index.ts (check first).
+After making the changes:
 
-### Step 5: Strip intent classifier to navigate-only
+```bash
+npm run typecheck    # must pass
+npm run dev          # start the app
+```
 
-In `src/main/services/intent-classifier.ts`:
+Test these scenarios:
 
-1. Remove `MONITOR_RE`, `DESKTOP_RE`, `AUTOFILL_RE` regex constants
-2. Update `DesktopIntent` type to: `"openclaw" | "navigate"`
-3. In `classifyFastPath()`, remove the `if (AUTOFILL_RE.test(...))`, `if (MONITOR_RE.test(...))`, and `if (DESKTOP_RE.test(...))` branches
-4. Keep ONLY: the `tryExtractDirectAction()` call for navigate/scroll, and the default `"openclaw"` return
+1. **Basic chat**: Type "hello" → should get a streamed response from OpenClaw
+2. **Fast-path**: Type "open youtube" → should navigate instantly without LLM
+3. **New session**: Click "+ New" → type a message → should work without error
+4. **Session persistence**: After chatting, check History tab → sessions should
+   appear
+5. **Cron via chat**: Type "remind me to check email every morning" → OpenClaw
+   should handle this (may create a cron job via its agent)
+6. **Console**: Check DevTools console for:
+   - `[Aura] TTFT: Xms` — TTFT measurement working
+   - No `sessions.create` errors
+   - `[GatewayManager] WebSocket connected!` — gateway is up
 
-The function should look like:
+---
+
+## Step 7: Fix The Two Known Follow-Up Issues
+
+Once basic chat is restored, address these before moving on to polish work:
+
+1. `ChatActivityCards` can leak activity from the wrong conversation
+   - File: `src/renderer/components/ChatAssistCards.tsx`
+   - Problem: `ChatActivityCards` falls back to `recentRuns[0]` when there is no active run
+   - Risk: loading an older session can show cron/skill cards from a newer unrelated run
+   - Fix direction: scope cards to the current run/session only; do not fall back to the newest unrelated run
+
+2. TTFT timing is not cleared on a direct `LLM_DONE` path
+   - File: `src/renderer/store/useAuraStore.ts`
+   - Problem: `sendTimestamp` is cleared on first `LLM_TOKEN`, but not when a response completes without token deltas
+   - Risk: the next message can inherit a stale timestamp and log incorrect TTFT
+   - Fix direction: clear `sendTimestamp` in the `LLM_DONE` handler too
+
+---
+
+## Step 8: Optional — Improve `sessionsCreate` for Future Use
+
+If you want `sessionsCreate` to work correctly for explicit session creation
+(not needed for chat, but useful for future features), update it to use
+OpenClaw's actual accepted params:
 
 ```typescript
-export function classifyFastPath(message: string, _pageContext?: PageContext | null): Classification {
-  const trimmed = message.trim();
-
-  // Try direct action extraction for navigate/scroll
-  const direct = tryExtractDirectAction(trimmed);
-  if (direct) {
-    return { intent: "navigate", confidence: 0.95, directAction: direct };
+async sessionsCreate(params?: {
+  key?: string;
+  label?: string;
+  model?: string;
+  message?: string;
+}): Promise<{ sessionKey: string }> {
+  const result = await this.request<Record<string, unknown>>("sessions.create", params ?? {});
+  const root = result && typeof result === "object" ? result : {};
+  const sessionKey =
+    asNonEmptyString(root.key)
+    ?? asNonEmptyString(root.sessionId)
+    ?? asNonEmptyString(root.id);
+  if (!sessionKey) {
+    throw new Error("sessions.create did not return a session key.");
   }
-
-  // Everything else → OpenClaw handles it
-  return { intent: "openclaw", confidence: 1.0 };
+  return { sessionKey };
 }
 ```
 
-### Step 6: Remove dead handler methods from GatewayManager
-
-In `src/main/services/gateway-manager.ts`:
-
-1. **Remove `handleMonitorIntent()` method** (~120 lines) — this was the local handler that used `completeChat()` to extract monitor parameters. OpenClaw now handles scheduling natively through its agent and `cron.add`.
-
-2. **Remove `handleDesktopIntent()` method** — replace with direct routing through `handleQueryIntent()`. The desktop persona system prompt can stay but should be simpler.
-
-3. **Remove the `if (classification.intent === "monitor")` branch** in `sendChat()` — this was the fast-path intercept that hijacked "monitor" keyword messages.
-
-4. **Remove the `if (classification.intent === "desktop")` branch** in `sendChat()` — let OpenClaw handle desktop requests through its agent.
-
-5. **Remove the `automationBridge` system prompt injection** from the `sendChat()` method — the lines that call `this.automationBridge.getSystemPromptExtension()`. OpenClaw has native cron tools, it doesn't need fake XML tool instructions.
-
-6. **Remove `setMonitorManager()` and `setAutomationBridge()` methods** and their backing fields.
-
-7. **Remove the `onGatewayReconnected` field** and crash-recovery callback to `resumePendingJobs`.
-
-8. **Remove imports**: `MonitorManager`, `AutomationBridge`, `completeChat`, `resolveGroqApiKey`, `resolveGeminiApiKey`, `resolveProvider` — ONLY if no longer used anywhere in the file. Check `startGatewayProcess()` which still uses `resolveGroqApiKey`/`resolveGeminiApiKey` for env vars — those can stay.
-
-9. **Simplify `sendChat()`** so it looks like:
-
-```typescript
-async sendChat(request: ChatSendRequest): Promise<{ messageId: string; taskId: string }> {
-  // ... preflight checks (keep as-is) ...
-
-  const classification = classifyFastPath(request.message, pageContext);
-
-  // Instant navigation — no LLM needed
-  if (classification.intent === "navigate" && classification.directAction) {
-    return this.handleNavigateAction(messageId, taskId, session, request, classification.directAction);
-  }
-
-  // Everything else → OpenClaw agent
-  const auraPrompt = `You are Aura, a premium desktop AI assistant. You take action — don't just explain.
-Be concise but thorough. When the user asks you to do something recurring or scheduled, use your cron tools.
-When they ask about the web, use your browser tools. For desktop tasks, use your desktop tools.
-Always prefer action over explanation.`;
-
-  return this.handleQueryIntent(messageId, taskId, session, request, pageContext, auraPrompt);
-}
-```
-
-### Step 7: Update renderer to handle OpenClaw cron data shape
-
-The renderer components that display automations (`ToolsPanel.tsx`, any Automations route) currently expect `AutomationJob` types from the local store. Update them to handle `OpenClawCronJob` shape from the RPC:
-
-- In `useAuraStore.ts`, the automation fetching should call `window.auraDesktop.automation.list()` and map the response
-- The mapping: `id` → `id`, `name` → title, `prompt` → sourcePrompt, `schedule` → cron expression string, `enabled` → status, `lastRunAt` → lastCheckedAt, `nextRunAt` → nextRunAt
-
-Add a mapper function in the store or in a utility:
-
-```typescript
-function mapCronJobToAutomation(job: OpenClawCronJob): AutomationJob {
-  return {
-    id: job.id,
-    title: job.name || job.prompt?.slice(0, 60) || "Automation",
-    kind: "scheduled",
-    status: job.enabled ? "active" : "paused",
-    sourcePrompt: job.prompt,
-    url: "",
-    schedule: { mode: "cron", cron: job.schedule },
-    createdAt: job.createdAt ? new Date(job.createdAt).getTime() : Date.now(),
-    updatedAt: job.updatedAt ? new Date(job.updatedAt).getTime() : Date.now(),
-    lastCheckedAt: job.lastRunAt ? new Date(job.lastRunAt).getTime() : 0,
-    nextRunAt: job.nextRunAt ? new Date(job.nextRunAt).getTime() : undefined,
-    triggerCount: 0,
-    runHistory: [],
-  };
-}
-```
-
-### Step 8: Clean up unused files
-
-After all the above is done and typecheck passes, these files can be deleted or emptied (but don't delete yet — just stop importing them):
-
-- `src/main/services/automation-bridge.ts` — no longer instantiated
-- `src/main/services/monitor-manager.ts` — no longer instantiated
-- `src/main/services/skill-registry.ts` — no longer instantiated
-- `src/main/services/vision-agent.ts` — not used
-
-The `llm-client.ts` may still be imported in `gateway-manager.ts` for `resolveGroqApiKey` / `resolveGeminiApiKey` in `startGatewayProcess()`. Check if those functions can be moved to `config-manager.ts` instead. If not, keep the import.
+And update the IPC handler in `index.ts` to match the new param shape. Also
+update the preload/desktop-api types if needed.
 
 ---
 
 ## Important Constraints
 
-1. **Run `npm run typecheck` after every major step.** Fix type errors before moving on.
+1. **Run `npm run typecheck` after changes.** Fix type errors before testing.
 
-2. **Don't change the WebSocket protocol or handshake.** The `connectWebSocket()`, `sendConnectFrame()`, `handleWsMessage()`, and `request()` methods are working correctly.
+2. **Don't change the WebSocket protocol or handshake.** The connection layer
+   works correctly.
 
-3. **Don't change the renderer's IPC API shape** unless you also update the preload (`src/preload/index.ts`) and the desktop-api types (`src/renderer/services/desktop-api.ts`). The existing IPC channels (`automation.list`, `automation.start`, `automation.stop`, `skills.list`, etc.) should keep working — just rewire what they call on the backend.
+3. **Don't change the IPC channel names.** The existing channels
+   (`automation.list`, `automation.start`, `sessions.list`, etc.) should keep
+   working.
 
-4. **The RPC response shapes from OpenClaw are not 100% documented.** The types I provided above are best-effort based on the gateway source. If a call returns unexpected data, log it and handle gracefully with optional chaining and defaults.
+4. **OpenClaw RPC responses may vary.** Use optional chaining and defaults
+   everywhere. Log unexpected responses with `console.log`.
 
-5. **Keep the fast-path navigation** (open URL, scroll, back/forward). This is genuinely useful at <10ms and doesn't need AI.
+5. **Keep the fast-path navigation.** "open youtube", "scroll down",
+   "go back" must stay instant.
 
-6. **Don't touch the renderer UI components yet** (that's Phase 3). Just make sure the data flows correctly — the renderer should still render automations/skills/history, just from OpenClaw RPCs instead of local storage.
+6. **Don't re-add local session storage.** OpenClaw is the source of truth for
+   sessions. Aura only stores `currentSessionKey` locally.
 
-7. **The gateway must be connected before RPC calls work.** All new RPC methods should check `this.connected` and throw a clear error if not connected. The existing `request()` method already does this.
-
-8. **Aura vendors OpenClaw at [`vendor/openclaw`](d:/PV/Aura/aura-desktop/vendor/openclaw)** during development, and packaged builds bundle it into `openclaw-src` inside the Aura install. Runtime home is `%APPDATA%\aura-desktop\openclaw-home\`. You can check `%APPDATA%\aura-desktop\openclaw-home\.openclaw\cron\jobs.json` to verify cron jobs are being created by OpenClaw.
+7. **Aura vendors OpenClaw at `vendor/openclaw`** — don't reference
+   `../openclaw-fork` anywhere.
 
 ---
 
-## Verification Checklist
+## OpenClaw RPC Reference (Verified from Source)
 
-After implementation, verify:
+### `sessions.create`
+- **Params:** `{ key?, agentId?, label?, model?, parentSessionKey?, task?, message? }`
+- **Returns:** `{ ok: true, key: "...", sessionId: "...", entry: {...} }`
+- **Does NOT accept:** `title`, `sessionKey`, `name`
 
-```bash
-npm run typecheck   # Must pass clean
-```
+### `chat.send`
+- **Params:** `{ sessionKey, message, idempotencyKey, extraSystemPrompt?, attachments?, timeoutMs? }`
+- **Returns:** `{ runId? }`
+- **Auto-creates sessions** if the sessionKey doesn't exist yet
 
-Then `npm run dev` and test:
+### `sessions.list`
+- **Returns:** array of session summaries (check for both `{ sessions: [...] }` wrapper and bare array)
 
-1. App launches, gateway connects (`[GatewayManager] WebSocket connected!` in console)
-2. Type "hello" → get a streamed response from OpenClaw
-3. Type "open youtube" → instant navigation (no LLM, <10ms)
-4. Type "remind me to check my email every day at 9am" → OpenClaw should handle this with its agent (may create a cron job, may just respond — depends on the model). Check `%APPDATA%\aura-desktop\openclaw-home\.openclaw\cron\jobs.json` to see if a job was created.
-5. Type "what tools do you have?" → OpenClaw lists its capabilities
-6. The Automations page should show data (may be empty if no cron jobs exist)
-7. The Skills page should show tools from `tools.catalog`
-8. No console errors related to `MonitorManager`, `AutomationBridge`, or `SkillRegistry`
+### `sessions.get`
+- **Params:** `{ sessionKey }`
+- **Returns:** session detail with messages (check for `{ session: {...} }` wrapper and bare object)
 
 ---
 
 ## File Change Summary
 
-| File | Action |
-|------|--------|
-| `src/shared/types.ts` | ADD OpenClawCronJob, OpenClawCronRun, OpenClawToolEntry, OpenClawSkillEntry types |
-| `src/main/services/gateway-manager.ts` | ADD cron/tools/skills RPC methods. REMOVE handleMonitorIntent, handleDesktopIntent, monitor/desktop/autofill branches, AutomationBridge injection, MonitorManager/AutomationBridge fields. SIMPLIFY sendChat() |
-| `src/main/services/intent-classifier.ts` | REMOVE monitor/desktop/autofill regex and branches. Keep navigate/scroll only |
-| `src/main/index.ts` | REWIRE IPC handlers to use GatewayManager RPC methods. REMOVE MonitorManager, AutomationBridge, SkillRegistry instantiation |
-| `src/renderer/store/useAuraStore.ts` | ADD mapper from OpenClawCronJob → AutomationJob for renderer compatibility |
-| `src/preload/index.ts` | No changes needed (IPC channel names stay the same) |
+| File | What to Change |
+|------|----------------|
+| `src/renderer/store/useAuraStore.ts` | **CRITICAL:** Replace `sessions.create` call in `sendMessage` with `crypto.randomUUID()` |
+| `src/main/services/gateway-manager.ts` | Verify `sessionsCreate` extracts `key` field first; verify `streamViaOpenClaw` passes `sessionKey` |
+| `src/main/index.ts` | Verify IPC handler; no changes likely needed |
+
+## After Fixing Chat
+
+Once chat works end-to-end, the next priorities are:
+
+1. **Packaged app validation** — `npm run package:win`, test on clean Windows
+2. **Session key caching** — avoid re-resolving session key per message
+3. **Gateway pre-warming** — ping after bootstrap to reduce first-message TTFT
+4. **Installer polish** — size optimization, auto-update, code signing

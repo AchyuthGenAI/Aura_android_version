@@ -12,6 +12,7 @@ import type {
   ExtensionMessage,
   GatewayStatus,
   OpenClawConfig,
+  OpenClawSessionCreateParams,
   OpenClawSessionDetail,
   OpenClawSessionSummary,
   PageContext,
@@ -62,7 +63,7 @@ export interface AuraDesktopApi {
     runNow(payload: { id: string }): Promise<void>;
   };
   sessions: {
-    create(payload?: { title?: string }): Promise<{ sessionKey: string }>;
+    create(payload?: OpenClawSessionCreateParams): Promise<{ sessionKey: string }>;
     list(): Promise<OpenClawSessionSummary[]>;
     get(sessionKey: string): Promise<OpenClawSessionDetail | null>;
   };

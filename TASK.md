@@ -4,9 +4,9 @@
 
 **Aura = thin UI wrapper. OpenClaw = the brain.**
 
-OpenClaw natively provides: chat AI, cron scheduling, skill management, session
+OpenClaw natively provides chat AI, cron scheduling, skill management, session
 history, tool catalog, voice/TTS, desktop control, browser tools, and approval
-workflows. Aura's job is to render these in a polished Electron UI — not to
+workflows. Aura's job is to render these in a polished Electron UI, not to
 re-implement them.
 
 ## Completed
@@ -27,11 +27,12 @@ re-implement them.
 - [x] Crash recovery with auto-restart (3 attempts, exponential backoff 5s/15s/45s)
 - [x] Keep-alive heartbeat (15s ping/pong)
 - [x] Post-connect health check
-- [x] Bundle integrity validation (openclaw.mjs, package.json, dist/entry.js)
-- [x] Diagnostic logging for path resolution and gateway spawn
+- [x] Bundle integrity validation
+- [x] Vendored OpenClaw dev source under `vendor/openclaw`
+- [x] Packaged Aura bundle reads bundled OpenClaw from `openclaw-src`
 
 ### Chat Flow
-- [x] Fast-path intent classifier for instant navigation (<10ms, regex only)
+- [x] Fast-path intent classifier for instant navigation (regex only)
 - [x] `streamViaOpenClaw()` for all AI-powered requests
 - [x] Token-by-token streaming to renderer (`LLM_TOKEN` events)
 - [x] Final response handling (`LLM_DONE` events)
@@ -43,216 +44,231 @@ re-implement them.
 
 ### Approval Pipeline
 - [x] Parse `exec.approval.requested` and `plugin.approval.requested` events
-- [x] Render approval prompts in chat UI (`CONFIRM_ACTION` events)
-- [x] Relay user decisions back via `exec.approval.resolve` / `plugin.approval.resolve`
-- [x] Approval timeout handling
+- [x] Render approval prompts in chat UI
+- [x] Relay user decisions back via approval resolve RPCs
 
 ### Config & API Keys
 - [x] Write `openclaw.json` with gateway port, auth, model defaults
 - [x] Write Groq and Gemini auth-profiles for OpenClaw agent
-- [x] Resolve API keys from env vars and config file
-- [x] Default model: `google/gemini-2.0-flash` with `groq/llama-3.3-70b-versatile` fallback
+- [x] Default model: `google/gemini-2.0-flash` with fallback
 
 ### Renderer UI
 - [x] Chat bubbles with markdown rendering (glassmorphism)
 - [x] Pending message bubble with animated dots
 - [x] Session management (new session, message history)
-- [x] HistoryPanel (unified timeline in widget)
-- [x] ToolsPanel (Skills/Monitors/Macros sub-tabs in widget)
-- [x] VoicePanel with microphone integration
-- [x] InputBar with macro suggestions
+- [x] HistoryPanel, ToolsPanel, VoicePanel, InputBar
 - [x] ActiveTaskBanner for live run status
-- [x] RunTimelineBubble for tool event rendering
 - [x] ConfirmModal for approval prompts
 - [x] Home, Browser, Desktop, Skills, Settings, Profile, History routes
 - [x] Auth screens (sign in, sign up, Google, consent, profile setup)
 
-### Browser Integration
-- [x] BrowserView tab management (new, switch, close)
+### Browser & Desktop Integration
+- [x] BrowserView tab management
 - [x] Navigation, back, forward, reload
-- [x] Page context extraction (URL, title, visible text)
-- [x] DOM action execution
-- [x] Screenshot capture
-- [x] Element highlighting for tool use visualization
-
-### Desktop Control
-- [x] Screenshot, click, right-click, double-click, move, drag
-- [x] Type text, press key
-- [x] Open app by name
-- [x] Window management (list, focus, get active)
-- [x] Clipboard read/write
-- [x] Run shell command
-- [x] Scroll, cursor position
+- [x] Page context extraction, DOM actions, screenshot
+- [x] Desktop screenshot, click, type, key, window management
 
 ### Packaging & Build
 - [x] tsup config for main + preload bundles
 - [x] Vite config for renderer
-- [x] electron-builder NSIS config (custom install dir, shortcuts)
-- [x] OpenClaw extraResources (openclaw.mjs, dist/, assets/, skills/, node_modules/)
-- [x] Native module asar unpacking (@nut-tree-fork, koffi)
-- [x] Pre-package OpenClaw dependency pruning script
-- [x] Icon generation script (PNG → ICO with multiple sizes)
-- [x] Dev electron launcher with ELECTRON_RUN_AS_NODE cleanup
+- [x] electron-builder NSIS config
+- [x] OpenClaw extraResources and native module unpacking
+- [x] Pre-package dependency pruning script
+
+### Thin Wrapper Migration (Phase 1-2) — DONE
+- [x] Cron RPCs: `cronAdd/List/Update/Remove/Run/Runs/Status` in GatewayManager
+- [x] Skills RPCs: `toolsCatalog/skillsStatus/skillsInstall` in GatewayManager
+- [x] Sessions RPCs: `sessionsCreate/List/Get` in GatewayManager
+- [x] IPC handlers rewired from local services to GatewayManager RPCs
+- [x] Removed MonitorManager, AutomationBridge, SkillRegistry from live path
+- [x] Deleted legacy service files
+- [x] Intent classifier stripped to navigate-only
+- [x] GatewayManager simplified (removed monitor/desktop/autofill handlers)
+- [x] System prompt updated to personality-only (no tool instructions)
+- [x] Local session-message authority removed (OpenClaw is source of truth)
+
+### Chat-First UX (Phase 3) — DONE
+- [x] Smart placeholder text and suggestion chips
+- [x] Inline cron/skill activity cards in chat
+- [x] Surface-aware pending states ("Aura is browsing...", "Aura is on your desktop...")
+- [x] Home page reworked to chat-first surface
+- [x] Canonical cron card refresh (auto-refreshes from `cron.list` after tool completion)
+
+### Performance (Phase 4) — PARTIAL
+- [x] Optimistic "thinking" UI immediately on send
+- [x] TTFT measurement and logging (`[Aura] TTFT: Xms`)
+- [x] PendingMessageBubble on both widget and home page
+- [ ] Session key caching (don't re-resolve per message)
+- [ ] Gateway pre-warming (lightweight ping after bootstrap)
 
 ---
 
-## In Progress — Thin Wrapper Migration
+## Resolved In This Pass
 
-### Phase 1: Wire to OpenClaw Native APIs (P0 — ACTIVE)
+### Problem
 
-> **Goal**: Stop re-implementing what OpenClaw already provides. Use its native
-> RPC methods instead of Aura's custom services.
+The chat blocker and the two follow-up correctness issues were fixed:
 
-#### 1A. Replace MonitorManager + AutomationBridge with OpenClaw `cron.*` RPCs
-- [ ] Add `GatewayManager.cronAdd(params)` → calls `cron.add` via WebSocket
-- [ ] Add `GatewayManager.cronList()` → calls `cron.list` via WebSocket
-- [ ] Add `GatewayManager.cronRemove(jobId)` → calls `cron.remove` via WebSocket
-- [ ] Add `GatewayManager.cronRun(jobId)` → calls `cron.run` (manual trigger)
-- [ ] Add `GatewayManager.cronRuns(jobId)` → calls `cron.runs` (run history)
-- [ ] Add `GatewayManager.cronStatus()` → calls `cron.status` (scheduler state)
-- [ ] Wire IPC handlers: `automation.start` → `cronAdd`, `automation.stop` → `cronRemove`, `automation.list` → `cronList`, `automation.runNow` → `cronRun`
-- [ ] Update renderer Automations page to fetch from `cron.list` instead of local store
-- [ ] Remove `MonitorManager` import and instantiation from `index.ts`
-- [ ] Remove `AutomationBridge` import and instantiation from `index.ts`
-- [ ] Remove `automation-bridge.ts` (no longer needed — OpenClaw has native cron)
-- [ ] Keep `monitor-manager.ts` as legacy fallback but stop instantiating it
+1. `sendMessage()` now generates a local session key and sends directly through `chat.send`
+2. Explicit `sessions.create` now uses an OpenClaw-compatible payload contract
+3. TTFT now clears on a direct `LLM_DONE` path as well as the first token path
+4. `ChatActivityCards` are scoped to the current session instead of falling back to `recentRuns[0]`
 
-#### 1B. Replace SkillRegistry with OpenClaw `tools.*` / `skills.*` RPCs
-- [ ] Add `GatewayManager.toolsCatalog()` → calls `tools.catalog` via WebSocket
-- [ ] Add `GatewayManager.skillsStatus()` → calls `skills.status` via WebSocket
-- [ ] Wire IPC handler: `skills.list` → `toolsCatalog`, `skills.get` → look up from catalog
-- [ ] Update renderer ToolsPanel/Skills page to fetch from `tools.catalog`
-- [ ] Remove `SkillRegistry` import and instantiation from `index.ts`
-- [ ] Remove `skill-registry.ts` (or keep as dead code initially)
+### Main Change
 
-#### 1C. Replace local session storage with OpenClaw `sessions.*` RPCs
-- [ ] Add `GatewayManager.sessionsList()` → calls `sessions.list`
-- [ ] Add `GatewayManager.sessionsGet(key)` → calls `sessions.get`
-- [ ] Wire IPC handler: `sessions.list`, `sessions.get` for renderer history
-- [ ] Update HistoryPanel to fetch from `sessions.list`
-- [ ] Stop persisting session messages in `AuraStore` (OpenClaw stores them)
-- [ ] Keep `AuraStore` for Aura-only state (widget bounds, theme, profile)
+The critical send-flow change in `src/renderer/store/useAuraStore.ts` is now:
 
-#### 1D. Strip intent classifier to navigate-only
-- [ ] Remove `monitor` branch from `classifyFastPath()` — let OpenClaw handle it
-- [ ] Remove `desktop` branch from `classifyFastPath()` — let OpenClaw handle it
-- [ ] Remove `autofill` branch from `classifyFastPath()` — let OpenClaw handle it
-- [ ] Keep ONLY: `navigate` (open URL), `scroll` (up/down/top), nav controls (back/forward/reload)
-- [ ] Remove `MONITOR_RE`, `DESKTOP_RE`, `AUTOFILL_RE` regex patterns
-- [ ] Update `DesktopIntent` type: only `"openclaw" | "navigate"`
+```typescript
+const sessionId = state.currentSessionId ?? crypto.randomUUID();
+```
 
-### Phase 2: Simplify GatewayManager (P0)
+This keeps Aura thin while letting OpenClaw create sessions lazily on demand.
 
-> **Goal**: Reduce `gateway-manager.ts` from 2300+ lines to ~900 by removing
-> duplicated handlers and letting OpenClaw's agent handle everything.
+### Verification Needed
 
-- [ ] Remove `handleMonitorIntent()` method entirely
-- [ ] Remove `handleDesktopIntent()` method — just route through `streamViaOpenClaw()`
-- [ ] Remove AutomationBridge system prompt injection from `sendChat()`
-- [ ] Remove standalone `completeChat()` / `llm-client.ts` imports from gateway-manager
-- [ ] Simplify `sendChat()` — fast-path nav or `streamViaOpenClaw()`, nothing else
-- [ ] Remove `inferSurface()` complexity — let tool events determine surface
-- [ ] Clean up dead imports and unused helper functions
+This pass still needs live smoke validation:
+1. Fresh-session chat
+2. Pass it to `chat.send` — OpenClaw creates the session on demand
+3. Fast-path navigation
+4. No cross-session activity-card leakage
+5. TTFT logging with and without visible streaming
 
-### Phase 3: Chat-First UX (P1)
 
-> **Goal**: Make chat the only thing users need. No manual setup, no
-> "Automations tab" required for creating jobs.
 
-- [ ] Update system prompt to describe Aura's personality (not tool instructions — OpenClaw knows its tools)
-- [ ] Add smart placeholder text: "Ask me anything, or say 'remind me to...' "
-- [ ] Add suggestion chips for empty chat state (examples of what Aura can do)
-- [ ] Render cron creation events as inline confirmation cards in chat
-- [ ] Render skill invocations as rich cards in chat
-- [ ] Show "Aura is browsing..." / "Aura is on your desktop..." status in chat
+---
 
-### Phase 4: Performance (P1)
+## Secondary Review Findings
 
-> **Goal**: <500ms time-to-first-token.
+These were addressed in code and should now be validated manually:
 
-- [ ] Optimistic "thinking" UI immediately on send (before IPC round-trip)
-- [ ] Session key caching (don't re-resolve per message)
-- [ ] Gateway pre-warming (lightweight ping after bootstrap)
-- [ ] Measure TTFT end-to-end and log it
+1. `ChatActivityCards` can show activity from the wrong conversation
+   - File: `src/renderer/components/ChatAssistCards.tsx`
+   - Cause: it falls back to `recentRuns[0]` when there is no active run
+   - Why it matters: loading an older session can show cron/skill cards from a newer unrelated run
 
-### Phase 5: Polish & Ship (P2)
+2. TTFT timing is not fully reset on a direct completion path
+   - File: `src/renderer/store/useAuraStore.ts`
+   - Cause: `sendTimestamp` is cleared on first `LLM_TOKEN`, but not on direct `LLM_DONE`
+   - Why it matters: the next message can inherit a stale timestamp and log incorrect TTFT
 
-> **Goal**: Production-ready `.exe` installer.
+---
+
+## Current Priorities
+
+1. Run a live dev smoke test for chat, sessions, fast-path navigation, activity cards, and TTFT logging
+2. Validate the packaged Aura + bundled OpenClaw runtime path
+3. Then continue with session-key caching and gateway pre-warming
+4. After that, move on to installer and ship polish
+
+---
+
+## Remaining Work
+
+### Priority 1: End-to-End Smoke Test
+
+Verify the implemented pass in a live dev run:
+
+
+- `src/renderer/store/useAuraStore.ts` — `sendMessage()` method
+- `src/main/services/gateway-manager.ts` — `sessionsCreate()` method (already partially fixed)
+- `src/main/index.ts` — `sessionsCreate` IPC handler
+
+### Priority 2: Packaged App Validation (Phase 5)
+
+After the dev smoke test, verify packaged behavior:
+- Send a message → get a streamed response
+- "open youtube" → instant navigation
+- "remind me to check email every morning" → OpenClaw creates a cron job
+- Session history loads correctly
+- New session / load session works
+
+### Priority 3: Fix Follow-Up Chat Correctness Issues
+
+- [ ] Scope `ChatActivityCards` to the current run/session instead of falling back to `recentRuns[0]`
+- [ ] Clear `sendTimestamp` on direct `LLM_DONE` as well as first `LLM_TOKEN`
+
+### Priority 4: Packaged App Validation (Phase 5)
 
 - [ ] Test full packaged build on clean Windows machine
 - [ ] Verify OpenClaw gateway starts in packaged mode
 - [ ] Verify chat works end-to-end in packaged app
 - [ ] Verify cron jobs persist across app restart
+
+### Priority 5: Remaining Performance (Phase 4)
+
+- [ ] Session key caching
+- [ ] Gateway pre-warming
+
+### Priority 6: Polish & Ship (Phase 5)
+
 - [ ] Installer size optimization (target <500MB)
-- [ ] Auto-update infrastructure (Squirrel or electron-updater)
+- [ ] Auto-update infrastructure
 - [ ] Code signing for Windows SmartScreen bypass
 
 ---
 
-## Legacy Code — To Remove
+## OpenClaw RPC Reference (Verified from Source)
 
-These services exist but should be removed or deprecated as Phase 1 completes:
+### sessions.create
+- **Params**: `{ key?, agentId?, label?, model?, parentSessionKey?, task?, message? }`
+- **Returns**: `{ ok, key, sessionId, entry, runStarted?, ... }`
+- **Note**: Does NOT accept `title` or `sessionKey`
 
-| File | Why it exists | Replacement |
-|------|---------------|-------------|
-| `monitor-manager.ts` | Local cron/interval scheduler | `cron.add` / `cron.list` RPCs |
-| `automation-bridge.ts` | Fake XML tool for creating automations | `cron.add` RPC (native) |
-| `skill-registry.ts` | Disk scan for SKILL.md files | `tools.catalog` / `skills.status` RPCs |
-| `llm-client.ts` | Standalone Gemini/Groq calls | `chat.send` (all AI through OpenClaw) |
-| `vision-agent.ts` | Local vision loop | OpenClaw desktop tools |
-| `intent-classifier.ts` (monitor/desktop/autofill branches) | Regex intent routing | OpenClaw agent intent understanding |
+### chat.send
+- **Params**: `{ sessionKey, message, idempotencyKey, extraSystemPrompt?, attachments?, timeoutMs? }`
+- **Returns**: `{ runId? }`
+- **Note**: Auto-creates sessions if sessionKey doesn't exist yet
 
----
+### sessions.list
+- **Returns**: Array of session summaries with `sessionKey` field
 
-## OpenClaw Gateway RPC Reference
+### sessions.get
+- **Params**: `{ sessionKey }`
+- **Returns**: Session detail with messages array
 
-Full list of available methods on the WebSocket connection:
+### cron.add
+- **Params**: `{ name?, prompt, schedule, sessionKey?, delivery? }`
 
+### cron.list
+- **Returns**: `{ jobs: [...] }` or array
+
+### Full RPC list
 **Chat**: `chat.send`, `chat.abort`, `chat.history`, `chat.inject`
 **Cron**: `cron.add`, `cron.list`, `cron.remove`, `cron.update`, `cron.run`, `cron.runs`, `cron.status`
-**Sessions**: `sessions.create`, `sessions.list`, `sessions.get`, `sessions.send`, `sessions.delete`, `sessions.subscribe`, `sessions.abort`, `sessions.compact`, `sessions.patch`, `sessions.preview`, `sessions.reset`, `sessions.resolve`, `sessions.steer`, `sessions.usage`
+**Sessions**: `sessions.create`, `sessions.list`, `sessions.get`, `sessions.send`, `sessions.delete`
 **Skills**: `skills.install`, `skills.status`, `skills.update`, `skills.bins`
 **Tools**: `tools.catalog`, `tools.effective`
 **Models**: `models.list`
-**Voice**: `talk.mode`, `talk.speak`, `talk.config`, `tts.enable`, `tts.disable`, `tts.convert`, `tts.providers`, `tts.status`, `voicewake.get`, `voicewake.set`
-**Desktop Nodes**: `node.invoke`, `node.list`, `node.describe`, `node.event`, `node.rename`, `node.pair.*`, `node.pending.*`
-**Status**: `status.request`, `usage.cost`, `usage.status`
-**Config**: `config.get`, `config.schema.lookup`
-**Approvals**: `exec.approval.request`, `exec.approval.resolve`, `plugin.approval.request`, `plugin.approval.resolve`
-**Logs**: `logs.tail`
-**Agents**: `agents.create`, `agents.list`, `agents.update`, `agents.delete`, `agents.files.*`
-**Auth**: `agent.identity.get`, `gateway.identity.get`
-**Push**: `push.test`
-**Secrets**: `secrets.reload`, `secrets.resolve`
 
 ---
 
 ## Agent Continuity Notes
 
-> **For any future coding agent picking up this work:**
+> For any future coding agent picking up this work:
 >
-> 1. **Architecture**: Aura is a thin Electron wrapper over OpenClaw. OpenClaw
->    runs as a child process (`gateway run --port 18789`). All intelligence lives
->    in OpenClaw. Aura renders the UI and manages the Electron shell.
+> 1. **Read AGENT-PROMPT.md first** — it has the exact implementation plan for
+>    fixing the critical chat bug.
 >
 > 2. **The one file to understand**: `src/main/services/gateway-manager.ts`.
 >    This is the central service. It spawns OpenClaw, connects WebSocket,
 >    dispatches `chat.send`, and streams events to the renderer.
 >
-> 3. **Chat flow**: User message → `classifyFastPath()` (navigate/scroll only)
->    → everything else → `streamViaOpenClaw()` → OpenClaw agent handles it.
+> 3. **Chat flow**: User message -> `classifyFastPath()` (navigate/scroll only)
+>    -> everything else -> `streamViaOpenClaw()` -> OpenClaw agent handles it.
 >
-> 4. **Don't add LLM calls in the main process**. Period. `chat.send` to OpenClaw.
+> 4. **Sessions are lazy**: `chat.send` auto-creates sessions. Don't call
+>    `sessions.create` before sending a message.
 >
-> 5. **Don't re-implement OpenClaw features**. Use its RPCs:
->    - Scheduling → `cron.add` / `cron.list` / `cron.remove`
->    - Skills → `tools.catalog` / `skills.status`
->    - Sessions → `sessions.list` / `sessions.get`
->
-> 6. **OpenClaw runtime**:
+> 5. **OpenClaw runtime**:
 >    - Dev source: `vendor/openclaw`
->    - Packaged Aura bundle: `openclaw-src` inside the installed app resources
+>    - Packaged: `openclaw-src` inside installed app resources
 >    - Runtime home: `%APPDATA%\aura-desktop\openclaw-home\`
 >
-> 7. **Build**: `npm run dev` (dev), `npm run typecheck` (verify),
+> 6. **Build**: `npm run dev` (dev), `npm run typecheck` (verify),
 >    `npm run build` (prod), `npm run package:win` (installer)
+
+## Latest Verification
+
+- [x] `npm run typecheck` — passes
+- [x] `npm run build` — passes
+- [ ] `npm run dev` — gateway connects but chat fails (sessions.create bug)

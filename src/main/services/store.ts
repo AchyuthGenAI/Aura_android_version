@@ -100,8 +100,6 @@ export const createDefaultStorage = (): AuraStorageShape => ({
   },
   permissions: defaultPermissions(),
   currentSessionKey: null,
-  currentSession: null,
-  sessionHistory: [],
   history: [],
   bubblePosition: { x: 0, y: 0 },
   bubbleTooltipSeen: false,

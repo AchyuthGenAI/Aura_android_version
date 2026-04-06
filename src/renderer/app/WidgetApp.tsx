@@ -6,6 +6,7 @@ import type { AuraStorageShape, WidgetBounds, WidgetVisibilityPayload, OverlayTa
 import { VoicePanel } from "@renderer/components/VoicePanel";
 import { HistoryPanel } from "@renderer/components/HistoryPanel";
 import { ToolsPanel } from "@renderer/components/ToolsPanel";
+import { ChatActivityCards, ChatPromptChips, getChatComposerPlaceholder, getChatPendingState } from "@renderer/components/ChatAssistCards";
 import { useWindowInteraction } from "@renderer/hooks/useWindowInteraction";
 
 const COLLAPSED_SIZE = 84;
@@ -22,6 +23,7 @@ const WidgetApp = (): JSX.Element => {
   const inputValue = useAuraStore((state) => state.inputValue);
   const activeImage = useAuraStore((state) => state.activeImage);
   const isLoading = useAuraStore((state) => state.isLoading);
+  const actionFeed = useAuraStore((state) => state.actionFeed);
   const hydrate = useAuraStore((state) => state.hydrate);
   const handleAppEvent = useAuraStore((state) => state.handleAppEvent);
   const dismissToast = useAuraStore((state) => state.dismissToast);
@@ -32,6 +34,7 @@ const WidgetApp = (): JSX.Element => {
   const stopMessage = useAuraStore((state) => state.stopMessage);
   const startNewSession = useAuraStore((state) => state.startNewSession);
   const activeRun = useAuraStore((state) => state.activeRun);
+  const currentSessionId = useAuraStore((state) => state.currentSessionId);
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [expanded, setExpanded] = useState(false);
   const [size, setSize] = useState(DEFAULT_WIDGET_SIZE);
@@ -213,18 +216,7 @@ const WidgetApp = (): JSX.Element => {
       : runtimeStatus.phase === "running"
         ? "text-violet-300"
         : "text-amber-300";
-  const pendingState =
-    activeRun?.status === "running"
-      ? {
-          title: "Working",
-          detail: activeRun.lastTool ?? activeRun.prompt ?? "Running..."
-        }
-      : isLoading
-        ? {
-            title: "Generating",
-            detail: "Aura is preparing a response."
-          }
-        : null;
+  const pendingState = getChatPendingState(activeRun, isLoading, actionFeed);
   const accountLabel = authState.authenticated
     ? authState.email || "Signed In"
     : "Sign In Required";
@@ -380,12 +372,14 @@ const WidgetApp = (): JSX.Element => {
                         <h3 className="text-[20px] font-semibold tracking-tight text-aura-text">Hey! I'm Aura 👋 Starting a fresh</h3>
                         <h3 className="text-[20px] font-semibold tracking-tight text-aura-text">conversation. What can I help you with?</h3>
                       </div>
+                      <ChatPromptChips compact onSelect={(prompt) => void sendMessage("text", prompt)} />
                     </div>
                   ) : (
                     messages.map((message) => (
                       <MessageBubble key={message.id} message={message} theme={settings.theme} />
                     ))
                   )}
+                  <ChatActivityCards run={activeRun} currentSessionId={currentSessionId} />
                   {pendingState && !hasStreamingAssistant && (
                     <PendingMessageBubble title={pendingState.title} detail={pendingState.detail} />
                   )}
@@ -449,13 +443,7 @@ const WidgetApp = (): JSX.Element => {
                       }}
                       autoFocus={expanded && activeTab === "chat"}
                       id="aura-widget-input"
-                      placeholder={
-                        activeRun?.status === "running"
-                          ? "Aura is working on it..."
-                          : isLoading
-                            ? "Aura is generating a response..."
-                            : "Message Aura..."
-                      }
+                      placeholder={getChatComposerPlaceholder(activeRun, isLoading)}
                       rows={1}
                       className="w-full resize-none bg-transparent text-[15px] leading-8 text-aura-text outline-none placeholder:text-aura-muted"
                     />

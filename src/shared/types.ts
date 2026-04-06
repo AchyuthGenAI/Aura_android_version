@@ -215,6 +215,16 @@ export interface OpenClawSessionDetail {
   [key: string]: unknown;
 }
 
+export interface OpenClawSessionCreateParams {
+  key?: string;
+  agentId?: string;
+  label?: string;
+  model?: string;
+  parentSessionKey?: string;
+  task?: string;
+  message?: string;
+}
+
 export interface HistoryEntry {
   id: string;
   command: string;
@@ -466,8 +476,6 @@ export interface AuraStorageShape {
   settings: AuraSettings;
   permissions: PermissionState[];
   currentSessionKey: string | null;
-  currentSession: AuraSession | null;
-  sessionHistory: AuraSession[];
   history: HistoryEntry[];
   bubblePosition: BubblePosition;
   bubbleTooltipSeen: boolean;

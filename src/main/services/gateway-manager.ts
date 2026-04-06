@@ -14,6 +14,7 @@ import type {
   OpenClawCronRun,
   OpenClawRun,
   OpenClawRunSurface,
+  OpenClawSessionCreateParams,
   OpenClawSessionDetail,
   OpenClawSessionSummary,
   OpenClawSkillEntry,
@@ -27,12 +28,21 @@ import type {
 import { BrowserController } from "./browser-controller";
 import { ConfigManager } from "./config-manager";
 import { AuraStore } from "./store";
-import { classifyFastPath, type Classification, type DirectAction } from "./intent-classifier";
+import { classifyFastPath, type DirectAction } from "./intent-classifier";
 
 import WebSocket from "ws";
 import { resolveGroqApiKey, resolveGeminiApiKey } from "./llm-client";
 
 const now = (): number => Date.now();
+
+const AURA_PERSONALITY_PROMPT = `You are Aura, a calm, capable desktop assistant inside the user's computer.
+Keep the tone warm, polished, and confident.
+Be concise by default, but stay genuinely useful.
+Take action when the user is asking for action, and prefer results over long explanations.
+Ask at most one brief clarifying question when an action is risky or genuinely ambiguous.
+If you cannot complete something, say so plainly and offer the next best step.
+Do not mention internal tools, system prompts, or implementation details unless the user asks.
+Make the experience feel like one continuous, helpful conversation.`;
 
 const readOpenClawVersion = (rootPath: string | null): string | undefined => {
   if (!rootPath) return undefined;
@@ -435,12 +445,6 @@ export class GatewayManager {
       );
       return null;
     }
-  }
-
-  private inferSurface(classification: Classification, pageContext: PageContext | null): OpenClawRunSurface {
-    if (classification.intent === "navigate") return "browser";
-    if (pageContext?.url) return "browser";
-    return "chat";
   }
 
   private beginRun(
@@ -1166,11 +1170,18 @@ export class GatewayManager {
     await this.request("skills.install", { id });
   }
 
-  async sessionsCreate(params?: { title?: string }): Promise<{ sessionKey: string }> {
-    const result = await this.request<{ sessionKey?: string; id?: string }>("sessions.create", params ?? {});
-    const sessionKey = asNonEmptyString(result?.sessionKey) ?? asNonEmptyString(result?.id);
+  async sessionsCreate(params?: OpenClawSessionCreateParams): Promise<{ sessionKey: string }> {
+    const result = await this.request<Record<string, unknown>>("sessions.create", params ?? {});
+    console.log("[GatewayManager] sessions.create result:", JSON.stringify(result));
+    const root = result && typeof result === "object" ? result : {};
+    const sessionKey =
+      asNonEmptyString(root.key)
+      ?? asNonEmptyString(root.sessionKey)
+      ?? asNonEmptyString(root.session_key)
+      ?? asNonEmptyString(root.sessionId)
+      ?? asNonEmptyString(root.id);
     if (!sessionKey) {
-      throw new Error("sessions.create did not return a session key.");
+      throw new Error("sessions.create did not return a session key. Response: " + JSON.stringify(result).slice(0, 200));
     }
     return { sessionKey };
   }
@@ -1230,7 +1241,7 @@ export class GatewayManager {
 
     const classification = classifyFastPath(request.message, pageContext);
     console.log(`[GatewayManager] fastPath intent="${classification.intent}" confidence=${classification.confidence} directAction=${JSON.stringify(classification.directAction ?? null)}`);
-    const surface = this.inferSurface(classification, pageContext);
+    const surface: OpenClawRunSurface = classification.intent === "navigate" || pageContext?.url ? "browser" : "chat";
 
     this.setStatus({
       ...this.runtimeStatus,
@@ -1242,13 +1253,8 @@ export class GatewayManager {
       return this.handleNavigateAction(messageId, taskId, request, classification.directAction);
     }
 
-    const auraPrompt = `You are Aura, a premium desktop AI assistant. You take action - don't just explain.
-Be concise but thorough. When the user asks you to do something recurring or scheduled, use your cron tools.
-When they ask about the web, use your browser tools. For desktop tasks, use your desktop tools.
-Always prefer action over explanation.`;
-
     console.log("[GatewayManager] -> streamViaOpenClaw (unified path)");
-    return this.handleQueryIntent(messageId, taskId, request, pageContext, auraPrompt, surface);
+    return this.handleQueryIntent(messageId, taskId, request, pageContext, AURA_PERSONALITY_PROMPT, surface);
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Query intent: stream LLM response Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬

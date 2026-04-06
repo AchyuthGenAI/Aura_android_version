@@ -224,11 +224,6 @@ const mapContextActionToPrompt = (payload: ContextMenuActionPayload): string => 
   }
 };
 
-const syncPersistedState = async (set: (partial: Partial<AuraState>) => void): Promise<void> => {
-  const nextState = (await window.auraDesktop.storage.get()) as AuraStorageShape;
-  applyStorageState(set, nextState);
-};
-
 type AuraState = {
   isHydrating: boolean;
   hydrated: boolean;
@@ -273,10 +268,13 @@ type AuraState = {
   usedSkillIds: string[];
   toasts: ToastNotice[];
   actionFeed: ToolUsePayload[];
+  sendTimestamp: number | null;
+  lastTtft: number | null;
   hydrate: () => Promise<void>;
   handleAppEvent: (message: ExtensionMessage<unknown>) => void;
   dismissToast: (id: string) => void;
   clearActionFeed: () => void;
+  refreshCronJobs: () => Promise<void>;
   setInputValue: (value: string) => void;
   setActiveImage: (image: string | null) => void;
   setRoute: (route: AppRoute) => Promise<void>;
@@ -332,7 +330,7 @@ const applyStorageState = (set: (partial: Partial<AuraState>) => void, storage: 
     overlaySize: storage.overlaySize,
     bubblePosition: storage.bubblePosition,
     bubbleTooltipSeen: storage.bubbleTooltipSeen,
-    currentSessionId: storage.currentSessionKey ?? storage.currentSession?.id ?? null,
+    currentSessionId: storage.currentSessionKey ?? null,
     history: storage.history,
     macros: storage.macros
   });
@@ -401,13 +399,24 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   usedSkillIds: [],
   toasts: [],
   actionFeed: [],
+  sendTimestamp: null,
+  lastTtft: null,
   clearActionFeed: () => set({ actionFeed: [] }),
   setActiveImage: (image) => set({ activeImage: image }),
+
+  refreshCronJobs: async () => {
+    try {
+      const automationJobs = await window.auraDesktop.automation.list();
+      set({ automationJobs, monitors: automationJobs });
+    } catch {
+      // Gateway may not be ready yet — ignore silently
+    }
+  },
 
   hydrate: async () => {
     set({ isHydrating: true });
     const storage = await window.auraDesktop.storage.get() as AuraStorageShape;
-    const preferredSessionId = storage.currentSessionKey ?? storage.currentSession?.id ?? null;
+    const preferredSessionId = storage.currentSessionKey ?? null;
     const [authState, runtimeStatus, browserTabs, skills, automationJobs, remoteSessions] = await Promise.all([
       window.auraDesktop.auth.getState(),
       window.auraDesktop.runtime.getStatus(),
@@ -454,7 +463,16 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       const messages = [...get().messages];
       const existingIndex = messages.findIndex((entry) => entry.id === payload.messageId);
 
+      const ttftUpdate: Partial<AuraState> = {};
       if (existingIndex === -1) {
+        // First token for this message — measure TTFT
+        const sendTs = get().sendTimestamp;
+        if (sendTs) {
+          const ttft = now() - sendTs;
+          ttftUpdate.lastTtft = ttft;
+          ttftUpdate.sendTimestamp = null;
+          console.log(`[Aura] TTFT: ${ttft}ms`);
+        }
         messages.push({
           id: payload.messageId,
           role: "assistant",
@@ -470,7 +488,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
         };
       }
 
-      set({ messages });
+      set({ messages, ...ttftUpdate });
       return;
     }
 
@@ -479,6 +497,15 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       const finalText = payload.cleanText || payload.fullText || "";
       const messages = [...get().messages];
       const existingIndex = messages.findIndex((entry) => entry.id === payload.messageId);
+      const sendTs = get().sendTimestamp;
+      const ttftUpdate: Partial<AuraState> = {};
+
+      if (sendTs) {
+        const ttft = now() - sendTs;
+        ttftUpdate.lastTtft = ttft;
+        ttftUpdate.sendTimestamp = null;
+        console.log(`[Aura] TTFT: ${ttft}ms`);
+      }
 
       if (existingIndex >= 0) {
         messages[existingIndex] = {
@@ -495,13 +522,10 @@ export const useAuraStore = create<AuraState>((set, get) => ({
         });
       }
 
-      set({ messages, isLoading: false });
-      void Promise.all([
-        syncPersistedState(set),
-        buildRemoteSessionState(get().currentSessionId).then((remoteSessionState) => {
-          set(remoteSessionState);
-        }),
-      ]);
+      set({ messages, isLoading: false, ...ttftUpdate });
+      void buildRemoteSessionState(get().currentSessionId).then((remoteSessionState) => {
+        set(remoteSessionState);
+      });
       return;
     }
 
@@ -552,12 +576,9 @@ export const useAuraStore = create<AuraState>((set, get) => ({
         messages: nextMessages,
         toasts: [...state.toasts, createToast("error", "Task failed", payload.message)]
       }));
-      void Promise.all([
-        syncPersistedState(set),
-        buildRemoteSessionState(get().currentSessionId).then((remoteSessionState) => {
-          set(remoteSessionState);
-        }),
-      ]);
+      void buildRemoteSessionState(get().currentSessionId).then((remoteSessionState) => {
+        set(remoteSessionState);
+      });
       return;
     }
 
@@ -687,6 +708,12 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       }
 
       set(updates);
+
+      // Refresh canonical cron data when a cron tool event completes
+      if (payload.tool === "cron" && payload.status === "done") {
+        void get().refreshCronJobs();
+      }
+
       return;
     }
   },
@@ -799,10 +826,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       return;
     }
 
-    const sessionId = state.currentSessionId
-      ?? (await window.auraDesktop.sessions.create({
-        title: text.split(/\s+/).slice(0, 6).join(" ") || "New session",
-      })).sessionKey;
+    const sessionId = state.currentSessionId ?? crypto.randomUUID();
     const session = state.sessions.find((entry) => entry.id === sessionId) ?? {
       id: sessionId,
       startedAt: now(),
@@ -833,6 +857,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
     };
 
     const nextSessions = [nextSession, ...state.sessions.filter((entry) => entry.id !== nextSession.id)];
+    const sentAt = now();
     set({
       currentSessionId: nextSession.id,
       sessions: nextSessions,
@@ -840,6 +865,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       inputValue: override ? state.inputValue : "",
       activeImage: null,
       isLoading: true,
+      sendTimestamp: sentAt,
       lastError: null,
       route: state.route
     });
@@ -864,6 +890,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       const message = error instanceof Error ? error.message : "Could not reach the local runtime.";
       set((current) => ({
         isLoading: false,
+        sendTimestamp: null,
         lastError: {
           code: "UNKNOWN",
           message
@@ -884,7 +911,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
 
   stopMessage: async () => {
     await window.auraDesktop.chat.stop();
-    set({ isLoading: false });
+    set({ isLoading: false, sendTimestamp: null });
   },
 
   confirmChatAction: async (requestId, decision) => {
@@ -903,7 +930,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       lastError: null,
       isLoading: false
     });
-    await window.auraDesktop.storage.set({ currentSessionKey: null, currentSession: null });
+    await window.auraDesktop.storage.set({ currentSessionKey: null });
   },
 
   loadSession: async (sessionId) => {
