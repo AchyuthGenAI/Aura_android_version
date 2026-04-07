@@ -2,6 +2,7 @@ import { useAuraStore } from "@renderer/store/useAuraStore";
 
 import { ChatComposer, ChatThread, TaskBanner } from "../ChatThread";
 import { AuraLogoBlob, StatusPill } from "../primitives";
+import { RuntimeRecoveryBanner } from "../RuntimeRecoveryBanner";
 import { Card, InfoTile, SectionHeading } from "../shared";
 
 const normalizeTextContent = (value: unknown): string => {
@@ -64,6 +65,13 @@ export const HomePage = (): JSX.Element => {
           {activeRun && <StatusPill label={activeRun.surface} tone="warning" />}
         </div>
       </div>
+
+      <RuntimeRecoveryBanner
+        primaryAction={{
+          label: "Open Runtime Settings",
+          onClick: () => setRoute("settings"),
+        }}
+      />
 
       <div className="grid gap-8 xl:grid-cols-[minmax(0,1.25fr)_360px]">
         <div className="flex min-w-0 flex-col gap-6">

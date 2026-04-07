@@ -294,6 +294,7 @@ type AuraState = {
   hydrate: () => Promise<void>;
   handleAppEvent: (message: ExtensionMessage<unknown>) => void;
   dismissToast: (id: string) => void;
+  clearLastError: () => void;
   clearActionFeed: () => void;
   refreshCronJobs: () => Promise<void>;
   setInputValue: (value: string) => void;
@@ -741,6 +742,10 @@ export const useAuraStore = create<AuraState>((set, get) => ({
 
   dismissToast: (id) => {
     set({ toasts: get().toasts.filter((toast) => toast.id !== id) });
+  },
+
+  clearLastError: () => {
+    set({ lastError: null });
   },
 
   setInputValue: (value) => set({ inputValue: value }),

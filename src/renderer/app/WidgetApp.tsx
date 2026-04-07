@@ -7,6 +7,7 @@ import { VoicePanel } from "@renderer/components/VoicePanel";
 import { HistoryPanel } from "@renderer/components/HistoryPanel";
 import { ToolsPanel } from "@renderer/components/ToolsPanel";
 import { ChatActivityCards, ChatPromptChips, getChatComposerPlaceholder, getChatPendingState } from "@renderer/components/ChatAssistCards";
+import { RuntimeRecoveryBanner } from "@renderer/components/RuntimeRecoveryBanner";
 import { useWindowInteraction } from "@renderer/hooks/useWindowInteraction";
 
 const COLLAPSED_SIZE = 84;
@@ -35,6 +36,7 @@ const WidgetApp = (): JSX.Element => {
   const startNewSession = useAuraStore((state) => state.startNewSession);
   const activeRun = useAuraStore((state) => state.activeRun);
   const currentSessionId = useAuraStore((state) => state.currentSessionId);
+  const setRoute = useAuraStore((state) => state.setRoute);
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [expanded, setExpanded] = useState(false);
   const [size, setSize] = useState(DEFAULT_WIDGET_SIZE);
@@ -365,6 +367,16 @@ const WidgetApp = (): JSX.Element => {
                 </div>
               ) : (
                 <div key="chat" ref={messagesRef} className="tab-enter custom-scroll min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 pb-3">
+                  <RuntimeRecoveryBanner
+                    compact
+                    primaryAction={{
+                      label: "Open Runtime Settings",
+                      onClick: async () => {
+                        await setRoute("settings");
+                        await window.auraDesktop.app.showMainWindow();
+                      },
+                    }}
+                  />
                   {messages.length === 0 ? (
                     <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
                       <AuraLogoBlob size="lg" />

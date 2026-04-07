@@ -11,6 +11,7 @@ import type {
 import { desktopEnv } from "@renderer/config/env";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 
+import { RuntimeRecoveryBanner } from "../RuntimeRecoveryBanner";
 import { SectionHeading, SettingRow, Switch } from "../shared";
 
 type EditableProvider = "auto" | "openclaw" | "groq" | "openai" | "openrouter" | "google" | "anthropic";
@@ -331,12 +332,22 @@ export const SettingsPage = (): JSX.Element => {
           <div className="flex flex-col">
             <SectionHeading title="Runtime Health" detail="Live state of the OpenClaw bridge, saved provider posture, and desktop permissions." />
             <div className="mt-5 space-y-4">
+              <RuntimeRecoveryBanner
+                primaryAction={{
+                  label: "Restart Runtime",
+                  onClick: () => restartRuntime(),
+                }}
+              />
+
               <div className="rounded-[24px] border border-white/8 bg-white/5 p-4">
                 <p className="text-sm font-semibold text-aura-text">Local Runtime</p>
                 <p className="mt-1 text-sm text-aura-muted">{runtimeStatus.message}</p>
                 <p className="mt-2 text-xs text-aura-muted">
                   Phase: {runtimeStatus.phase} | Workspace: {runtimeStatus.workspacePath || "pending"}
                 </p>
+                {runtimeStatus.diagnostics?.supportNote && (
+                  <p className="mt-2 text-xs leading-5 text-aura-muted">{runtimeStatus.diagnostics.supportNote}</p>
+                )}
               </div>
 
               <div className="rounded-[24px] border border-white/8 bg-white/5 p-4">
