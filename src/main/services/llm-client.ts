@@ -1,8 +1,8 @@
 /**
  * Multi-provider LLM client for Aura Desktop.
  *
- * Primary: Google Gemini (generativelanguage.googleapis.com)
- * Fallback: Groq (api.groq.com, OpenAI-compatible)
+ * Primary: Groq (api.groq.com, OpenAI-compatible)
+ * Fallback: Google Gemini (generativelanguage.googleapis.com)
  *
  * Both support streaming SSE. The auto-router picks the best available provider.
  */
@@ -58,12 +58,14 @@ export function resolveGroqApiKey(configApiKey?: string): string {
 
 /**
  * Resolve the best available provider and API key.
- * Returns { provider, apiKey } — prefers Gemini if key is available.
+ * Returns { provider, apiKey } — defaults to Groq for task execution stability.
  */
 export function resolveProvider(geminiConfigKey?: string, groqConfigKey?: string): { provider: LlmProvider; apiKey: string } {
+  const groqKey = resolveGroqApiKey(groqConfigKey);
+  if (groqKey) return { provider: "groq", apiKey: groqKey };
   const geminiKey = resolveGeminiApiKey(geminiConfigKey);
   if (geminiKey) return { provider: "gemini", apiKey: geminiKey };
-  return { provider: "groq", apiKey: resolveGroqApiKey(groqConfigKey) };
+  return { provider: "groq", apiKey: groqKey };
 }
 
 // ── Gemini streaming ───────────────────────────────────────────────────────
@@ -334,7 +336,7 @@ export function streamChatGroq(
 // ── Auto-routing streamer ──────────────────────────────────────────────────
 
 /**
- * Stream chat using the best available provider (Gemini first, Groq fallback).
+ * Stream chat using the best available provider (Groq first, Gemini fallback).
  * This is the main entry point for all direct LLM calls.
  */
 export function streamChat(

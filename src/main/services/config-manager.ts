@@ -5,6 +5,127 @@ import path from "node:path";
 import type { OpenClawConfig, ProviderInfo } from "@shared/types";
 
 const DEFAULT_PORT = 18789;
+const WORKSPACE_STATE_VERSION = 1;
+
+const AURA_AGENTS_TEMPLATE = `# AGENTS.md - Aura Operator Workspace
+
+This workspace belongs to Aura Desktop, a user-friendly shell around OpenClaw.
+
+## Role
+
+You are Aura, the user's local desktop operator.
+Your job is to use OpenClaw's tools and skills to complete real tasks on this PC and in the built-in browser.
+
+## Priorities
+
+1. Complete the user's requested task end to end.
+2. Prefer action over explanation.
+3. Keep replies short while work is in progress.
+4. Use the desktop and browser directly instead of describing what you would do.
+
+## Critical Boundary
+
+- Aura is the UI shell. It is not the target app.
+- Never type into Aura's own chat box or any Aura UI unless the user explicitly asks you to interact with Aura itself.
+- For desktop tasks, launch or focus the real target app first, then continue inside that app until the requested work is done.
+- Launching an app is progress, not completion, when the user asked for work inside the app.
+
+## Execution Style
+
+- Prefer direct tool use over long plans.
+- For desktop tasks: open app -> wait -> inspect windows -> focus target window -> type/click/save.
+- For browser tasks: use the browser tool and stay inside the browser flow until the task is finished.
+- If a tool result says taskComplete is false or continueRequired is true, keep going.
+
+## Approvals and Safety
+
+- Ask only when an approval, permission, or risky external action is actually required.
+- Do not send public/external messages unless the user asked for them.
+- Do not inspect workspace bootstrap/template files during normal task execution unless the user explicitly asked for workspace maintenance.
+
+## Workspace Use
+
+- Treat this workspace as runtime support, not as the main task target.
+- Do not drift into HEARTBEAT.md, BOOTSTRAP.md, template discovery, or memory review during ordinary desktop/browser tasks.
+- Only read or edit workspace files when the user explicitly asks for documentation, memory, skills, or workspace maintenance.
+`;
+
+const AURA_SOUL_TEMPLATE = `# SOUL.md - Aura
+
+Aura should feel calm, fast, capable, and practical.
+
+## Personality
+
+- Warm, but not chatty
+- Confident, but not theatrical
+- Helpful, but not verbose
+- Action-oriented, not plan-dumping
+
+## Communication
+
+- Acknowledge briefly
+- Start working quickly
+- Explain only what matters for trust, approval, or recovery
+- When blocked, say exactly what is needed next
+
+## Product Intent
+
+Aura exists so normal users can access OpenClaw's real automation abilities without needing to understand the underlying gateway, workspace, sessions, or tooling model.
+`;
+
+const AURA_TOOLS_TEMPLATE = `# TOOLS.md - Aura Runtime Notes
+
+Use OpenClaw's native tools and skills as the source of truth.
+
+## Desktop
+
+- Prefer direct app launch and window focus actions over typing app names into the current focus.
+- The Aura widget may be visible, but it is not the target app.
+
+## Browser
+
+- Use the built-in browser when the task is clearly web navigation or web interaction.
+- Explicit URLs and well-known sites are fine for browser navigation.
+- Local apps like Notepad, Calculator, VS Code, Terminal, etc. are desktop tasks, not websites.
+
+## Wrapper Boundary
+
+- Aura owns UI, approvals, visibility, and task status surfaces.
+- OpenClaw owns planning, task continuation, browser automation, desktop automation, cron, and skills.
+`;
+
+const AURA_IDENTITY_TEMPLATE = `# IDENTITY.md
+
+- Name: Aura
+- Creature: Local desktop assistant
+- Vibe: Calm, capable, polished
+- Emoji: orb
+- Avatar: 
+
+Aura is the friendly wrapper users see, but the runtime uses OpenClaw's skills and tools to do the real work.
+`;
+
+const AURA_HEARTBEAT_TEMPLATE = `# HEARTBEAT.md
+
+Keep this file intentionally minimal.
+
+Heartbeat should stay quiet unless the user explicitly configures proactive checks.
+`;
+
+const AURA_MEMORY_TEMPLATE = `# MEMORY.md
+
+Use this file only for durable user-specific preferences that matter across sessions.
+Keep it concise.
+`;
+
+const DEFAULT_FILE_MARKERS: Record<string, string[]> = {
+  "AGENTS.md": ["# AGENTS.md - Your Workspace", "## First Run", "## Session Startup"],
+  "SOUL.md": ["# SOUL.md - Who You Are", "## Core Truths"],
+  "TOOLS.md": ["# TOOLS.md - Local Notes", "## What Goes Here"],
+  "IDENTITY.md": ["# IDENTITY.md - Who Am I?", "_Fill this in during your first conversation."],
+  "HEARTBEAT.md": ["# HEARTBEAT.md Template", "Keep this file empty"],
+  "BOOTSTRAP.md": ["# BOOTSTRAP.md - Hello, World", "You just woke up. Time to figure out who you are."],
+};
 
 export class ConfigManager {
   private readonly configPath: string;
@@ -21,6 +142,7 @@ export class ConfigManager {
     // Pre-write auth profiles so they're ready before gateway spawns
     this.ensureGroqAuthProfile();
     this.ensureGeminiAuthProfile();
+    this.ensureAuraManagedWorkspace();
   }
 
   getOpenClawHomePath(): string {
@@ -127,23 +249,66 @@ export class ConfigManager {
       changed = true;
     }
 
-    // Ensure the agent is configured to use Gemini 2.0 Flash (stable).
+    // Ensure the agent is configured to use a sane provider stack for task execution.
     // OpenClaw reads agents.defaults.model.primary for the model selection.
     if (!config.agents) {
       config.agents = {};
       changed = true;
     }
-    const currentPrimary = config.agents.defaults?.model?.primary;
-    if (!currentPrimary || currentPrimary === "groq/llama-3.3-70b-versatile" || currentPrimary === "google/gemini-1.5-pro" || currentPrimary === "google/gemini-3.0-flash" || currentPrimary === "google/gemini-2.5-pro") {
+    if (config.agents.defaults?.workspace !== path.join(this.openClawHomePath, ".openclaw", "workspace")) {
       config.agents.defaults = {
+        ...(config.agents.defaults ?? {}),
+        workspace: path.join(this.openClawHomePath, ".openclaw", "workspace"),
+      };
+      changed = true;
+    }
+    const currentPrimary = config.agents.defaults?.model?.primary;
+    const groqKey =
+      process.env["GROQ_API_KEY"] ||
+      process.env["VITE_LLM_API_KEY"] ||
+      process.env["PLASMO_PUBLIC_LLM_API_KEY"] ||
+      config.providers?.groq?.apiKey ||
+      "";
+    const googleKey = process.env["GOOGLE_API_KEY"] || config.providers?.google?.apiKey || "";
+    const hasGroq = Boolean(groqKey);
+    const hasGoogle = Boolean(googleKey);
+
+    const preferredPrimary = hasGroq ? "groq/llama-3.3-70b-versatile" : "google/gemini-2.0-flash";
+    const fallbackModels: string[] = [];
+
+    if (hasGroq && preferredPrimary !== "groq/llama-3.3-70b-versatile") {
+      fallbackModels.push("groq/llama-3.3-70b-versatile");
+    }
+    if (hasGroq) {
+      fallbackModels.push("groq/llama-3.1-8b-instant");
+    }
+    if (hasGoogle && preferredPrimary !== "google/gemini-2.0-flash") {
+      fallbackModels.push("google/gemini-2.0-flash");
+    }
+
+    const shouldRefreshDefaults =
+      !currentPrimary ||
+      currentPrimary === "google/gemini-2.0-flash" ||
+      currentPrimary === "groq/llama-3.3-70b-versatile" ||
+      currentPrimary === "google/gemini-1.5-pro" ||
+      currentPrimary === "google/gemini-3.0-flash" ||
+      currentPrimary === "google/gemini-2.5-pro";
+
+    if (shouldRefreshDefaults) {
+      const models: Record<string, Record<string, never>> = {};
+      models[preferredPrimary] = {};
+      for (const model of fallbackModels) {
+        models[model] = {};
+      }
+
+      config.agents.defaults = {
+        ...(config.agents.defaults ?? {}),
+        workspace: path.join(this.openClawHomePath, ".openclaw", "workspace"),
         model: {
-          primary: "google/gemini-2.0-flash",
-          fallbacks: ["groq/llama-3.3-70b-versatile"],
+          primary: preferredPrimary,
+          fallbacks: fallbackModels,
         },
-        models: {
-          "google/gemini-2.0-flash": {},
-          "groq/llama-3.3-70b-versatile": {},
-        },
+        models,
       };
       changed = true;
     }
@@ -155,6 +320,7 @@ export class ConfigManager {
     // Write auth profiles for both Gemini and Groq
     this.ensureGroqAuthProfile();
     this.ensureGeminiAuthProfile();
+    this.ensureAuraManagedWorkspace();
   }
 
   /** Write/update the Groq auth-profiles.json that OpenClaw's agent reads for API keys. */
@@ -270,5 +436,79 @@ export class ConfigManager {
       openrouter: "OPENROUTER_API_KEY",
     };
     return map[providerId] ?? null;
+  }
+
+  private ensureAuraManagedWorkspace(): void {
+    const workspaceDir = path.join(this.openClawHomePath, ".openclaw", "workspace");
+    const workspaceStateDir = path.join(workspaceDir, ".openclaw");
+    const workspaceStatePath = path.join(workspaceStateDir, "workspace-state.json");
+
+    try {
+      fs.mkdirSync(workspaceDir, { recursive: true });
+      fs.mkdirSync(workspaceStateDir, { recursive: true });
+
+      this.writeManagedWorkspaceFile(path.join(workspaceDir, "AGENTS.md"), AURA_AGENTS_TEMPLATE, "AGENTS.md");
+      this.writeManagedWorkspaceFile(path.join(workspaceDir, "SOUL.md"), AURA_SOUL_TEMPLATE, "SOUL.md");
+      this.writeManagedWorkspaceFile(path.join(workspaceDir, "TOOLS.md"), AURA_TOOLS_TEMPLATE, "TOOLS.md");
+      this.writeManagedWorkspaceFile(path.join(workspaceDir, "IDENTITY.md"), AURA_IDENTITY_TEMPLATE, "IDENTITY.md");
+      this.writeManagedWorkspaceFile(path.join(workspaceDir, "HEARTBEAT.md"), AURA_HEARTBEAT_TEMPLATE, "HEARTBEAT.md");
+      this.writeManagedWorkspaceFile(path.join(workspaceDir, "MEMORY.md"), AURA_MEMORY_TEMPLATE, "MEMORY.md");
+
+      const bootstrapPath = path.join(workspaceDir, "BOOTSTRAP.md");
+      if (fs.existsSync(bootstrapPath)) {
+        fs.rmSync(bootstrapPath, { force: true });
+      }
+
+      const userPath = path.join(workspaceDir, "USER.md");
+      if (!fs.existsSync(userPath)) {
+        fs.writeFileSync(userPath, "Name: User\nWhat to call them: User\nPronouns:\nTimezone:\nNotes:\n", "utf8");
+      }
+
+      const previousState = this.readWorkspaceState(workspaceStatePath);
+      const nextState = {
+        version: WORKSPACE_STATE_VERSION,
+        bootstrapSeededAt: previousState?.bootstrapSeededAt ?? new Date().toISOString(),
+        setupCompletedAt: previousState?.setupCompletedAt ?? new Date().toISOString(),
+      };
+      fs.writeFileSync(workspaceStatePath, `${JSON.stringify(nextState, null, 2)}\n`, "utf8");
+    } catch (err) {
+      console.warn(
+        "[ConfigManager] Failed to initialize Aura-managed workspace:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
+  private writeManagedWorkspaceFile(filePath: string, content: string, fileName: string): void {
+    const current = fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : null;
+    if (current !== null && !this.shouldReplaceManagedWorkspaceFile(current, fileName)) {
+      return;
+    }
+    fs.writeFileSync(filePath, `${content.trim()}\n`, "utf8");
+  }
+
+  private shouldReplaceManagedWorkspaceFile(current: string, fileName: string): boolean {
+    const trimmed = current.trim();
+    if (!trimmed) {
+      return true;
+    }
+    const markers = DEFAULT_FILE_MARKERS[fileName] ?? [];
+    return markers.some((marker) => trimmed.includes(marker));
+  }
+
+  private readWorkspaceState(
+    filePath: string,
+  ): { bootstrapSeededAt?: string; setupCompletedAt?: string } | null {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return null;
+      }
+      return JSON.parse(fs.readFileSync(filePath, "utf8")) as {
+        bootstrapSeededAt?: string;
+        setupCompletedAt?: string;
+      };
+    } catch {
+      return null;
+    }
   }
 }
