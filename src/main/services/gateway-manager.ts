@@ -466,6 +466,7 @@ export class GatewayManager {
   private lastConnectErrorMessage: string | null = null;
   private bootstrapDeadlineMs = 120_000;
   private gatewayPortWaitTimeoutMs = 75_000;
+  private gatewayFreshBootGraceMs = 1_500;
   private gatewayReadyHintTimeoutMs = 20_000;
 
   private safeConsoleLog(line: string): void {
@@ -1112,6 +1113,7 @@ export class GatewayManager {
           } else {
             console.log(`[GatewayManager] Port ${port} is not open yet; checking gateway process state...`);
             const hasLiveGatewayProcess = this.gatewayProcess !== null && this.gatewayProcess.exitCode === null;
+            const startedFreshGateway = !hasLiveGatewayProcess;
             if (hasLiveGatewayProcess) {
               console.log(`[GatewayManager] Gateway process is already running; waiting for port ${port} to open...`);
             } else {
@@ -1125,6 +1127,10 @@ export class GatewayManager {
             const portOpen = await this.waitForPort(port, portWaitTimeoutMs);
             if (!portOpen) {
               throw new Error(`Gateway process started but port ${port} never opened within ${Math.round(portWaitTimeoutMs / 1000)}s`);
+            }
+            if (startedFreshGateway) {
+              console.log(`[GatewayManager] Port ${port} is open; waiting ${this.gatewayFreshBootGraceMs}ms for gateway readiness...`);
+              await new Promise<void>((resolve) => setTimeout(resolve, this.gatewayFreshBootGraceMs));
             }
             console.log(`[GatewayManager] Port ${port} is open Ã¢â‚¬â€ connecting WebSocket...`);
             await this.connectWebSocketWithRetry(3);
