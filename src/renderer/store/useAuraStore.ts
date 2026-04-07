@@ -155,6 +155,27 @@ const createToast = (tone: ToastNotice["tone"], title: string, message?: string)
   createdAt: now()
 });
 
+const getTaskErrorTitle = (code: TaskErrorPayload["code"]): string => {
+  switch (code) {
+    case "PAIRING_REQUIRED":
+      return "Pairing required";
+    case "RATE_LIMIT":
+      return "Rate limit reached";
+    case "BROWSER_UNAVAILABLE":
+      return "Browser unavailable";
+    case "TIMEOUT":
+      return "Request timed out";
+    case "AI_UNAVAILABLE":
+      return "Runtime unavailable";
+    case "PERMISSION_DENIED":
+      return "Permission needed";
+    case "TASK_CANCELLED":
+      return "Request cancelled";
+    default:
+      return "Task failed";
+  }
+};
+
 const isTerminalRunStatus = (status: OpenClawRun["status"]): boolean =>
   status === "done" || status === "error" || status === "cancelled";
 
@@ -574,7 +595,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
         activeRun: null,
         lastError: payload,
         messages: nextMessages,
-        toasts: [...state.toasts, createToast("error", "Task failed", payload.message)]
+        toasts: [...state.toasts, createToast("error", getTaskErrorTitle(payload.code), payload.message)]
       }));
       void buildRemoteSessionState(get().currentSessionId).then((remoteSessionState) => {
         set(remoteSessionState);

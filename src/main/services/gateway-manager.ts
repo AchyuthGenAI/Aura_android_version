@@ -22,6 +22,7 @@ import type {
   PageContext,
   RuntimeDiagnostics,
   RuntimeStatus,
+  TaskErrorCode,
   TaskStep,
 } from "@shared/types";
 
@@ -96,6 +97,14 @@ interface ChatPreflightBlocker {
   supportNote: string;
 }
 
+interface ClassifiedTaskError {
+  code: TaskErrorCode;
+  message: string;
+  statusMessage: string;
+  blockedReason: string;
+  supportNote: string;
+}
+
 // chat event payload shape from the gateway protocol (v3)
 interface ChatContentBlock {
   type: string;
@@ -155,6 +164,93 @@ function asNonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length ? trimmed : null;
+}
+
+function classifyGatewayError(errorMessage: string): ClassifiedTaskError {
+  const normalized = errorMessage.toLowerCase();
+
+  if (normalized.includes("pairing required") || normalized.includes("scope-upgrade")) {
+    return {
+      code: "PAIRING_REQUIRED",
+      message: "Aura needs OpenClaw device approval before it can complete this action. Approve the pending Aura device with `openclaw devices approve --latest`, then try again.",
+      statusMessage: "Aura is waiting for OpenClaw device approval.",
+      blockedReason: `OpenClaw rejected the request because the Aura device still needs pairing approval. Raw error: ${errorMessage}`,
+      supportNote: "Approve the pending Aura device with `openclaw devices approve --latest`, then retry the action.",
+    };
+  }
+
+  if (
+    normalized.includes("rate limit")
+    || normalized.includes("resource exhausted")
+    || normalized.includes("api rate limit reached")
+    || normalized.includes("\"code\": 429")
+    || normalized.includes(" code 429")
+  ) {
+    return {
+      code: "RATE_LIMIT",
+      message: "The current AI provider is rate-limited right now. Try again in a moment, or switch to another configured provider in Settings.",
+      statusMessage: "The AI provider hit a rate limit.",
+      blockedReason: `The configured AI provider rejected the request because of rate limiting. Raw error: ${errorMessage}`,
+      supportNote: "Wait for the provider quota window to reset, or switch models/providers in Settings.",
+    };
+  }
+
+  if (
+    normalized.includes("browser failed: timed out")
+    || normalized.includes("browser is currently unavailable")
+    || normalized.includes("do not retry the browser tool")
+  ) {
+    return {
+      code: "BROWSER_UNAVAILABLE",
+      message: "OpenClaw's browser control is still starting or temporarily unavailable. Wait a moment, restart the managed runtime if needed, then try the browser action again.",
+      statusMessage: "Browser control is still starting.",
+      blockedReason: `The browser control service did not become ready in time. Raw error: ${errorMessage}`,
+      supportNote: "Wait for the browser service to finish starting, or restart the managed runtime if browser actions keep timing out.",
+    };
+  }
+
+  if (normalized.includes("timed out") || normalized.includes("timeout")) {
+    return {
+      code: "TIMEOUT",
+      message: "Aura timed out while waiting for OpenClaw to finish the request. Try again in a moment, and restart the managed runtime if it keeps happening.",
+      statusMessage: "OpenClaw took too long to respond.",
+      blockedReason: `OpenClaw did not finish the request before the timeout. Raw error: ${errorMessage}`,
+      supportNote: "Try the request again, then restart the managed runtime if timeouts keep repeating.",
+    };
+  }
+
+  if (
+    normalized.includes("gateway disconnected")
+    || normalized.includes("gateway not connected")
+    || normalized.includes("runtime is unavailable")
+    || normalized.includes("websocket closed before connection established")
+  ) {
+    return {
+      code: "AI_UNAVAILABLE",
+      message: "Aura could not reach the managed OpenClaw runtime. Restart the managed runtime from Settings, then try again.",
+      statusMessage: "Managed OpenClaw runtime is unavailable.",
+      blockedReason: `Aura could not reach the OpenClaw gateway. Raw error: ${errorMessage}`,
+      supportNote: "Restart the managed runtime from Settings and wait for Aura to report ready state.",
+    };
+  }
+
+  if (normalized.includes("permission denied") || normalized.includes("not permitted")) {
+    return {
+      code: "PERMISSION_DENIED",
+      message: "Aura does not have permission to complete this action yet. Grant the required approval, then try again.",
+      statusMessage: "Permission is required to continue.",
+      blockedReason: `OpenClaw denied the request because the required permission was missing. Raw error: ${errorMessage}`,
+      supportNote: "Grant the requested permission or approval, then retry the action.",
+    };
+  }
+
+  return {
+    code: "UNKNOWN",
+    message: errorMessage,
+    statusMessage: "OpenClaw reported an error.",
+    blockedReason: errorMessage,
+    supportNote: "Retry the request, then restart the managed runtime if the same error keeps happening.",
+  };
 }
 
 function isBrokenPipeError(error: unknown): boolean {
@@ -356,6 +452,7 @@ export class GatewayManager {
   private openClawRootPath: string | null = null;
   private activeMessageId: string | null = null;
   private activeRunId: string | null = null;
+  private activeSessionKey: string | null = null;
   private activeRun: OpenClawRun | null = null;
   private streamedText = "";
   private chatDoneResolve: ((text: string) => void) | null = null;
@@ -366,6 +463,7 @@ export class GatewayManager {
   private gatewayDeviceIdentity: GatewayDeviceIdentity | null = null;
   private readonly openClawBuildTimeoutMs = 12 * 60_000;
   private lastBundleIntegrityMissingFiles: string[] = [];
+  private lastConnectErrorMessage: string | null = null;
   private bootstrapDeadlineMs = 120_000;
   private gatewayPortWaitTimeoutMs = 75_000;
   private gatewayReadyHintTimeoutMs = 20_000;
@@ -466,6 +564,7 @@ export class GatewayManager {
       updatedAt: now(),
       toolCount: 0,
     };
+    this.activeSessionKey = sessionId ?? this.activeSessionKey;
     this.activeRun = run;
     this.emit({ type: "RUN_STATUS", payload: { run } });
     return run;
@@ -479,6 +578,21 @@ export class GatewayManager {
       updatedAt: partial.updatedAt ?? now(),
     };
     this.emit({ type: "RUN_STATUS", payload: { run: this.activeRun } });
+  }
+
+  private clearActiveChatContext(): void {
+    this.activeMessageId = null;
+    this.activeRunId = null;
+    this.activeSessionKey = null;
+    this.streamedText = "";
+  }
+
+  private updateActiveSessionKey(sessionKey: string | null | undefined): void {
+    if (!sessionKey) return;
+    this.activeSessionKey = sessionKey;
+    if (this.activeRun && this.activeRun.sessionId !== sessionKey) {
+      this.patchActiveRun({ sessionId: sessionKey });
+    }
   }
 
   private inferToolSurface(tool: string): OpenClawRunSurface {
@@ -1035,6 +1149,7 @@ export class GatewayManager {
     }
 
     const bootstrapSucceeded = this.connected;
+    const bootstrapFailure = bootstrapError ? classifyGatewayError(bootstrapError) : null;
 
     this.setBootstrap(
       bootstrapSucceeded
@@ -1042,8 +1157,8 @@ export class GatewayManager {
         : {
             stage: "error",
             progress: 100,
-            message: "Managed OpenClaw runtime is unavailable.",
-            detail: bootstrapError ?? "Aura could not connect to the packaged OpenClaw gateway.",
+            message: bootstrapFailure?.statusMessage ?? "Managed OpenClaw runtime is unavailable.",
+            detail: bootstrapFailure?.message ?? bootstrapError ?? "Aura could not connect to the packaged OpenClaw gateway.",
           },
     );
     this.setStatus({
@@ -1057,16 +1172,16 @@ export class GatewayManager {
       degraded: !this.connected,
       lastCheckedAt: Date.now(),
       workspacePath: path.join(this.configManager.getOpenClawHomePath(), ".openclaw", "workspace"),
-      message: bootstrapSucceeded ? "Managed OpenClaw runtime is online." : "Managed OpenClaw runtime is unavailable.",
-      error: bootstrapSucceeded ? undefined : bootstrapError ?? "OpenClaw gateway bootstrap failed.",
+      message: bootstrapSucceeded ? "Managed OpenClaw runtime is online." : (bootstrapFailure?.statusMessage ?? "Managed OpenClaw runtime is unavailable."),
+      error: bootstrapSucceeded ? undefined : (bootstrapFailure?.message ?? bootstrapError ?? "OpenClaw gateway bootstrap failed."),
       diagnostics: this.buildDiagnostics({
         bundleRootPath: this.openClawRootPath ?? undefined,
         processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
         startupState: bootstrapSucceeded ? "ready" : "error",
-        blockedReason: bootstrapSucceeded ? undefined : (bootstrapError ?? "OpenClaw gateway bootstrap failed."),
+        blockedReason: bootstrapSucceeded ? undefined : (bootstrapFailure?.blockedReason ?? bootstrapError ?? "OpenClaw gateway bootstrap failed."),
         supportNote: bootstrapSucceeded
           ? "Aura is connected to the managed OpenClaw gateway."
-          : "Restart the runtime from Settings after checking the bundled OpenClaw assets.",
+          : (bootstrapFailure?.supportNote ?? "Restart the runtime from Settings after checking the bundled OpenClaw assets."),
       }),
     });
 
@@ -1081,6 +1196,8 @@ export class GatewayManager {
 
   async shutdown(): Promise<void> {
     this.disconnectWebSocket();
+    this.activeRun = null;
+    this.clearActiveChatContext();
     if (this.gatewayProcess && this.gatewayProcess.exitCode === null) {
       this.gatewayProcess.kill();
       this.gatewayProcess = null;
@@ -1102,19 +1219,23 @@ export class GatewayManager {
 
   async stopResponse(): Promise<void> {
     if (!this.connected || !this.activeRunId) return;
+    const sessionKey = this.activeSessionKey ?? this.activeRun?.sessionId ?? null;
     try {
-      await this.request("chat.abort", { runId: this.activeRunId });
+      if (sessionKey) {
+        await this.request("chat.abort", { runId: this.activeRunId, sessionKey });
+      } else {
+        console.warn("[GatewayManager] Skipping chat.abort because no active sessionKey is available.");
+      }
     } catch {
       // best effort
     }
-    this.activeMessageId = null;
-    this.activeRunId = null;
     this.patchActiveRun({
       status: "cancelled",
       completedAt: now(),
       summary: this.streamedText || "Response stopped.",
     });
     this.activeRun = null;
+    this.clearActiveChatContext();
     this.setStatus({
       ...this.runtimeStatus,
       phase: "ready",
@@ -1234,6 +1355,7 @@ export class GatewayManager {
     const taskId = crypto.randomUUID();
     this.activeMessageId = messageId;
     this.activeRunId = null;
+    this.activeSessionKey = request.sessionId ?? null;
     this.streamedText = "";
 
     const pageContext = await this.browserController.getPageContext();
@@ -1286,9 +1408,8 @@ export class GatewayManager {
       this.handleChatError(messageId, taskId, request, message);
     }
 
-    this.activeMessageId = null;
-    this.activeRunId = null;
     this.activeRun = null;
+    this.clearActiveChatContext();
     return { messageId, taskId };
   }
 
@@ -1332,9 +1453,8 @@ export class GatewayManager {
       this.handleChatError(messageId, taskId, request, err instanceof Error ? err.message : String(err));
     }
 
-    this.activeMessageId = null;
-    this.activeRunId = null;
     this.activeRun = null;
+    this.clearActiveChatContext();
     return { messageId, taskId };
   }
 
@@ -1349,6 +1469,7 @@ export class GatewayManager {
   ): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       this.streamedText = "";
+      this.activeSessionKey = sessionKey;
       // Set callbacks before sending so streaming events don't race ahead
       this.chatDoneResolve = resolve;
       this.chatDoneReject = reject;
@@ -1533,11 +1654,13 @@ export class GatewayManager {
       const token = this.configManager.getGatewayToken();
 
       let resolved = false;
+      this.lastConnectErrorMessage = null;
 
       this.onConnected = () => {
         if (!resolved) {
           resolved = true;
           this.connected = true;
+          this.lastConnectErrorMessage = null;
           this.setStatus({
             ...this.runtimeStatus,
             phase: "ready",
@@ -1591,13 +1714,14 @@ export class GatewayManager {
       ws.on("close", () => {
         this.clearKeepAlive();
         const wasConnected = this.connected;
+        const connectError = this.lastConnectErrorMessage ? classifyGatewayError(this.lastConnectErrorMessage) : null;
         if (this.ws === ws) {
           this.ws = null;
           this.connected = false;
         }
         if (!resolved) {
           resolved = true;
-          reject(new Error("WebSocket closed before connection established."));
+          reject(new Error(this.lastConnectErrorMessage ?? "WebSocket closed before connection established."));
         }
         this.setStatus({
           ...this.runtimeStatus,
@@ -1606,14 +1730,17 @@ export class GatewayManager {
           gatewayConnected: false,
           degraded: true,
           lastCheckedAt: Date.now(),
-          message: wasConnected ? "Reconnecting to the managed OpenClaw gateway." : "Managed OpenClaw gateway is unavailable.",
-          error: wasConnected ? undefined : "WebSocket closed before the gateway finished connecting.",
+          message: wasConnected
+            ? "Reconnecting to the managed OpenClaw gateway."
+            : (connectError?.statusMessage ?? "Managed OpenClaw gateway is unavailable."),
+          error: wasConnected ? undefined : (connectError?.message ?? "WebSocket closed before the gateway finished connecting."),
           diagnostics: this.buildDiagnostics({
             bundleRootPath: this.openClawRootPath ?? undefined,
             processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
+            blockedReason: wasConnected ? undefined : (connectError?.blockedReason ?? this.lastConnectErrorMessage ?? "WebSocket closed before the gateway finished connecting."),
             supportNote: wasConnected
               ? "Aura will retry the OpenClaw gateway connection automatically."
-              : "The managed OpenClaw gateway could not complete its startup handshake.",
+              : (connectError?.supportNote ?? "The managed OpenClaw gateway could not complete its startup handshake."),
           }),
         });
         // Auto-reconnect after a successful connection drops
@@ -1681,6 +1808,7 @@ export class GatewayManager {
   private disconnectWebSocket(): void {
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.connected = false;
+    this.lastConnectErrorMessage = null;
     this.onConnected = null;
     this.pending.forEach(({ reject, timeout }) => {
       clearTimeout(timeout);
@@ -1832,6 +1960,7 @@ export class GatewayManager {
         this.onConnected?.();
       },
       reject: (err) => {
+        this.lastConnectErrorMessage = err.message;
         // If connect is rejected, the ws.close handler will propagate the error
         console.error("[GatewayManager] Connect rejected:", err.message);
       },
@@ -1844,6 +1973,7 @@ export class GatewayManager {
   private handleChatStreamEvent(evt: EventFrame): void {
     const payload = evt.payload as ChatEventPayload | undefined;
     if (!payload || !this.activeMessageId) return;
+    this.updateActiveSessionKey(payload.sessionKey);
 
     const state = payload.state;
 
@@ -2016,14 +2146,15 @@ export class GatewayManager {
     _request: ChatSendRequest,
     errorMessage: string,
   ): void {
+    const classified = classifyGatewayError(errorMessage);
     this.store.set("history", [
-      { id: taskId, command: this.activeRun?.prompt ?? "request", result: errorMessage, status: "error", createdAt: now() },
+      { id: taskId, command: this.activeRun?.prompt ?? "request", result: classified.message, status: "error", createdAt: now() },
       ...this.store.getState().history,
     ]);
 
-    this.emit({ type: "TASK_ERROR", payload: { taskId, code: "UNKNOWN", message: errorMessage } });
+    this.emit({ type: "TASK_ERROR", payload: { taskId, code: classified.code, message: classified.message } });
 
-    const errorDisplay = `\n\nError: ${errorMessage}`;
+    const errorDisplay = `${this.streamedText ? "\n\n" : ""}${classified.message}`;
     this.streamedText += errorDisplay;
     this.emit({ type: "LLM_TOKEN", payload: { messageId, token: errorDisplay } });
     this.emit({ type: "LLM_DONE", payload: { messageId, fullText: this.streamedText, cleanText: this.streamedText } });
@@ -2031,14 +2162,21 @@ export class GatewayManager {
       runId: this.activeRunId ?? undefined,
       status: "error",
       completedAt: now(),
-      error: errorMessage,
+      error: classified.message,
     });
 
     this.setStatus({
       ...this.runtimeStatus,
       phase: "error",
-      message: "OpenClaw reported an error.",
-      error: errorMessage,
+      message: classified.statusMessage,
+      error: classified.message,
+      diagnostics: this.buildDiagnostics({
+        ...(this.runtimeStatus.diagnostics ?? {}),
+        bundleRootPath: this.openClawRootPath ?? this.runtimeStatus.diagnostics?.bundleRootPath,
+        processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
+        blockedReason: classified.blockedReason,
+        supportNote: classified.supportNote,
+      }),
     });
   }
   private setStatus(next: RuntimeStatus): void {
@@ -2051,7 +2189,7 @@ export class GatewayManager {
       managedMode: "openclaw-first",
       gatewayTokenConfigured: Boolean(this.configManager.getGatewayToken()),
       gatewayUrl: `ws://127.0.0.1:${this.configManager.getGatewayPort()}`,
-      sessionKey: "main",
+      sessionKey: this.activeSessionKey ?? "main",
       startupState: this.runtimeStatus?.phase ?? "unknown",
       bundleIntegrity: this.lastBundleIntegrityMissingFiles.length
         ? "missing-files"

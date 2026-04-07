@@ -541,14 +541,19 @@ export interface RunStatusPayload {
 
 export interface TaskErrorPayload {
   taskId?: string;
-  code:
-    | "AI_UNAVAILABLE"
-    | "TIMEOUT"
-    | "TASK_CANCELLED"
-    | "PERMISSION_DENIED"
-    | "UNKNOWN";
+  code: TaskErrorCode;
   message: string;
 }
+
+export type TaskErrorCode =
+  | "AI_UNAVAILABLE"
+  | "TIMEOUT"
+  | "TASK_CANCELLED"
+  | "PERMISSION_DENIED"
+  | "PAIRING_REQUIRED"
+  | "RATE_LIMIT"
+  | "BROWSER_UNAVAILABLE"
+  | "UNKNOWN";
 
 export interface ConfirmActionPayload {
   requestId: string;
