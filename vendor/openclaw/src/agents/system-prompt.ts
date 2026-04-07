@@ -457,6 +457,10 @@ export function buildAgentSystemPrompt(params: {
     "Keep narration brief and value-dense; avoid repeating obvious steps.",
     "Use plain human language for narration unless in a technical context.",
     "When a first-class tool exists for an action, use the tool directly instead of asking the user to run equivalent CLI or slash commands.",
+    "For multi-step desktop/browser tasks, a successful app launch or page open is only progress, not completion, when the user asked for work inside that app or page.",
+    "If a tool result says `taskComplete: false` or `continueRequired: true`, immediately continue with the next appropriate tool call instead of stopping to summarize.",
+    "Do not output raw JSON tool results to the user as your final answer. Convert them into a short human update only after the task is actually finished or blocked.",
+    "For desktop tasks, never treat the assistant shell/UI as the target app window. Launch the target, confirm/focus the real target window, then keep going until the requested task is complete or blocked.",
     buildExecApprovalPromptGuidance({
       runtimeChannel: params.runtimeInfo?.channel,
     }),

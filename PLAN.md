@@ -220,13 +220,14 @@ Core responsibilities:
   clears `sendTimestamp` on first token, but not on direct `LLM_DONE`
 
 ### What remains
-- Test end-to-end chat in dev
+- OpenClaw-first background automation hardening
 - Packaged app validation
 - Session key caching / gateway pre-warming
 - Installer polish
 
 ### Current priorities
-- Smoke test chat, sessions, fast-path navigation, activity-card scoping, and TTFT logging in dev
+- Make OpenClaw-owned desktop and browser automation feel seamless in the background
+- Keep Aura limited to shell behavior: approvals, visibility, run/status UX, and diagnostics
 - Validate the packaged Aura + bundled OpenClaw runtime path
 - Then continue with session-key caching and gateway pre-warming
 

@@ -155,18 +155,28 @@ These were addressed in code and should now be validated manually:
 
 ## Current Priorities
 
-1. Run a live dev smoke test for chat, sessions, fast-path navigation, activity cards, and TTFT logging
-2. Validate the packaged Aura + bundled OpenClaw runtime path
-3. Then continue with session-key caching and gateway pre-warming
-4. After that, move on to installer and ship polish
+1. Make OpenClaw-owned desktop and browser automation feel seamless in the background
+2. Keep Aura limited to shell behavior: window visibility, approvals, run/status UX, and diagnostics
+3. Validate the packaged Aura + bundled OpenClaw runtime path
+4. Then continue with session-key caching, gateway pre-warming, and ship polish
 
 ---
 
 ## Remaining Work
 
-### Priority 1: End-to-End Smoke Test
+### Superseding Priority Note
 
-Verify the implemented pass in a live dev run:
+The next implementation priority is no longer the old chat/session bug work.
+Treat the items below as historical context. The active goal is:
+
+- Keep Aura as a thin shell with approvals, visibility, run/status UX, and diagnostics
+- Keep automation behavior in vendored OpenClaw, not in Aura heuristics
+- Make desktop/browser tasks run cleanly in the background with window-aware OpenClaw actions
+- Validate the packaged Aura + bundled OpenClaw runtime path after the automation behavior is solid
+
+### Priority 1: OpenClaw-First Background Automation
+
+- [ ] Keep Aura fast-paths limited to strict browser navigation only
 
 
 - `src/renderer/store/useAuraStore.ts` — `sendMessage()` method

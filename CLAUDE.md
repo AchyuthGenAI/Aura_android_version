@@ -183,12 +183,17 @@ The chat unblock pass is now implemented:
 - TTFT clears on both first-token and direct-`LLM_DONE` paths
 - activity cards are scoped to the current session instead of falling back to a global recent run
 
+The next implementation priority is **OpenClaw-first seamless automation**:
+- keep Aura focused on approvals, visibility, run/status UX, and diagnostics
+- keep browser/desktop execution behavior in vendored OpenClaw
+- avoid adding Aura-side automation heuristics beyond strict browser navigation fast-paths
+
 ## Current Priorities
 
-1. Smoke test end-to-end messaging in dev
-2. Validate the packaged Aura + bundled OpenClaw runtime path
-3. Then continue with session-key caching and gateway pre-warming
-4. After that, continue with installer and ship polish
+1. Make OpenClaw-owned desktop and browser automation feel seamless in the background
+2. Keep Aura limited to shell behavior: approvals, visibility, run/status UX, and diagnostics
+3. Validate the packaged Aura + bundled OpenClaw runtime path
+4. Then continue with session-key caching, gateway pre-warming, and ship polish
 
 ## Verification Baseline
 

@@ -4,6 +4,7 @@ import { AuraLogoBlob, MessageBubble, PendingMessageBubble } from "./primitives"
 import { TaskProgressBubble } from "./TaskProgress";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 import { ChatActivityCards, ChatPromptChips, getChatPendingState } from "./ChatAssistCards";
+import { RunTimelineBubble } from "./RunTimelineBubble";
 
 export const ChatPanel = (): JSX.Element => {
   const messages = useAuraStore((s) => s.messages);
@@ -52,6 +53,7 @@ export const ChatPanel = (): JSX.Element => {
       {messages.map((message) => (
         <MessageBubble key={message.id} message={message} theme={settings.theme} />
       ))}
+      {activeRun && <RunTimelineBubble run={activeRun} />}
       <ChatActivityCards run={activeRun} currentSessionId={currentSessionId} />
       {pendingState && !hasStreamingAssistant && <PendingMessageBubble title={pendingState.title} detail={pendingState.detail} />}
       {showTaskBubble && <TaskProgressBubble run={activeRun} />}

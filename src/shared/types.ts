@@ -444,6 +444,7 @@ export interface OpenClawConfig {
   agents?: {
     main?: { model?: string; provider?: string };
     defaults?: {
+      workspace?: string;
       model?: { primary?: string; fallbacks?: string[] };
       models?: Record<string, unknown>;
     };

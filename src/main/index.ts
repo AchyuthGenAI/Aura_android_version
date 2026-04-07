@@ -10,13 +10,16 @@ import type {
   AutomationJob,
   AutomationJobRun,
   ExtensionMessage,
+  OpenClawRun,
   OpenClawCronJob,
   OpenClawCronRun,
   OpenClawSessionCreateParams,
   OpenClawSkillEntry,
   OpenClawToolEntry,
+  RunStatusPayload,
   SkillSummary,
   SupportBundleExport,
+  ToolUsePayload,
   WidgetBounds,
 } from "@shared/types";
 
@@ -46,6 +49,8 @@ let activeGatewayManager: GatewayManager | null = null;
 let activeDesktopController: DesktopController | null = null;
 let isQuitting = false;
 let isCreatingWindows = false;
+let widgetAutoHiddenForDesktopRun = false;
+let auraWindowsFocusSuppressedForDesktopRun = false;
 
 if (!hasSingleInstanceLock) {
   app.quit();
@@ -255,6 +260,91 @@ const ensureWidgetWindowVisible = (): void => {
   widgetWindow.showInactive();
 };
 
+const hideWidgetWindowTemporarily = (): void => {
+  if (!widgetWindow || widgetWindow.isDestroyed()) {
+    return;
+  }
+  if (!widgetWindow.isVisible()) {
+    return;
+  }
+  widgetWindow.hide();
+};
+
+const suppressAuraWindowFocusForDesktopRun = (): void => {
+  if (auraWindowsFocusSuppressedForDesktopRun) {
+    return;
+  }
+  auraWindowsFocusSuppressedForDesktopRun = true;
+
+  if (widgetWindow && !widgetWindow.isDestroyed()) {
+    try {
+      widgetWindow.blur();
+      widgetWindow.setFocusable(false);
+    } catch {
+      // ignore focus suppression failures
+    }
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.blur();
+      mainWindow.setFocusable(false);
+    } catch {
+      // ignore focus suppression failures
+    }
+  }
+};
+
+const restoreAuraWindowFocusAfterDesktopRun = (): void => {
+  if (!auraWindowsFocusSuppressedForDesktopRun) {
+    return;
+  }
+  auraWindowsFocusSuppressedForDesktopRun = false;
+
+  if (widgetWindow && !widgetWindow.isDestroyed()) {
+    try {
+      widgetWindow.setFocusable(true);
+    } catch {
+      // ignore focus restore failures
+    }
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.setFocusable(true);
+    } catch {
+      // ignore focus restore failures
+    }
+  }
+};
+
+const restoreWidgetWindowIfNeeded = (): void => {
+  restoreAuraWindowFocusAfterDesktopRun();
+  if (!widgetAutoHiddenForDesktopRun) {
+    return;
+  }
+  widgetAutoHiddenForDesktopRun = false;
+  ensureWidgetWindowVisible();
+};
+
+const isTerminalRunStatus = (status: OpenClawRun["status"]): boolean =>
+  status === "done" || status === "error" || status === "cancelled";
+
+const looksLikeDesktopAutomationRequest = (message: string): boolean => {
+  const normalized = message.toLowerCase();
+  if (/https?:\/\/|\.com\b|\.org\b|\.net\b/.test(normalized)) {
+    return false;
+  }
+  if (/(youtube|google|gmail|github|reddit|twitter|x\.com|linkedin|amazon|flipkart|wikipedia)\b/.test(normalized)) {
+    return false;
+  }
+  return (
+    /\b(desktop|window|app|notepad|calculator|paint|vscode|visual studio code|excel|word|powerpoint|cmd|command prompt|terminal|powershell|file explorer|explorer|settings)\b/.test(normalized)
+    || (/\b(open|launch|start|focus|switch to|write|type|click|paste|save)\b/.test(normalized)
+      && /\b(file|program|document|desktop|window|app)\b/.test(normalized))
+  );
+};
+
 const showWidgetWindow = (store: AuraStore, expand = true, forceCenter = false): void => {
   if (!widgetWindow || widgetWindow.isDestroyed()) {
     return;
@@ -359,6 +449,30 @@ const createAppWindows = async (): Promise<void> => {
     });
 
     const emit = (message: ExtensionMessage<unknown>): void => {
+      if (message.type === "TOOL_USE") {
+        const payload = message.payload as ToolUsePayload;
+        if (payload.surface === "desktop" && payload.status === "running") {
+          widgetAutoHiddenForDesktopRun = true;
+          suppressAuraWindowFocusForDesktopRun();
+          hideWidgetWindowTemporarily();
+        }
+      }
+
+      if (message.type === "CONFIRM_ACTION") {
+        restoreWidgetWindowIfNeeded();
+      }
+
+      if (message.type === "RUN_STATUS") {
+        const payload = message.payload as RunStatusPayload;
+        if (isTerminalRunStatus(payload.run.status)) {
+          restoreWidgetWindowIfNeeded();
+        }
+      }
+
+      if (message.type === "TASK_ERROR" || message.type === "LLM_DONE") {
+        restoreWidgetWindowIfNeeded();
+      }
+
       for (const window of [mainWindow, widgetWindow]) {
         if (window && !window.isDestroyed()) {
           window.webContents.send(IPC_CHANNELS.appEvent, message);
@@ -581,7 +695,20 @@ const createAppWindows = async (): Promise<void> => {
       widgetWindow.setBounds(payload, true);
       return true;
     });
-    ipcMain.handle(IPC_CHANNELS.chatSend, async (_event, payload) => activeGatewayManager!.sendChat(payload));
+    ipcMain.handle(IPC_CHANNELS.chatSend, async (_event, payload) => {
+      if (widgetWindow && !widgetWindow.isDestroyed() && widgetWindow.isFocused() && looksLikeDesktopAutomationRequest(payload.message)) {
+        widgetAutoHiddenForDesktopRun = true;
+        suppressAuraWindowFocusForDesktopRun();
+        hideWidgetWindowTemporarily();
+      }
+
+      try {
+        return await activeGatewayManager!.sendChat(payload);
+      } catch (error) {
+        restoreWidgetWindowIfNeeded();
+        throw error;
+      }
+    });
     ipcMain.handle(IPC_CHANNELS.chatStop, async () => activeGatewayManager!.stopResponse());
     ipcMain.handle(IPC_CHANNELS.chatConfirmAction, async (_event, payload: {
       requestId: string;

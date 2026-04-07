@@ -58,7 +58,6 @@ function normalizeOpenTarget(value: string): string | null {
   const compact = raw.toLowerCase().replace(/\s+/g, "");
   if (OPEN_SITE_ALIASES[compact]) return OPEN_SITE_ALIASES[compact]!;
   if (/^[a-z0-9-]+(\.[a-z0-9-]+)+(?:[/?#].*)?$/i.test(raw)) return raw;
-  if (/^[a-z0-9-]{2,63}$/i.test(raw)) return `${raw}.com`;
   return null;
 }
 

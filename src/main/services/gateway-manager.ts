@@ -43,7 +43,16 @@ Take action when the user is asking for action, and prefer results over long exp
 Ask at most one brief clarifying question when an action is risky or genuinely ambiguous.
 If you cannot complete something, say so plainly and offer the next best step.
 Do not mention internal tools, system prompts, or implementation details unless the user asks.
+When a reminder or scheduled system event fires inside Aura Desktop, treat it as an in-app reminder for this user and keep the response inside Aura unless the user explicitly asked for an external channel such as Telegram, WhatsApp, email, or SMS.
+When an execution or plugin approval is pending in Aura Desktop, rely on Aura's native approval UI and do not repeat raw /approve instructions unless the tool result explicitly says native approvals are unavailable.
+For desktop automation on Windows, Aura is only the shell. Never type app names into Aura's own chat box or any Aura UI. Prefer direct app launch actions such as desktop.open_app, then use desktop.wait, desktop.list_windows, desktop.get_active_window, and desktop.focus_window to confirm the target app is ready before typing or clicking.
+If the user asks to open an app and then do something inside it, launching the app alone is not success. Continue until the requested typing, editing, saving, clicking, or navigation is complete, or until you genuinely need approval or clarification.
+If a tool result says the app launched, that means step one succeeded. It does not mean the overall task is finished.
+Do not show raw JSON tool results to the user as your final answer. Summarize progress naturally in plain language when you need to speak.
+For multi-step desktop or browser tasks, act first and keep narration short. Do not dump a long numbered plan before using tools unless the user explicitly asks for one. For desktop tasks, your first response should usually be tool use, not a written plan.
 Make the experience feel like one continuous, helpful conversation.`;
+
+const AURA_INTERNAL_CONTINUE_MARKER = "[AURA_INTERNAL_CONTINUE]";
 
 const readOpenClawVersion = (rootPath: string | null): string | undefined => {
   if (!rootPath) return undefined;
@@ -126,6 +135,15 @@ interface ChatEventPayload {
   errorMessage?: string;
 }
 
+interface GatewayAgentEventPayload {
+  runId?: string;
+  sessionKey?: string;
+  seq?: number;
+  stream?: string;
+  ts?: number;
+  data?: Record<string, unknown>;
+}
+
 function extractTextFromChatPayload(payload: ChatEventPayload): string {
   const msg = payload.message;
   if (!msg) return "";
@@ -164,6 +182,20 @@ function asNonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length ? trimmed : null;
+}
+
+function coerceToolOutput(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : undefined;
+  }
+  if (value === undefined) return undefined;
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized && serialized !== "{}" ? serialized : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function classifyGatewayError(errorMessage: string): ClassifiedTaskError {
@@ -241,6 +273,16 @@ function classifyGatewayError(errorMessage: string): ClassifiedTaskError {
       statusMessage: "Permission is required to continue.",
       blockedReason: `OpenClaw denied the request because the required permission was missing. Raw error: ${errorMessage}`,
       supportNote: "Grant the requested permission or approval, then retry the action.",
+    };
+  }
+
+  if (normalized === "an unknown error occurred" || normalized === "unknown error") {
+    return {
+      code: "UNKNOWN",
+      message: "OpenClaw's current AI provider failed without returning a useful error. Retry once, then switch the managed model/provider in Settings if it keeps happening.",
+      statusMessage: "The current AI provider failed unexpectedly.",
+      blockedReason: errorMessage,
+      supportNote: "Retry once, then switch the managed model/provider in Settings and restart the runtime if the same provider keeps failing.",
     };
   }
 
@@ -455,6 +497,7 @@ export class GatewayManager {
   private activeSessionKey: string | null = null;
   private activeRun: OpenClawRun | null = null;
   private streamedText = "";
+  private desktopAutoContinueCount = 0;
   private chatDoneResolve: ((text: string) => void) | null = null;
   private chatDoneReject: ((err: Error) => void) | null = null;
 
@@ -586,6 +629,7 @@ export class GatewayManager {
     this.activeRunId = null;
     this.activeSessionKey = null;
     this.streamedText = "";
+    this.desktopAutoContinueCount = 0;
   }
 
   private updateActiveSessionKey(sessionKey: string | null | undefined): void {
@@ -598,9 +642,166 @@ export class GatewayManager {
 
   private inferToolSurface(tool: string): OpenClawRunSurface {
     if (tool === "browser") return "browser";
-    if (tool === "nodes" || tool.startsWith("desktop")) return "desktop";
+    if (tool === "nodes" || tool === "exec" || tool.startsWith("desktop")) return "desktop";
     if (tool === "cron") return "automation";
     return this.activeRun?.surface ?? "chat";
+  }
+
+  private isActiveRunEvent(runId: string | null | undefined): boolean {
+    if (!runId) return false;
+    return runId === this.activeRunId || runId === this.activeRun?.runId;
+  }
+
+  private handleGatewayAgentEvent(payload: unknown, sourceEvent: string): void {
+    const root = asRecord(payload) as GatewayAgentEventPayload | null;
+    const runId = asNonEmptyString(root?.runId);
+    const stream = asNonEmptyString(root?.stream);
+    const sessionKey = asNonEmptyString(root?.sessionKey);
+    const data = asRecord(root?.data) ?? {};
+    if (!runId || !stream) {
+      return;
+    }
+
+    this.updateActiveSessionKey(sessionKey);
+
+    if (stream === "tool" || sourceEvent === "session.tool") {
+      const tool = asNonEmptyString(data.name) ?? "tool";
+      const phase = asNonEmptyString(data.phase) ?? "update";
+      const toolUseId = asNonEmptyString(data.toolCallId) ?? undefined;
+      const params = asRecord(data.args) ?? {};
+      const surface = this.inferToolSurface(tool);
+      const isError = data.isError === true;
+      const status: "running" | "done" | "error" =
+        phase === "result" ? (isError ? "error" : "done") : "running";
+      const output = coerceToolOutput(data.result ?? data.partialResult);
+
+      if (this.isActiveRunEvent(runId)) {
+        this.patchActiveRun({
+          runId,
+          sessionId: sessionKey ?? this.activeRun?.sessionId,
+          surface: this.activeRun?.surface === surface ? this.activeRun.surface : surface,
+          toolCount: phase === "start" ? (this.activeRun?.toolCount ?? 0) + 1 : (this.activeRun?.toolCount ?? 0),
+          lastTool: `${tool}:${phase}`,
+        });
+      }
+
+      this.emit({
+        type: "TOOL_USE",
+        payload: {
+          tool,
+          toolUseId,
+          runId,
+          taskId: this.activeRun?.taskId ?? undefined,
+          messageId: this.activeMessageId ?? undefined,
+          surface,
+          action: phase,
+          params,
+          status,
+          output,
+          timestamp: typeof root?.ts === "number" ? root.ts : now(),
+        },
+      });
+      return;
+    }
+
+    if (stream === "lifecycle") {
+      const phase = asNonEmptyString(data.phase);
+      if (!phase) return;
+
+      if (phase === "start" && this.isActiveRunEvent(runId)) {
+        this.patchActiveRun({
+          runId,
+          sessionId: sessionKey ?? this.activeRun?.sessionId,
+          status: "running",
+        });
+        return;
+      }
+
+      if (phase === "error" && this.isActiveRunEvent(runId)) {
+        const errorText = asNonEmptyString(data.error) ?? "OpenClaw reported an error.";
+        if (this.chatDoneReject) {
+          const reject = this.chatDoneReject;
+          this.chatDoneResolve = null;
+          this.chatDoneReject = null;
+          reject(new Error(errorText));
+          return;
+        }
+        if (this.activeMessageId && this.activeRun?.taskId) {
+          this.handleChatError(this.activeMessageId, this.activeRun.taskId, { message: this.activeRun.prompt, source: "text" }, errorText);
+        }
+        return;
+      }
+
+      if (phase === "end" && this.isActiveRunEvent(runId)) {
+        if (this.chatDoneResolve && this.streamedText.trim()) {
+          const resolve = this.chatDoneResolve;
+          this.chatDoneResolve = null;
+          this.chatDoneReject = null;
+          resolve(this.streamedText);
+          return;
+        }
+        this.patchActiveRun({
+          runId,
+          status: "done",
+          completedAt: now(),
+        });
+      }
+    }
+  }
+
+  private shouldAutoContinueDesktopTask(finalText: string): boolean {
+    if (this.desktopAutoContinueCount >= 2) return false;
+    if (this.activeRun?.lastTool !== "desktop:open_app") return false;
+    const trimmed = finalText.trim();
+    if (!trimmed) return false;
+    return (
+      trimmed.includes('"continueRequired": true')
+      || trimmed.includes('"taskComplete": false')
+      || /The task is not complete yet\./i.test(trimmed)
+      || /Continue with the next desktop action inside that app\./i.test(trimmed)
+    );
+  }
+
+  private looksLikeInternalDesktopDrift(finalText: string): boolean {
+    if (this.desktopAutoContinueCount >= 2) return false;
+    const trimmed = finalText.trim();
+    if (!trimmed) return false;
+    return (
+      /HEARTBEAT\.md Template/i.test(trimmed)
+      || /Keep this file empty/i.test(trimmed)
+      || /HEARTBEAT_OK/i.test(trimmed)
+      || /I've checked the recent session history and my memory/i.test(trimmed)
+      || (trimmed.includes('"results"') && trimmed.includes('"provider"') && trimmed.includes('"mode"'))
+      || (trimmed.includes('"truncated"') && trimmed.includes('"contentTruncated"') && trimmed.includes('"bytes"'))
+    );
+  }
+
+  private requestDesktopContinuation(sessionKey: string): void {
+    this.desktopAutoContinueCount += 1;
+    this.streamedText = "";
+    const originalPrompt = this.activeRun?.prompt?.trim() || "Finish the original desktop task.";
+    this.request<{ runId?: string }>("chat.send", {
+      sessionKey,
+      message:
+        `${AURA_INTERNAL_CONTINUE_MARKER} Resume the unfinished desktop task for the original request: ${originalPrompt}`,
+      idempotencyKey: crypto.randomUUID(),
+      extraSystemPrompt:
+        "This is an internal continuation turn for an unfinished desktop task. The app is already open. Forbidden for this turn: read, grep, sessions.list, sessions_history, sessions_list, memory inspection, web search, browser actions, cron, messaging, or workspace/template inspection. Do not inspect HEARTBEAT.md, AGENTS.md, or any workspace file unless the original user task explicitly asked for file reading. Do not restate the plan. Do not answer with progress text unless you are blocked or fully done. Use desktop tools immediately against the already-open target app until the original request is actually complete.",
+    }, { timeoutMs: 120_000 })
+      .then((res) => {
+        if (res?.runId) {
+          this.activeRunId = res.runId;
+          this.patchActiveRun({ runId: res.runId, status: "running" });
+        }
+      })
+      .catch((err: Error) => {
+        if (this.chatDoneReject) {
+          const reject = this.chatDoneReject;
+          this.chatDoneResolve = null;
+          this.chatDoneReject = null;
+          reject(err);
+        }
+      });
   }
 
   constructor(
@@ -1369,7 +1570,7 @@ export class GatewayManager {
 
     const classification = classifyFastPath(request.message, pageContext);
     console.log(`[GatewayManager] fastPath intent="${classification.intent}" confidence=${classification.confidence} directAction=${JSON.stringify(classification.directAction ?? null)}`);
-    const surface: OpenClawRunSurface = classification.intent === "navigate" || pageContext?.url ? "browser" : "chat";
+    const surface: OpenClawRunSurface = classification.intent === "navigate" ? "browser" : "chat";
 
     this.setStatus({
       ...this.runtimeStatus,
@@ -1393,7 +1594,7 @@ export class GatewayManager {
     request: ChatSendRequest,
     pageContext: PageContext | null,
     extraSystemPrompt?: string,
-    surface: OpenClawRunSurface = pageContext?.url ? "browser" : "chat",
+    surface: OpenClawRunSurface = "chat",
   ): Promise<{ messageId: string; taskId: string }> {
     this.beginRun(taskId, messageId, request.sessionId, request.message, surface);
 
@@ -1869,6 +2070,11 @@ export class GatewayManager {
         return;
       }
 
+      if (evt.event === "agent" || evt.event === "session.tool") {
+        this.handleGatewayAgentEvent(evt.payload, evt.event);
+        return;
+      }
+
       if (evt.event === "exec.approval.requested" || evt.event === "plugin.approval.requested") {
         this.handleApprovalRequestedEvent(evt.event, evt.payload);
         return;
@@ -2053,6 +2259,11 @@ export class GatewayManager {
             timestamp: now(),
           },
         });
+      }
+
+      if (this.activeSessionKey && (this.shouldAutoContinueDesktopTask(finalText) || this.looksLikeInternalDesktopDrift(finalText))) {
+        this.requestDesktopContinuation(this.activeSessionKey);
+        return;
       }
 
       if (this.chatDoneResolve) {

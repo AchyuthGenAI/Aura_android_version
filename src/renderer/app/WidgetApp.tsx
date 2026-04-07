@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { AuraLogoBlob, MessageBubble, PendingMessageBubble, ToastViewport } from "@renderer/components/primitives";
+import { ConfirmModal } from "@renderer/components/ConfirmModal";
 import { useAuraStore } from "@renderer/store/useAuraStore";
 import type { AuraStorageShape, WidgetBounds, WidgetVisibilityPayload, OverlayTab } from "@shared/types";
 import { VoicePanel } from "@renderer/components/VoicePanel";
@@ -8,6 +9,7 @@ import { HistoryPanel } from "@renderer/components/HistoryPanel";
 import { ToolsPanel } from "@renderer/components/ToolsPanel";
 import { ChatActivityCards, ChatPromptChips, getChatComposerPlaceholder, getChatPendingState } from "@renderer/components/ChatAssistCards";
 import { RuntimeRecoveryBanner } from "@renderer/components/RuntimeRecoveryBanner";
+import { RunTimelineBubble } from "@renderer/components/RunTimelineBubble";
 import { useWindowInteraction } from "@renderer/hooks/useWindowInteraction";
 
 const COLLAPSED_SIZE = 84;
@@ -271,6 +273,7 @@ const WidgetApp = (): JSX.Element => {
   return (
     <div className="h-full w-full bg-transparent p-2">
       <ToastViewport toasts={toasts} onDismiss={dismissToast} />
+      <ConfirmModal />
       <div className="relative flex h-full w-full flex-col overflow-hidden rounded-[32px] glass-panel">
         {/* Soft radial background glow inside the container */}
         <div className="absolute inset-x-0 -top-[10%] h-[60%] bg-[#7c3aed]/15 blur-[100px] pointer-events-none" />
@@ -391,6 +394,7 @@ const WidgetApp = (): JSX.Element => {
                       <MessageBubble key={message.id} message={message} theme={settings.theme} />
                     ))
                   )}
+                  {activeRun && <RunTimelineBubble run={activeRun} showAvatar={false} />}
                   <ChatActivityCards run={activeRun} currentSessionId={currentSessionId} />
                   {pendingState && !hasStreamingAssistant && (
                     <PendingMessageBubble title={pendingState.title} detail={pendingState.detail} />

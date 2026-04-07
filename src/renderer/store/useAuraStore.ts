@@ -82,10 +82,73 @@ const getOpenClawMessageText = (message: OpenClawSessionMessage): string => {
   return "";
 };
 
+const unwrapCodeFence = (content: string): string => {
+  const trimmed = content.trim();
+  const match = trimmed.match(/^```(?:json|text)?\s*([\s\S]*?)\s*```$/i);
+  return match ? match[1]!.trim() : trimmed;
+};
+
+const AURA_INTERNAL_CONTINUE_MARKER = "[AURA_INTERNAL_CONTINUE]";
+
+const stripLeadingTimestamp = (content: string): string =>
+  content.replace(/^\[[^\]]+\]\s*/m, "").trim();
+
+const stripSenderMetadataPrefix = (content: string): string => {
+  let cleaned = unwrapCodeFence(content).trim();
+  const metadataPattern =
+    /^Sender \(untrusted metadata\):\s*\{[\s\S]*?\}\s*(?:\[[^\]]+\]\s*)?/i;
+
+  if (!/^Sender \(untrusted metadata\):/i.test(cleaned)) {
+    const inlineMatch = cleaned.match(/Sender \(untrusted metadata\):[\s\S]*$/i);
+    if (inlineMatch) {
+      cleaned = inlineMatch[0]!;
+    } else {
+      return stripLeadingTimestamp(cleaned);
+    }
+  }
+
+  cleaned = cleaned.replace(metadataPattern, "");
+  cleaned = cleaned.replace(/^Sender \(untrusted metadata\):\s*/i, "");
+  cleaned = cleaned.replace(/^\{[\s\S]*?\}\s*/m, "");
+  cleaned = stripLeadingTimestamp(cleaned);
+  return cleaned.trim();
+};
+
+const sanitizeTranscriptText = (content: string, role: "user" | "assistant"): string => {
+  let cleaned = stripSenderMetadataPrefix(content);
+  cleaned = unwrapCodeFence(cleaned);
+
+  if (cleaned.includes(AURA_INTERNAL_CONTINUE_MARKER)) {
+    return "";
+  }
+
+  if (
+    role === "assistant"
+    && (
+      looksLikeRawToolResultJson(cleaned)
+      || looksLikeRawToolResultFragment(cleaned)
+      || looksLikeInternalOpenClawNoise(cleaned)
+    )
+  ) {
+    return "";
+  }
+
+  if (role === "assistant") {
+    cleaned = cleaned
+      .replace(/^I (?:opened|launched) the app\.\s*$/i, "")
+      .trim();
+  }
+
+  return cleaned;
+};
+
 const normalizeOpenClawMessage = (message: OpenClawSessionMessage, index: number): AuraSessionMessage => ({
   id: typeof message.id === "string" ? message.id : `message-${index}`,
   role: message.role === "assistant" ? "assistant" : "user",
-  content: getOpenClawMessageText(message),
+  content: sanitizeTranscriptText(
+    getOpenClawMessageText(message),
+    message.role === "assistant" ? "assistant" : "user",
+  ),
   timestamp: toTimestamp(message.createdAt ?? message.timestamp, now()),
   source: message.source === "voice" ? "voice" : "text",
 });
@@ -154,6 +217,74 @@ const createToast = (tone: ToastNotice["tone"], title: string, message?: string)
   message,
   createdAt: now()
 });
+
+const looksLikeApprovalTranscript = (content: string): boolean => {
+  const normalized = content.toLowerCase();
+  return (
+    normalized.includes("approval required (id ")
+    || normalized.includes("reply with: /approve")
+    || (normalized.includes("i need your approval to") && normalized.includes("/approve"))
+  );
+};
+
+const looksLikeRawToolResultJson = (content: string): boolean => {
+  const trimmed = unwrapCodeFence(content);
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    return false;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    if (parsed.ok !== true) {
+      return false;
+    }
+    return (
+      "launched" in parsed
+      || "typed" in parsed
+      || "waitedMs" in parsed
+      || "windowReady" in parsed
+      || "windowTitle" in parsed
+      || "direction" in parsed
+      || "key" in parsed
+      || "results" in parsed
+      || "provider" in parsed
+      || "citations" in parsed
+      || "mode" in parsed
+    );
+  } catch {
+    return false;
+  }
+};
+
+const looksLikeRawToolResultFragment = (content: string): boolean => {
+  const trimmed = unwrapCodeFence(content).trim();
+  if (!trimmed) {
+    return false;
+  }
+  return (
+    (trimmed.includes('"continueRequired"') && trimmed.includes('"taskComplete"'))
+    || (trimmed.includes('"windowTitle"') && trimmed.includes('"activeWindow"'))
+    || (trimmed.includes('"launched"') && trimmed.includes('"target"'))
+    || (/^"windowTitle":/m.test(trimmed) && /"nextStepHint":/m.test(trimmed))
+    || (trimmed.includes('"provider"') && trimmed.includes('"model"') && trimmed.includes('"stopReason"'))
+    || (trimmed.includes('"truncated"') && trimmed.includes('"contentTruncated"') && trimmed.includes('"bytes"'))
+    || (trimmed.includes('"results"') && trimmed.includes('"citations"') && trimmed.includes('"mode"'))
+  );
+};
+
+const looksLikeInternalOpenClawNoise = (content: string): boolean => {
+  const trimmed = unwrapCodeFence(content).trim();
+  if (!trimmed) {
+    return false;
+  }
+  return (
+    /HEARTBEAT\.md Template/i.test(trimmed)
+    || /Keep this file empty/i.test(trimmed)
+    || /Add tasks below when you want the agent to check something periodically/i.test(trimmed)
+    || /HEARTBEAT_OK/i.test(trimmed)
+    || /I've checked the recent session history and my memory/i.test(trimmed)
+  );
+};
 
 const getTaskErrorTitle = (code: TaskErrorPayload["code"]): string => {
   switch (code) {
@@ -486,6 +617,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       const existingIndex = messages.findIndex((entry) => entry.id === payload.messageId);
 
       const ttftUpdate: Partial<AuraState> = {};
+      const nextTokenContent = sanitizeTranscriptText(payload.token, "assistant");
       if (existingIndex === -1) {
         // First token for this message — measure TTFT
         const sendTs = get().sendTimestamp;
@@ -495,19 +627,26 @@ export const useAuraStore = create<AuraState>((set, get) => ({
           ttftUpdate.sendTimestamp = null;
           console.log(`[Aura] TTFT: ${ttft}ms`);
         }
-        messages.push({
-          id: payload.messageId,
-          role: "assistant",
-          content: payload.token,
-          status: "streaming"
-        });
+        if (nextTokenContent) {
+          messages.push({
+            id: payload.messageId,
+            role: "assistant",
+            content: nextTokenContent,
+            status: "streaming"
+          });
+        }
       } else {
         const current = messages[existingIndex]!;
-        messages[existingIndex] = {
-          ...current,
-          content: `${current.content}${payload.token}`,
-          status: "streaming"
-        };
+        const nextContent = sanitizeTranscriptText(`${current.content}${payload.token}`, "assistant");
+        if (nextContent) {
+          messages[existingIndex] = {
+            ...current,
+            content: nextContent,
+            status: "streaming"
+          };
+        } else {
+          messages.splice(existingIndex, 1);
+        }
       }
 
       set({ messages, ...ttftUpdate });
@@ -517,6 +656,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
     if (message.type === "LLM_DONE") {
       const payload = message.payload as { messageId: string; cleanText?: string; fullText: string };
       const finalText = payload.cleanText || payload.fullText || "";
+      const displayText = sanitizeTranscriptText(finalText, "assistant");
       const messages = [...get().messages];
       const existingIndex = messages.findIndex((entry) => entry.id === payload.messageId);
       const sendTs = get().sendTimestamp;
@@ -530,16 +670,22 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       }
 
       if (existingIndex >= 0) {
-        messages[existingIndex] = {
-          ...messages[existingIndex]!,
-          content: finalText || messages[existingIndex]!.content,
-          status: "done"
-        };
-      } else if (finalText) {
+        const current = messages[existingIndex]!;
+        const sanitizedExisting = sanitizeTranscriptText(current.content, "assistant");
+        if (!displayText && !sanitizedExisting) {
+          messages.splice(existingIndex, 1);
+        } else {
+          messages[existingIndex] = {
+            ...current,
+            content: displayText || sanitizedExisting || current.content,
+            status: "done"
+          };
+        }
+      } else if (displayText) {
         messages.push({
           id: payload.messageId,
           role: "assistant",
-          content: finalText,
+          content: displayText,
           status: "done"
         });
       }
@@ -568,7 +714,12 @@ export const useAuraStore = create<AuraState>((set, get) => ({
 
     if (message.type === "CONFIRM_ACTION") {
       const payload = message.payload as ConfirmActionPayload;
-      set({ pendingConfirmation: payload });
+      const nextMessages = [...get().messages];
+      const lastMessage = nextMessages[nextMessages.length - 1];
+      if (lastMessage?.role === "assistant" && looksLikeApprovalTranscript(lastMessage.content)) {
+        nextMessages.pop();
+      }
+      set({ pendingConfirmation: payload, messages: nextMessages });
       return;
     }
 

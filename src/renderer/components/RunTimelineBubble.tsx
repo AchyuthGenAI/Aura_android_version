@@ -25,6 +25,126 @@ const describeTool = (value?: string): string => {
   return [tool, action].filter(Boolean).join(" ").replace(/_/g, " ");
 };
 
+const truncate = (value: string, max: number): string => {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 1)}...`;
+};
+
+const getStringParam = (params: Record<string, unknown>, key: string): string | null => {
+  const value = params[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+};
+
+const getNumberParam = (params: Record<string, unknown>, key: string): number | null => {
+  const value = params[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+};
+
+const describeEventTitle = (entry: ToolUsePayload): string => {
+  const params = entry.params ?? {};
+
+  if (entry.tool === "desktop") {
+    switch (entry.action) {
+      case "open_app": {
+        const target = getStringParam(params, "target") ?? getStringParam(params, "app");
+        return target ? `Open ${target}` : "Open desktop app";
+      }
+      case "click": {
+        const x = getNumberParam(params, "x");
+        const y = getNumberParam(params, "y");
+        return x !== null && y !== null ? `Click at ${x}, ${y}` : "Click";
+      }
+      case "double_click": {
+        const x = getNumberParam(params, "x");
+        const y = getNumberParam(params, "y");
+        return x !== null && y !== null ? `Double-click at ${x}, ${y}` : "Double-click";
+      }
+      case "right_click":
+        return "Right-click";
+      case "type": {
+        const text = getStringParam(params, "text");
+        return text ? `Type "${truncate(text, 40)}"` : "Type text";
+      }
+      case "press_key": {
+        const key = getStringParam(params, "key");
+        return key ? `Press ${key}` : "Press key";
+      }
+      case "scroll": {
+        const direction = getStringParam(params, "direction") ?? "down";
+        return `Scroll ${direction}`;
+      }
+      case "drag":
+        return "Drag";
+      case "wait": {
+        const ms = getNumberParam(params, "ms");
+        return ms !== null ? `Wait ${ms}ms` : "Wait";
+      }
+      case "get_active_window":
+        return "Inspect active window";
+      case "list_windows":
+        return "Inspect open windows";
+      case "focus_window": {
+        const target = getStringParam(params, "target");
+        return target ? `Focus ${target}` : "Focus window";
+      }
+      case "get_cursor":
+        return "Read cursor position";
+      case "screenshot":
+        return "Capture desktop screenshot";
+      default:
+        return `Desktop ${entry.action.replace(/_/g, " ")}`;
+    }
+  }
+
+  if (entry.tool === "browser") {
+    switch (entry.action) {
+      case "navigate": {
+        const url = getStringParam(params, "url");
+        return url ? `Open ${truncate(url, 48)}` : "Navigate browser";
+      }
+      case "click": {
+        const selector = getStringParam(params, "selector") ?? getStringParam(params, "text");
+        return selector ? `Click ${truncate(selector, 40)}` : "Click page element";
+      }
+      case "type": {
+        const text = getStringParam(params, "text");
+        return text ? `Type "${truncate(text, 40)}"` : "Type in browser";
+      }
+      default:
+        return `Browser ${entry.action.replace(/_/g, " ")}`;
+    }
+  }
+
+  if (entry.tool === "cron") {
+    const name = getStringParam(params, "name") ?? getStringParam(params, "title");
+    return name ? `Schedule ${name}` : "Schedule automation";
+  }
+
+  return `${entry.tool.replace(/_/g, " ")} ${entry.action.replace(/_/g, " ")}`.trim();
+};
+
+const describeEventMeta = (entry: ToolUsePayload): string => {
+  const params = entry.params ?? {};
+
+  if (entry.tool === "desktop") {
+    const target = getStringParam(params, "target");
+    if (entry.action === "open_app" && target) return target;
+    if (entry.action === "focus_window" && target) return target;
+    const text = getStringParam(params, "text");
+    if (entry.action === "type" && text) return `${text.length} chars`;
+    const key = getStringParam(params, "key");
+    if (entry.action === "press_key" && key) return key;
+    const ms = getNumberParam(params, "ms");
+    if (entry.action === "wait" && ms !== null) return `${ms}ms`;
+  }
+
+  if (entry.tool === "browser" && entry.action === "navigate") {
+    return getStringParam(params, "url") ?? "page";
+  }
+
+  return entry.surface ? `${surfaceLabel[entry.surface] ?? entry.surface} surface` : "Managed tool event";
+};
+
 const getRunEvents = (run: OpenClawRun, actionFeed: ToolUsePayload[], storedEvents?: ToolUsePayload[]): ToolUsePayload[] => {
   if (storedEvents?.length) {
     return storedEvents.slice(-4);
@@ -104,10 +224,10 @@ export const RunTimelineBubble = ({
                 >
                   <div className="min-w-0">
                     <p className="truncate text-xs font-semibold text-aura-text">
-                      {entry.tool.replace(/_/g, " ")} {entry.action.replace(/_/g, " ")}
+                      {describeEventTitle(entry)}
                     </p>
                     <p className="truncate text-[11px] text-aura-muted">
-                      {entry.surface ? `${surfaceLabel[entry.surface] ?? entry.surface} surface` : "Managed tool event"}
+                      {describeEventMeta(entry)}
                     </p>
                   </div>
                   <span className="shrink-0 text-[11px] text-aura-muted">{entry.status}</span>

@@ -99,6 +99,12 @@ export const SettingsPage = (): JSX.Element => {
   const runtimeModelLabel =
     model
     || (selectedProvider === "openclaw" ? "Aura-managed Gemini fallback" : DEFAULT_MODELS[selectedProvider] || "Provider default");
+  const managedGatewayUrl = gatewayUrl || `ws://127.0.0.1:${runtimeStatus.port || 18789}`;
+  const configuredManagedProviders = providers.filter((provider) => provider.configured);
+  const managedProviderSummary = configuredManagedProviders.length
+    ? configuredManagedProviders.map((provider) => provider.name).join(", ")
+    : "No managed provider keys configured";
+  const managedProviderKeyState = configuredManagedProviders.length ? "configured" : "missing";
 
   const saveRuntimeConfig = async (): Promise<void> => {
     setIsSavingRuntime(true);
@@ -410,12 +416,13 @@ export const SettingsPage = (): JSX.Element => {
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">
                   <div className="rounded-2xl bg-black/10 px-3 py-3">
                     <p className="text-xs uppercase tracking-[0.18em] text-aura-muted">Backend</p>
-                    <p className="mt-2 text-sm text-aura-text">{desktopEnv.openClawUrl || "Not configured"}</p>
+                    <p className="mt-2 text-sm text-aura-text">{managedGatewayUrl}</p>
+                    <p className="mt-1 text-xs text-aura-muted">Runtime phase: {runtimeStatus.phase}</p>
                   </div>
                   <div className="rounded-2xl bg-black/10 px-3 py-3">
-                    <p className="text-xs uppercase tracking-[0.18em] text-aura-muted">Renderer LLM</p>
-                    <p className="mt-2 text-sm text-aura-text">{desktopEnv.llmProvider} / {desktopEnv.llmModel}</p>
-                    <p className="mt-1 text-xs text-aura-muted">API key: {desktopEnv.hasLlmApiKey ? "configured" : "missing"}</p>
+                    <p className="text-xs uppercase tracking-[0.18em] text-aura-muted">Managed Agent</p>
+                    <p className="mt-2 text-sm text-aura-text">{selectedProviderMeta.label} / {runtimeModelLabel}</p>
+                    <p className="mt-1 text-xs text-aura-muted">Managed keys: {managedProviderKeyState} ({managedProviderSummary})</p>
                   </div>
                   <div className="rounded-2xl bg-black/10 px-3 py-3">
                     <p className="text-xs uppercase tracking-[0.18em] text-aura-muted">Firebase</p>

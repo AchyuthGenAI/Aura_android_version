@@ -31,6 +31,16 @@ Important: the chat unblock pass is now implemented. The next coding agent shoul
 
 The unblock-and-stabilize pass is now in place, and chat should be able to send messages again. The next priorities are packaged validation, session-key caching, and gateway pre-warming.
 
+### Superseding Focus
+
+The active product goal is now **OpenClaw-first seamless automation**:
+
+- Aura should stay a thin shell for approvals, window visibility, run/status UX, and diagnostics
+- OpenClaw should own browser automation, desktop automation, cron, skills, sessions, and task execution
+- If a desktop or browser task feels brittle, prefer fixing vendored OpenClaw behavior in `vendor/openclaw`
+- Avoid adding new Aura-side heuristics beyond strict browser navigation fast-paths
+- Treat the legacy chat-unblock steps below as historical context, not the current implementation priority
+
 ### What Changed
 
 The recent pass changed the live behavior in these important ways:
@@ -45,23 +55,25 @@ The recent pass changed the live behavior in these important ways:
 
 ## Current Priorities
 
-1. Validate dev chat/session behavior end to end
-2. Validate the packaged Aura + bundled OpenClaw path
-3. Implement session-key caching and gateway pre-warming
-4. Continue with installer and ship polish
+1. Make OpenClaw-owned desktop and browser automation feel seamless in the background
+2. Keep Aura limited to shell behavior: approvals, visibility, run/status UX, and diagnostics
+3. Validate the packaged Aura + bundled OpenClaw path
+4. Then continue with session-key caching, gateway pre-warming, and ship polish
 
 ### Note
 
 Historical implementation notes below are preserved for context, but the chat-unblock pass has already been applied in the current repo state.
 
+For the current repo state, prioritize background desktop/browser execution behavior over any further chat-unblock work.
+
 ---
 
 ## Implementation Order
 
-1. Fix the blocking chat bug first
-2. Smoke test basic messaging immediately
-3. Then fix the two known follow-up chat correctness issues
-4. Only after that continue with performance and packaged validation
+1. Harden vendored OpenClaw desktop/browser execution behavior first
+2. Keep Aura shell coordination minimal: visibility, approvals, status, diagnostics
+3. Smoke test background desktop/browser tasks in dev
+4. Only after that continue with packaged validation and performance polish
 
 ---
 
