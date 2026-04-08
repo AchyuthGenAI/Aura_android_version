@@ -235,10 +235,7 @@ const looksLikeRawToolResultJson = (content: string): boolean => {
 
   try {
     const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-    if (parsed.ok !== true) {
-      return false;
-    }
-    return (
+    const looksLikeStructuredToolPayload =
       "launched" in parsed
       || "typed" in parsed
       || "waitedMs" in parsed
@@ -246,11 +243,16 @@ const looksLikeRawToolResultJson = (content: string): boolean => {
       || "windowTitle" in parsed
       || "direction" in parsed
       || "key" in parsed
-      || "results" in parsed
-      || "provider" in parsed
-      || "citations" in parsed
-      || "mode" in parsed
-    );
+      || ("results" in parsed && ("provider" in parsed || "mode" in parsed))
+      || ("provider" in parsed && "mode" in parsed)
+      || ("model" in parsed && "stopReason" in parsed)
+      || ("truncated" in parsed && "contentTruncated" in parsed && "bytes" in parsed);
+
+    if (parsed.ok === true) {
+      return looksLikeStructuredToolPayload || "ok" in parsed;
+    }
+
+    return looksLikeStructuredToolPayload;
   } catch {
     return false;
   }

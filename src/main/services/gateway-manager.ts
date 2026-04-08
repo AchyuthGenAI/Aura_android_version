@@ -2161,11 +2161,18 @@ export class GatewayManager {
     // When it resolves, trigger the onConnected callback.
     const timeout = setTimeout(() => {
       this.pending.delete(connectReq.id);
-      console.warn("[GatewayManager] Connect request timed out (90s) Ã¢â‚¬â€ no response from gateway. Treating as connected.");
-      // The gateway IS listening (port opened, WS connected) but may not implement
-      // the connect handshake response in all versions. Fall through to connected.
+      const socketStillOpen = this.ws?.readyState === WebSocket.OPEN;
+      if (!socketStillOpen) {
+        this.lastConnectErrorMessage = "Gateway connect handshake timed out and the socket is no longer open.";
+        console.warn("[GatewayManager] Connect request timed out (45s) - socket closed before handshake completed.");
+        return;
+      }
+      console.warn("[GatewayManager] Connect request timed out (45s) - no response from gateway. Treating as connected.");
+      // The gateway is reachable (port opened, WS connected) but some versions may
+      // not emit the connect handshake response. Fall through to connected.
       this.onConnected?.();
-    }, 90_000);
+      return;
+    }, 45_000);
 
     this.pending.set(connectReq.id, {
       resolve: () => {
