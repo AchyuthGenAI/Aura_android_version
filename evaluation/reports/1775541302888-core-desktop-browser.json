@@ -1,0 +1,36 @@
+{
+  "pack": "core-desktop-browser",
+  "total": 3,
+  "success": 0,
+  "failed": 3,
+  "successRate": 0,
+  "latency": {
+    "p50": 2,
+    "p90": 13,
+    "p99": 13
+  },
+  "results": [
+    {
+      "id": "browser-open-example",
+      "ok": false,
+      "durationMs": 13,
+      "error": "ECONNREFUSED: Aura Desktop must be running.",
+      "payload": null
+    },
+    {
+      "id": "desktop-open-settings",
+      "ok": false,
+      "durationMs": 2,
+      "error": "ECONNREFUSED: Aura Desktop must be running.",
+      "payload": null
+    },
+    {
+      "id": "query-weather",
+      "ok": false,
+      "durationMs": 1,
+      "error": "ECONNREFUSED: Aura Desktop must be running.",
+      "payload": null
+    }
+  ],
+  "generatedAt": "2026-04-07T05:55:02.876Z"
+}

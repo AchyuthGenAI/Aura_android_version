@@ -1,7 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { AuraStorageShape, AuraMacro, AutomationJob, PageMonitor, PermissionState } from "@shared/types";
+import { normalizeTextContent } from "@shared/text-content";
+import type {
+  AuthState,
+  AuraStorageShape,
+  AuraMacro,
+  AuraSession,
+  AuraSessionMessage,
+  HistoryEntry,
+  PageMonitor,
+  PermissionState
+} from "@shared/types";
 
 const defaultPermissions = (): PermissionState[] => [
   {
@@ -55,38 +65,53 @@ const defaultMonitors = (): PageMonitor[] => [
   {
     id: "monitor-example",
     title: "Pricing Change Watch",
-    kind: "watch",
-    sourcePrompt: "Watch this page and notify me when the primary price block changes.",
     url: "https://example.com/pricing",
     condition: "Notify me when the primary price block changes.",
-    schedule: {
-      mode: "interval",
-      intervalMinutes: 30,
-    },
+    intervalMinutes: 30,
     createdAt: Date.now(),
-    updatedAt: Date.now(),
     lastCheckedAt: 0,
-    nextRunAt: Date.now() + 30 * 60 * 1000,
     status: "paused",
-    triggerCount: 0
+    triggerCount: 0,
+    autoRunEnabled: false,
+    autoRunCommand: "",
+    triggerCooldownMinutes: 60,
   }
 ];
 
+const createGuestAuthState = (): AuthState => ({
+  authenticated: false
+});
+
+const normalizeAuthState = (authState?: AuthState): AuthState => {
+  if (!authState) {
+    return createGuestAuthState();
+  }
+
+  const isLegacyGuest = authState.uid === "local-guest" && !authState.email && !authState.provider;
+  if (isLegacyGuest || !authState.authenticated) {
+    return createGuestAuthState();
+  }
+
+  return authState;
+};
+
+const createDefaultProfile = (): AuraStorageShape["profile"] => ({
+  fullName: "Aura User",
+  email: "",
+  phone: "",
+  addressLine1: "",
+  city: "",
+  state: "",
+  postalCode: "",
+  country: ""
+});
+
 export const createDefaultStorage = (): AuraStorageShape => ({
-  authState: { authenticated: false },
-  onboarded: false,
-  consentAccepted: false,
-  profileComplete: false,
-  profile: {
-    fullName: "",
-    email: "",
-    phone: "",
-    addressLine1: "",
-    city: "",
-    state: "",
-    postalCode: "",
-    country: ""
-  },
+  authState: createGuestAuthState(),
+  onboarded: true,
+  consentAccepted: true,
+  profileComplete: true,
+  profile: createDefaultProfile(),
   settings: {
     theme: "dark",
     voiceEnabled: true,
@@ -99,7 +124,8 @@ export const createDefaultStorage = (): AuraStorageShape => ({
     widgetOnlyOnStartup: true
   },
   permissions: defaultPermissions(),
-  currentSessionKey: null,
+  currentSession: null,
+  sessionHistory: [],
   history: [],
   bubblePosition: { x: 0, y: 0 },
   bubbleTooltipSeen: false,
@@ -109,11 +135,81 @@ export const createDefaultStorage = (): AuraStorageShape => ({
   widgetPosition: { x: 0, y: 0 },
   widgetExpanded: false,
   widgetSize: { w: 420, h: 580 },
-  automationJobs: defaultMonitors(),
   monitors: defaultMonitors(),
+  scheduledTasks: [],
   macros: defaultMacros(),
   activeRoute: "home"
 });
+
+const normalizeSessionMessage = (message: AuraSessionMessage): AuraSessionMessage => ({
+  ...message,
+  content: normalizeTextContent(message.content)
+});
+
+const normalizeSession = (session: AuraSession): AuraSession => ({
+  ...session,
+  messages: (session.messages ?? []).map(normalizeSessionMessage),
+  pagesVisited: Array.isArray(session.pagesVisited) ? session.pagesVisited : []
+});
+
+const normalizeHistoryEntry = (entry: HistoryEntry): HistoryEntry => ({
+  ...entry,
+  result: normalizeTextContent(entry.result)
+});
+
+const normalizeMonitor = (monitor: PageMonitor): PageMonitor => ({
+  ...monitor,
+  autoRunEnabled: Boolean(monitor.autoRunEnabled && monitor.autoRunCommand?.trim()),
+  autoRunCommand: monitor.autoRunCommand?.trim() ?? "",
+  triggerCooldownMinutes:
+    typeof monitor.triggerCooldownMinutes === "number" && Number.isFinite(monitor.triggerCooldownMinutes)
+      ? Math.max(0, monitor.triggerCooldownMinutes)
+      : 60,
+});
+
+const normalizeStorageShape = (storage: AuraStorageShape): AuraStorageShape => ({
+  ...storage,
+  authState: normalizeAuthState(storage.authState),
+  onboarded: true,
+  consentAccepted: true,
+  profileComplete: true,
+  profile: {
+    ...createDefaultProfile(),
+    ...(storage.profile ?? {}),
+    fullName: storage.profile?.fullName?.trim() || "Aura User"
+  },
+  monitors: Array.isArray(storage.monitors) ? storage.monitors.map(normalizeMonitor) : defaultMonitors(),
+  scheduledTasks: Array.isArray(storage.scheduledTasks) ? storage.scheduledTasks : [],
+  currentSession: storage.currentSession ? normalizeSession(storage.currentSession) : null,
+  sessionHistory: (storage.sessionHistory ?? []).map(normalizeSession),
+  history: (storage.history ?? []).map(normalizeHistoryEntry)
+});
+
+const normalizeStoragePatch = (
+  partial: Partial<AuraStorageShape>
+): Partial<AuraStorageShape> => {
+  const next = { ...partial };
+
+  if (partial.currentSession !== undefined) {
+    next.currentSession = partial.currentSession
+      ? normalizeSession(partial.currentSession)
+      : null;
+  }
+
+  if (partial.sessionHistory !== undefined) {
+    next.sessionHistory = partial.sessionHistory.map(normalizeSession);
+  }
+
+  if (partial.history !== undefined) {
+    next.history = partial.history.map(normalizeHistoryEntry);
+  }
+
+  if (partial.monitors !== undefined) {
+    next.monitors = partial.monitors.map(normalizeMonitor);
+  }
+
+  return next;
+};
 
 const safeReadJson = <T>(filePath: string, fallback: T): T => {
   try {
@@ -123,27 +219,18 @@ const safeReadJson = <T>(filePath: string, fallback: T): T => {
     const raw = fs.readFileSync(filePath, "utf8");
     const parsed = JSON.parse(raw) as Partial<AuraStorageShape>;
     if ("settings" in (fallback as object)) {
-      const storageFallback = fallback as AuraStorageShape;
-      const parsedStorage = parsed as Partial<AuraStorageShape>;
-      const parsedJobs = normalizeAutomationJobs(
-        parsedStorage.automationJobs,
-        parsedStorage.monitors,
-        storageFallback.automationJobs,
-      );
-      return {
-        ...storageFallback,
-        ...parsedStorage,
+      return normalizeStorageShape({
+        ...(fallback as AuraStorageShape),
+        ...parsed,
         settings: {
-          ...storageFallback.settings,
-          ...(parsedStorage.settings ?? {})
+          ...(fallback as AuraStorageShape).settings,
+          ...(parsed.settings ?? {})
         },
         profile: {
-          ...storageFallback.profile,
-          ...(parsedStorage.profile ?? {})
-        },
-        automationJobs: parsedJobs,
-        monitors: parsedJobs,
-      } as T;
+          ...(fallback as AuraStorageShape).profile,
+          ...(parsed.profile ?? {})
+        }
+      }) as T;
     }
     return { ...fallback, ...parsed } as T;
   } catch {
@@ -179,7 +266,7 @@ export class AuraStore {
   }
 
   patch(partial: Partial<AuraStorageShape>): AuraStorageShape {
-    const normalizedPartial = normalizeAutomationPatch(this.state, partial);
+    const normalizedPartial = normalizeStoragePatch(partial);
     this.state = {
       ...this.state,
       ...normalizedPartial
@@ -189,63 +276,10 @@ export class AuraStore {
   }
 
   set<K extends keyof AuraStorageShape>(key: K, value: AuraStorageShape[K]): AuraStorageShape {
-    const normalizedPartial = normalizeAutomationPatch(this.state, { [key]: value } as Partial<AuraStorageShape>);
-    this.state = {
-      ...this.state,
-      ...normalizedPartial
-    };
-    this.persist();
-    return this.getState();
+    return this.patch({ [key]: value } as Partial<AuraStorageShape>);
   }
 
   private persist(): void {
     fs.writeFileSync(this.filePath, JSON.stringify(this.state, null, 2), "utf8");
   }
-}
-
-function normalizeAutomationPatch(
-  current: AuraStorageShape,
-  partial: Partial<AuraStorageShape>,
-): Partial<AuraStorageShape> {
-  if (partial.automationJobs) {
-    return {
-      ...partial,
-      automationJobs: normalizeAutomationJobs(partial.automationJobs, undefined, current.automationJobs),
-      monitors: normalizeAutomationJobs(partial.automationJobs, undefined, current.automationJobs),
-    };
-  }
-
-  if (partial.monitors) {
-    return {
-      ...partial,
-      automationJobs: normalizeAutomationJobs(undefined, partial.monitors, current.automationJobs),
-      monitors: normalizeAutomationJobs(undefined, partial.monitors, current.automationJobs),
-    };
-  }
-
-  return partial;
-}
-
-function normalizeAutomationJobs(
-  jobs: AutomationJob[] | undefined,
-  legacyMonitors: PageMonitor[] | undefined,
-  fallback: AutomationJob[],
-): AutomationJob[] {
-  const source = jobs ?? legacyMonitors ?? fallback;
-  return source.map((job) => {
-    const intervalMinutes = "intervalMinutes" in job && typeof job.intervalMinutes === "number"
-      ? job.intervalMinutes
-      : job.schedule?.intervalMinutes;
-    return {
-      ...job,
-      kind: job.kind ?? "watch",
-      sourcePrompt: job.sourcePrompt ?? job.condition ?? job.title,
-      schedule: job.schedule ?? {
-        mode: "interval",
-        intervalMinutes: intervalMinutes ?? 30,
-      },
-      updatedAt: job.updatedAt ?? job.createdAt ?? Date.now(),
-      nextRunAt: job.nextRunAt ?? (intervalMinutes ? Date.now() + intervalMinutes * 60 * 1000 : undefined),
-    };
-  });
 }

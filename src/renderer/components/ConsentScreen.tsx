@@ -28,7 +28,7 @@ export const ConsentScreen = ({
           </p>
           <p className="mt-3">
             Permissions are requested just in time. The desktop app stores your local settings, sessions,
-            automation jobs, macros, and profile so the experience stays effortless after first launch.
+            monitors, macros, and profile so the experience stays effortless after first launch.
           </p>
         </div>
         <label className="mt-6 flex items-start gap-3 text-sm text-aura-text">

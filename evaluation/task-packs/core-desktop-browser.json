@@ -1,0 +1,27 @@
+{
+  "name": "core-desktop-browser",
+  "description": "Baseline benchmark pack for mixed OpenClaw + Aura automation.",
+  "tasks": [
+    {
+      "id": "browser-open-example",
+      "message": "open https://example.com",
+      "executionMode": "local_browser",
+      "preferredSurface": "browser",
+      "timeoutMs": 90000
+    },
+    {
+      "id": "desktop-open-settings",
+      "message": "open windows settings",
+      "executionMode": "local_desktop",
+      "preferredSurface": "desktop",
+      "timeoutMs": 90000
+    },
+    {
+      "id": "query-weather",
+      "message": "summarize weather trends for this week in one paragraph",
+      "executionMode": "gateway",
+      "preferredSurface": "browser",
+      "timeoutMs": 90000
+    }
+  ]
+}

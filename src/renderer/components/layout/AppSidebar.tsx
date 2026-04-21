@@ -1,3 +1,5 @@
+import { useEffect } from "react";
+
 import type { AppRoute } from "@shared/types";
 
 import { AuraLogoBlob, StatusPill } from "../primitives";
@@ -8,11 +10,83 @@ const ROUTES: Array<{ id: AppRoute; label: string; icon: JSX.Element }> = [
   { id: "home", label: "Home", icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg> },
   { id: "browser", label: "Browser", icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg> },
   { id: "monitors", label: "Monitors", icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> },
+  { id: "scheduler", label: "Scheduler", icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> },
   { id: "skills", label: "Skills", icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg> },
   { id: "history", label: "History", icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3h6l3 9 3-6h6"/><path d="M21 17H3"/><path d="M21 21H3"/></svg> },
   { id: "profile", label: "Profile", icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg> },
   { id: "settings", label: "Settings", icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> },
 ];
+
+const GatewayStatusBadge = (): JSX.Element => {
+  const gatewayStatus = useAuraStore((state) => state.gatewayStatus);
+  const loadGatewayStatus = useAuraStore((state) => state.loadGatewayStatus);
+
+  // Periodically refresh gateway status
+  useEffect(() => {
+    const interval = setInterval(() => {
+      void loadGatewayStatus();
+    }, 15_000);
+    return () => clearInterval(interval);
+  }, [loadGatewayStatus]);
+
+  const isConnected = gatewayStatus.connected && gatewayStatus.processRunning;
+  const hasError = Boolean(gatewayStatus.error);
+
+  const tone = isConnected ? "success" : hasError ? "error" : "warning";
+  const label = isConnected
+    ? "Gateway Connected"
+    : hasError
+      ? "Gateway Error"
+      : gatewayStatus.processRunning
+        ? "Connecting..."
+        : "Local Mode";
+
+  const dotColor = isConnected
+    ? "bg-emerald-400"
+    : hasError
+      ? "bg-red-400"
+      : "bg-amber-400";
+
+  const borderColor = isConnected
+    ? "border-emerald-400/20"
+    : hasError
+      ? "border-red-400/20"
+      : "border-amber-400/20";
+
+  const bgColor = isConnected
+    ? "bg-emerald-400/8"
+    : hasError
+      ? "bg-red-400/8"
+      : "bg-amber-400/8";
+
+  const textColor = isConnected
+    ? "text-emerald-300"
+    : hasError
+      ? "text-red-300"
+      : "text-amber-200";
+
+  return (
+    <button
+      onClick={() => void loadGatewayStatus()}
+      title={
+        isConnected
+          ? `OpenClaw gateway on port ${gatewayStatus.port}`
+          : hasError
+            ? gatewayStatus.error
+            : "OpenClaw gateway is not connected. Tasks will run locally."
+      }
+      className={`flex w-full items-center gap-2.5 rounded-2xl border ${borderColor} ${bgColor} px-3.5 py-2.5 text-left transition-all duration-300 hover:brightness-125 active:scale-[0.98]`}
+    >
+      <span className="relative flex h-2 w-2 shrink-0">
+        <span className={`absolute inline-flex h-full w-full rounded-full ${dotColor} ${isConnected ? "animate-ping opacity-60" : ""}`} />
+        <span className={`relative inline-flex h-2 w-2 rounded-full ${dotColor}`} />
+      </span>
+      <span className={`text-[11px] font-semibold tracking-wide ${textColor}`}>
+        {label}
+      </span>
+    </button>
+  );
+};
 
 export const AppSidebar = (): JSX.Element => {
   const route = useAuraStore((state) => state.route);
@@ -36,6 +110,11 @@ export const AppSidebar = (): JSX.Element => {
         <div className="min-w-0">
           <p className="text-[16px] font-bold tracking-tight text-aura-text">Aura Desktop</p>
         </div>
+      </div>
+
+      {/* Gateway status indicator */}
+      <div className="mb-4">
+        <GatewayStatusBadge />
       </div>
       
       <nav className="flex flex-1 flex-col gap-2">
@@ -90,3 +169,4 @@ export const AppSidebar = (): JSX.Element => {
     </div>
   );
 };
+

@@ -2,7 +2,6 @@ import { contextBridge, ipcRenderer } from "electron";
 
 import { IPC_CHANNELS } from "@shared/ipc";
 import type { AuraDesktopApi } from "@renderer/services/desktop-api";
-import type { OpenClawSessionCreateParams } from "@shared/types";
 
 const api: AuraDesktopApi = {
   auth: {
@@ -10,6 +9,7 @@ const api: AuraDesktopApi = {
     signIn: (payload) => ipcRenderer.invoke(IPC_CHANNELS.authSignIn, payload),
     signUp: (payload) => ipcRenderer.invoke(IPC_CHANNELS.authSignUp, payload),
     google: (payload) => ipcRenderer.invoke(IPC_CHANNELS.authGoogle, payload),
+    googleExternal: (config) => ipcRenderer.invoke(IPC_CHANNELS.authGoogleExternal, config),
     signOut: () => ipcRenderer.invoke(IPC_CHANNELS.authSignOut)
   },
   storage: {
@@ -19,12 +19,12 @@ const api: AuraDesktopApi = {
   runtime: {
     getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.runtimeGetStatus),
     bootstrap: () => ipcRenderer.invoke(IPC_CHANNELS.runtimeBootstrap),
-    restart: () => ipcRenderer.invoke(IPC_CHANNELS.runtimeRestart),
-    exportSupportBundle: () => ipcRenderer.invoke(IPC_CHANNELS.runtimeExportSupport),
+    restart: () => ipcRenderer.invoke(IPC_CHANNELS.runtimeRestart)
   },
   app: {
     showMainWindow: () => ipcRenderer.invoke(IPC_CHANNELS.appShowMainWindow),
     showWidgetWindow: () => ipcRenderer.invoke(IPC_CHANNELS.appShowWidgetWindow),
+    hideWidgetWindow: () => ipcRenderer.invoke(IPC_CHANNELS.appHideWidgetWindow),
     quit: () => ipcRenderer.invoke(IPC_CHANNELS.appQuit)
   },
   widget: {
@@ -32,25 +32,23 @@ const api: AuraDesktopApi = {
   },
   chat: {
     send: (payload) => ipcRenderer.invoke(IPC_CHANNELS.chatSend, payload),
-    stop: () => ipcRenderer.invoke(IPC_CHANNELS.chatStop),
-    confirmAction: (payload) => ipcRenderer.invoke(IPC_CHANNELS.chatConfirmAction, payload)
+    stop: () => ipcRenderer.invoke(IPC_CHANNELS.chatStop)
   },
-  automation: {
-    start: (job) => ipcRenderer.invoke(IPC_CHANNELS.automationStart, job),
-    stop: (payload) => ipcRenderer.invoke(IPC_CHANNELS.automationStop, payload),
-    delete: (payload: { id: string }) => ipcRenderer.invoke(IPC_CHANNELS.automationDelete, payload),
-    list: () => ipcRenderer.invoke(IPC_CHANNELS.automationList),
-    runNow: (payload: { id: string }) => ipcRenderer.invoke(IPC_CHANNELS.automationRunNow, payload)
-  },
-  sessions: {
-    create: (payload?: OpenClawSessionCreateParams) => ipcRenderer.invoke(IPC_CHANNELS.sessionsCreate, payload),
-    list: () => ipcRenderer.invoke(IPC_CHANNELS.sessionsList),
-    get: (sessionKey: string) => ipcRenderer.invoke(IPC_CHANNELS.sessionsGet, sessionKey)
+  task: {
+    confirmResponse: (payload) => ipcRenderer.invoke(IPC_CHANNELS.taskConfirmResponse, payload),
+    cancel: (payload) => ipcRenderer.invoke(IPC_CHANNELS.taskCancel, payload)
   },
   monitor: {
     start: (monitor) => ipcRenderer.invoke(IPC_CHANNELS.monitorStart, monitor),
     stop: (payload) => ipcRenderer.invoke(IPC_CHANNELS.monitorStop, payload),
+    runNow: (payload) => ipcRenderer.invoke(IPC_CHANNELS.monitorRunNow, payload),
     list: () => ipcRenderer.invoke(IPC_CHANNELS.monitorList)
+  },
+  scheduler: {
+    create: (task) => ipcRenderer.invoke(IPC_CHANNELS.scheduledTaskCreate, task),
+    delete: (payload) => ipcRenderer.invoke(IPC_CHANNELS.scheduledTaskDelete, payload),
+    runNow: (payload) => ipcRenderer.invoke(IPC_CHANNELS.scheduledTaskRunNow, payload),
+    list: () => ipcRenderer.invoke(IPC_CHANNELS.scheduledTaskList)
   },
   browser: {
     getTabs: () => ipcRenderer.invoke(IPC_CHANNELS.browserGetTabs),
@@ -69,37 +67,20 @@ const api: AuraDesktopApi = {
   },
   skills: {
     list: () => ipcRenderer.invoke(IPC_CHANNELS.skillsList),
-    get: (id: string) => ipcRenderer.invoke(IPC_CHANNELS.skillsGet, id)
+    run: (payload) => ipcRenderer.invoke(IPC_CHANNELS.skillRun, payload)
   },
   config: {
     get: () => ipcRenderer.invoke(IPC_CHANNELS.configGet),
     setApiKey: (payload) => ipcRenderer.invoke(IPC_CHANNELS.configSetApiKey, payload),
+    updateAgent: (payload) => ipcRenderer.invoke(IPC_CHANNELS.configUpdateAgent, payload),
+    setGateway: (payload) => ipcRenderer.invoke(IPC_CHANNELS.configSetGateway, payload),
     setModel: (payload) => ipcRenderer.invoke(IPC_CHANNELS.configSetModel, payload),
+    updateAutomation: (payload) => ipcRenderer.invoke(IPC_CHANNELS.configUpdateAutomation, payload),
     getProviders: () => ipcRenderer.invoke(IPC_CHANNELS.configGetProviders),
   },
   gateway: {
     getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.gatewayGetStatus),
     restart: () => ipcRenderer.invoke(IPC_CHANNELS.gatewayRestart),
-  },
-  desktop: {
-    screenshot: () => ipcRenderer.invoke(IPC_CHANNELS.desktopScreenshot),
-    click: (p: { x: number; y: number; button?: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopClick, p),
-    rightClick: (p: { x: number; y: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopRightClick, p),
-    doubleClick: (p: { x: number; y: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopDoubleClick, p),
-    move: (p: { x: number; y: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopMove, p),
-    type: (p: { text: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopType, p),
-    key: (p: { key: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopKey, p),
-    openApp: (p: { target: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopOpenApp, p),
-    getScreenSize: () => ipcRenderer.invoke(IPC_CHANNELS.desktopGetScreenSize),
-    scroll: (p: { direction: "up" | "down" | "left" | "right"; amount?: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopScroll, p),
-    drag: (p: { fromX: number; fromY: number; toX: number; toY: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopDrag, p),
-    clipboardRead: () => ipcRenderer.invoke(IPC_CHANNELS.desktopClipboardRead),
-    clipboardWrite: (p: { text: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopClipboardWrite, p),
-    runCommand: (p: { command: string; timeoutMs?: number }) => ipcRenderer.invoke(IPC_CHANNELS.desktopRunCommand, p),
-    getActiveWindow: () => ipcRenderer.invoke(IPC_CHANNELS.desktopGetActiveWindow),
-    listWindows: () => ipcRenderer.invoke(IPC_CHANNELS.desktopListWindows),
-    focusWindow: (p: { title: string }) => ipcRenderer.invoke(IPC_CHANNELS.desktopFocusWindow, p),
-    getCursor: () => ipcRenderer.invoke(IPC_CHANNELS.desktopGetCursor),
   },
   onAppEvent: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, message: Parameters<typeof listener>[0]) => {

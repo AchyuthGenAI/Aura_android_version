@@ -1,58 +1,110 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import * as ed from "@noble/ed25519";
 
 import type {
-  ApprovalDecision,
-  ConfirmActionPayload,
+  AuraSession,
+  AuraSessionMessage,
+  AuraTask,
+  AutomationRuntime,
   BootstrapState,
   ChatSendRequest,
+  ChatSendResult,
+  ConfirmActionPayload,
   ExtensionMessage,
   GatewayStatus,
-  OpenClawCronJob,
-  OpenClawCronRun,
-  OpenClawRun,
-  OpenClawRunSurface,
-  OpenClawSessionCreateParams,
-  OpenClawSessionDetail,
-  OpenClawSessionSummary,
-  OpenClawSkillEntry,
-  OpenClawToolEntry,
   PageContext,
-  RuntimeDiagnostics,
+  PageMonitor,
   RuntimeStatus,
-  TaskErrorCode,
+  ScheduledTask,
+  TaskExecutionMode,
+  TaskProgressPayload,
+  TaskSurface,
   TaskStep,
+  ToolName,
 } from "@shared/types";
+import { normalizeTextContent } from "@shared/text-content";
 
 import { BrowserController } from "./browser-controller";
 import { ConfigManager } from "./config-manager";
 import { AuraStore } from "./store";
-import { classifyFastPath, type DirectAction } from "./intent-classifier";
+import { DomainActionRegistry } from "./domain-action-registry";
+import {
+  DesktopAutomationService,
+  type ServiceLaunchPreference,
+  type SystemCapabilityRequest,
+  type SystemCapabilityResult,
+} from "./desktop-automation";
+import { classify, classifyHeuristic, type Classification } from "./intent-classifier";
+import { TaskExecutor } from "./task-executor";
+import { AgentRunner } from "./agent-loop";
+import { OpenClawSkillService } from "./openclaw-skill-service";
+import { formatScheduledTime, tryParseScheduledCommand } from "./schedule-parser";
+import { evaluateAutomationPolicy } from "./automation-policy";
+import { resolveAutomationExecutionPreference } from "./runtime-routing";
 
 import WebSocket from "ws";
-import { resolveGroqApiKey, resolveGeminiApiKey } from "./llm-client";
+import {
+  completeResolvedChat,
+  resolveDirectLlmConfig,
+  streamResolvedChat,
+} from "./llm-client";
 
 const now = (): number => Date.now();
+const CLIENT_ID = "openclaw-control-ui";
+const CLIENT_MODE = "webchat";
+const ROLE = "operator";
+const SCOPES = ["operator.admin", "operator.read", "operator.write", "operator.approvals", "operator.pairing"];
+const STREAM_TOKEN_FLUSH_MS = 32;
+const TASK_SUMMARY_TIMEOUT_MS = 700;
+const PAGE_CONTEXT_HINT_RE = /\b(?:this|current)\s+(?:page|site|website|tab|screen|article)\b|\b(?:summari[sz]e|summary|read|extract|selection|selected text|button|link|field|form|on this page)\b/i;
+const LOCAL_BROWSER_APP_RE = /\b(?:whatsapp|telegram|slack|discord|gmail|outlook|teams|linkedin|github|drive|calendar|meet|instagram|facebook|x|twitter|reddit)\b/i;
+const LOCAL_BROWSER_ACTION_RE = /\b(?:open|send|message|reply|draft|compose|search|find|check|read|look for|navigate|go to|visit|write|type|post)\b/i;
+const LOCAL_BROWSER_CONTEXT_HOSTS = [
+  "web.whatsapp.com",
+  "web.telegram.org",
+  "app.slack.com",
+  "discord.com",
+  "mail.google.com",
+  "outlook.live.com",
+  "outlook.office.com",
+  "outlook.office365.com",
+  "teams.microsoft.com",
+  "linkedin.com",
+  "github.com",
+  "drive.google.com",
+  "calendar.google.com",
+  "meet.google.com",
+  "instagram.com",
+  "facebook.com",
+  "x.com",
+  "twitter.com",
+  "reddit.com",
+];
+const COMPLEX_TASK_SEQUENCE_RE = /\b(?:and\s+then|then|after\s+that|next|finally|step\s+by\s+step|one\s+by\s+one|for\s+each|all\s+of\s+them|workflow|start\s+to\s+finish|end\s+to\s+end|first)\b/i;
+const COMPLEX_TASK_ACTION_RE = /\b(?:open|go\s+to|navigate|visit|search|find|check|read|summari[sz]e|draft|reply|compose|send|message|click|type|select|write)\b/gi;
+const COMPLEX_TASK_APP_RE = /\b(?:gmail|outlook|mail|email|inbox|whatsapp|telegram|slack|discord|teams|linkedin|github|drive|calendar|meet|instagram|facebook|x|twitter|reddit)\b/i;
+const FOLLOW_THROUGH_RE =
+  /^(?:ok(?:ay)?|sure|yes|yeah|yep|go ahead|do it|please do|proceed|continue|carry on|start|make it happen|do that|do this|alright|all right)(?:[.!]|$|\s)/i;
+const ASSISTANT_ACTION_COMMITMENT_RE =
+  /\b(?:i(?:'m| am)\s+on\s+it|i(?:'ll| will)\s+(?:open|go|send|reply|draft|compose|search|find|check|look|navigate|fill|complete|handle)|let me\s+(?:open|go|send|reply|draft|compose|search|find|check|look|navigate|fill|complete|handle))\b/i;
 
-const AURA_PERSONALITY_PROMPT = `You are Aura, a calm, capable desktop assistant inside the user's computer.
-Keep the tone warm, polished, and confident.
-Be concise by default, but stay genuinely useful.
-Take action when the user is asking for action, and prefer results over long explanations.
-Ask at most one brief clarifying question when an action is risky or genuinely ambiguous.
-If you cannot complete something, say so plainly and offer the next best step.
-Do not mention internal tools, system prompts, or implementation details unless the user asks.
-When a reminder or scheduled system event fires inside Aura Desktop, treat it as an in-app reminder for this user and keep the response inside Aura unless the user explicitly asked for an external channel such as Telegram, WhatsApp, email, or SMS.
-When an execution or plugin approval is pending in Aura Desktop, rely on Aura's native approval UI and do not repeat raw /approve instructions unless the tool result explicitly says native approvals are unavailable.
-For desktop automation on Windows, Aura is only the shell. Never type app names into Aura's own chat box or any Aura UI. Prefer direct app launch actions such as desktop.open_app, then use desktop.wait, desktop.list_windows, desktop.get_active_window, and desktop.focus_window to confirm the target app is ready before typing or clicking.
-If the user asks to open an app and then do something inside it, launching the app alone is not success. Continue until the requested typing, editing, saving, clicking, or navigation is complete, or until you genuinely need approval or clarification.
-If a tool result says the app launched, that means step one succeeded. It does not mean the overall task is finished.
-Do not show raw JSON tool results to the user as your final answer. Summarize progress naturally in plain language when you need to speak.
-For multi-step desktop or browser tasks, act first and keep narration short. Do not dump a long numbered plan before using tools unless the user explicitly asks for one. For desktop tasks, your first response should usually be tool use, not a written plan.
-Make the experience feel like one continuous, helpful conversation.`;
+const ed25519 = ed as typeof ed & {
+  hashes: {
+    sha512?: (...messages: Uint8Array[]) => Uint8Array;
+  };
+};
 
-const AURA_INTERNAL_CONTINUE_MARKER = "[AURA_INTERNAL_CONTINUE]";
+ed25519.hashes.sha512 = (...messages) => {
+  const hash = crypto.createHash("sha512");
+  for (const message of messages) {
+    hash.update(message);
+  }
+  return new Uint8Array(hash.digest());
+};
 
 const readOpenClawVersion = (rootPath: string | null): string | undefined => {
   if (!rootPath) return undefined;
@@ -64,745 +116,158 @@ const readOpenClawVersion = (rootPath: string | null): string | undefined => {
   }
 };
 
-const hasOpenClawBuildEntry = (rootPath: string | null): boolean => {
-  if (!rootPath) return false;
-  return fs.existsSync(path.join(rootPath, "dist", "entry.js")) || fs.existsSync(path.join(rootPath, "dist", "entry.mjs"));
-};
+const buildSignedMessage = (
+  deviceId: string,
+  clientId: string,
+  clientMode: string,
+  role: string,
+  scopes: string[],
+  signedAtMs: number,
+  token: string,
+  nonce: string,
+): string => `v2|${deviceId}|${clientId}|${clientMode}|${role}|${scopes.join(",")}|${signedAtMs}|${token}|${nonce}`;
 
 type EventFrame = { type: "event"; event: string; payload: unknown; seq?: number };
 type ResponseFrame = { type: "res"; id: string; ok: boolean; payload?: unknown; error?: { code?: string; message?: string } };
-type ApprovalKind = "exec" | "plugin";
+type AgentLaunchHints = { launchHint?: string; externalBrowserHintOverride?: string | null };
+type GatewayHealthState = "healthy" | "offline" | "rate_limited" | "degraded";
 
-interface ParsedApprovalRequest {
-  id: string;
-  kind: ApprovalKind;
-  message: string;
-  description: string;
-  params: Record<string, unknown>;
-  expiresAtMs?: number;
-}
-
-interface ParsedApprovalResolved {
-  id: string;
-  decision?: string;
-}
-
-interface OpenClawBuildAttempt {
-  command: string;
-  args: string[];
-  label: string;
-}
-
-interface GatewayDeviceIdentity {
-  deviceId: string;
-  publicKeyPem: string;
-  privateKeyPem: string;
-}
-
-interface ChatPreflightBlocker {
-  statusMessage: string;
-  errorMessage: string;
-  blockedReason: string;
-  supportNote: string;
-}
-
-interface ClassifiedTaskError {
-  code: TaskErrorCode;
-  message: string;
-  statusMessage: string;
-  blockedReason: string;
-  supportNote: string;
-}
-
-// chat event payload shape from the gateway protocol (v3)
-interface ChatContentBlock {
-  type: string;
-  text?: string;
-  name?: string;
-  id?: string;
-  input?: Record<string, unknown>;
-}
-
+// chat event payload shape from the gateway protocol
 interface ChatEventPayload {
   runId?: string;
   sessionKey?: string;
   seq?: number;
   state: "delta" | "final" | "aborted" | "error";
-  message?: {
-    text?: string;
-    content?: string | ChatContentBlock[];
-  };
+  message?: { text?: string; content?: string };
   errorMessage?: string;
 }
 
-interface GatewayAgentEventPayload {
+interface AgentEventPayload {
   runId?: string;
   sessionKey?: string;
   seq?: number;
-  stream?: string;
   ts?: number;
+  stream?: "assistant" | "tool" | "error" | "lifecycle" | string;
   data?: Record<string, unknown>;
 }
 
-function extractTextFromChatPayload(payload: ChatEventPayload): string {
-  const msg = payload.message;
-  if (!msg) return "";
-  // Plain text field (legacy/simple)
-  if (typeof msg.text === "string" && msg.text) return msg.text;
-  // Content array (v3 protocol): [{type:"text", text:"..."}]
-  if (Array.isArray(msg.content)) {
-    return msg.content
-      .filter((b) => b.type === "text" && typeof b.text === "string")
-      .map((b) => b.text ?? "")
-      .join("");
+interface GatewayAgentTaskState {
+  messageId: string;
+  sessionKey: string;
+  task: AuraTask;
+  toolStepIndexByCallId: Map<string, number>;
+  assistantText: string;
+  sawAgentEvent: boolean;
+  sawToolEvent: boolean;
+}
+
+interface DeviceIdentity {
+  version: number;
+  deviceId: string;
+  publicKey: string;
+  privateKey: string;
+  createdAtMs: number;
+}
+
+type RequestedExecutionMode = NonNullable<ChatSendRequest["executionMode"]>;
+
+const b64url = (buffer: Uint8Array): string =>
+  Buffer.from(buffer)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+const fromB64url = (value: string): Uint8Array => {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  return new Uint8Array(Buffer.from(base64 + "=".repeat((4 - (base64.length % 4)) % 4), "base64"));
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+const normalizeGatewaySessionKey = (value: string | undefined | null): string => {
+  const normalized = value?.trim().toLowerCase() ?? "";
+  if (normalized === "main") {
+    return "agent:main:main";
   }
-  // Flat string content
-  if (typeof msg.content === "string") return msg.content;
-  return "";
-}
+  return normalized;
+};
 
-/** Extract tool_use blocks from a delta/final content array. */
-function extractToolUseBlocks(payload: ChatEventPayload): Array<{ tool: string; toolUseId?: string; input: Record<string, unknown> }> {
-  const msg = payload.message;
-  if (!msg || !Array.isArray(msg.content)) return [];
-  return msg.content
-    .filter((b): b is ChatContentBlock & { name: string } => b.type === "tool_use" && typeof b.name === "string")
-    .map((b) => ({
-      tool: b.name,
-      toolUseId: b.id,
-      input: b.input ?? {},
-    }));
-}
+const matchesGatewaySessionKey = (incoming: string | undefined, current: string): boolean => {
+  if (!incoming) return true;
+  return normalizeGatewaySessionKey(incoming) === normalizeGatewaySessionKey(current);
+};
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
-}
-
-function asNonEmptyString(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  return trimmed.length ? trimmed : null;
-}
-
-function coerceToolOutput(value: unknown): string | undefined {
+const summarizeGatewayValue = (value: unknown): string => {
   if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed.length ? trimmed : undefined;
+    return value.length > 48 ? `${value.slice(0, 45)}...` : value;
   }
-  if (value === undefined) return undefined;
-  try {
-    const serialized = JSON.stringify(value);
-    return serialized && serialized !== "{}" ? serialized : undefined;
-  } catch {
-    return undefined;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
   }
-}
-
-function classifyGatewayError(errorMessage: string): ClassifiedTaskError {
-  const normalized = errorMessage.toLowerCase();
-
-  if (normalized.includes("pairing required") || normalized.includes("scope-upgrade")) {
-    return {
-      code: "PAIRING_REQUIRED",
-      message: "Aura needs OpenClaw device approval before it can complete this action. Approve the pending Aura device with `openclaw devices approve --latest`, then try again.",
-      statusMessage: "Aura is waiting for OpenClaw device approval.",
-      blockedReason: `OpenClaw rejected the request because the Aura device still needs pairing approval. Raw error: ${errorMessage}`,
-      supportNote: "Approve the pending Aura device with `openclaw devices approve --latest`, then retry the action.",
-    };
+  if (Array.isArray(value)) {
+    return value.length === 0 ? "[]" : `[${value.length} items]`;
   }
-
-  if (
-    normalized.includes("rate limit")
-    || normalized.includes("resource exhausted")
-    || normalized.includes("api rate limit reached")
-    || normalized.includes("\"code\": 429")
-    || normalized.includes(" code 429")
-  ) {
-    return {
-      code: "RATE_LIMIT",
-      message: "The current AI provider is rate-limited right now. Try again in a moment, or switch to another configured provider in Settings.",
-      statusMessage: "The AI provider hit a rate limit.",
-      blockedReason: `The configured AI provider rejected the request because of rate limiting. Raw error: ${errorMessage}`,
-      supportNote: "Wait for the provider quota window to reset, or switch models/providers in Settings.",
-    };
+  if (isRecord(value)) {
+    const label = typeof value.name === "string"
+      ? value.name
+      : typeof value.text === "string"
+        ? value.text
+        : typeof value.url === "string"
+          ? value.url
+          : null;
+    if (label) {
+      return summarizeGatewayValue(label);
+    }
+    const keys = Object.keys(value);
+    return keys.length === 0 ? "{}" : `{${keys.slice(0, 3).join(", ")}}`;
   }
+  return String(value ?? "");
+};
 
-  if (
-    normalized.includes("browser failed: timed out")
-    || normalized.includes("browser is currently unavailable")
-    || normalized.includes("do not retry the browser tool")
-  ) {
-    return {
-      code: "BROWSER_UNAVAILABLE",
-      message: "OpenClaw's browser control is still starting or temporarily unavailable. Wait a moment, restart the managed runtime if needed, then try the browser action again.",
-      statusMessage: "Browser control is still starting.",
-      blockedReason: `The browser control service did not become ready in time. Raw error: ${errorMessage}`,
-      supportNote: "Wait for the browser service to finish starting, or restart the managed runtime if browser actions keep timing out.",
-    };
-  }
-
-  if (normalized.includes("timed out") || normalized.includes("timeout")) {
-    return {
-      code: "TIMEOUT",
-      message: "Aura timed out while waiting for OpenClaw to finish the request. Try again in a moment, and restart the managed runtime if it keeps happening.",
-      statusMessage: "OpenClaw took too long to respond.",
-      blockedReason: `OpenClaw did not finish the request before the timeout. Raw error: ${errorMessage}`,
-      supportNote: "Try the request again, then restart the managed runtime if timeouts keep repeating.",
-    };
-  }
-
-  if (
-    normalized.includes("gateway disconnected")
-    || normalized.includes("gateway not connected")
-    || normalized.includes("runtime is unavailable")
-    || normalized.includes("websocket closed before connection established")
-  ) {
-    return {
-      code: "AI_UNAVAILABLE",
-      message: "Aura could not reach the managed OpenClaw runtime. Restart the managed runtime from Settings, then try again.",
-      statusMessage: "Managed OpenClaw runtime is unavailable.",
-      blockedReason: `Aura could not reach the OpenClaw gateway. Raw error: ${errorMessage}`,
-      supportNote: "Restart the managed runtime from Settings and wait for Aura to report ready state.",
-    };
-  }
-
-  if (normalized.includes("permission denied") || normalized.includes("not permitted")) {
-    return {
-      code: "PERMISSION_DENIED",
-      message: "Aura does not have permission to complete this action yet. Grant the required approval, then try again.",
-      statusMessage: "Permission is required to continue.",
-      blockedReason: `OpenClaw denied the request because the required permission was missing. Raw error: ${errorMessage}`,
-      supportNote: "Grant the requested permission or approval, then retry the action.",
-    };
-  }
-
-  if (normalized === "an unknown error occurred" || normalized === "unknown error") {
-    return {
-      code: "UNKNOWN",
-      message: "OpenClaw's current AI provider failed without returning a useful error. Retry once, then switch the managed model/provider in Settings if it keeps happening.",
-      statusMessage: "The current AI provider failed unexpectedly.",
-      blockedReason: errorMessage,
-      supportNote: "Retry once, then switch the managed model/provider in Settings and restart the runtime if the same provider keeps failing.",
-    };
-  }
-
-  return {
-    code: "UNKNOWN",
-    message: errorMessage,
-    statusMessage: "OpenClaw reported an error.",
-    blockedReason: errorMessage,
-    supportNote: "Retry the request, then restart the managed runtime if the same error keeps happening.",
-  };
-}
-
-function isBrokenPipeError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && (error as { code?: string }).code === "EPIPE";
-}
-
-const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
-
-function base64UrlEncode(value: Buffer): string {
-  return value.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/g, "");
-}
-
-function derivePublicKeyRaw(publicKeyPem: string): Buffer {
-  const key = crypto.createPublicKey(publicKeyPem);
-  const spki = key.export({ type: "spki", format: "der" }) as Buffer;
-  if (
-    spki.length === ED25519_SPKI_PREFIX.length + 32 &&
-    spki.subarray(0, ED25519_SPKI_PREFIX.length).equals(ED25519_SPKI_PREFIX)
-  ) {
-    return spki.subarray(ED25519_SPKI_PREFIX.length);
-  }
-  return spki;
-}
-
-function publicKeyRawBase64UrlFromPem(publicKeyPem: string): string {
-  return base64UrlEncode(derivePublicKeyRaw(publicKeyPem));
-}
-
-function signDevicePayload(privateKeyPem: string, payload: string): string {
-  const key = crypto.createPrivateKey(privateKeyPem);
-  const sig = crypto.sign(null, Buffer.from(payload, "utf8"), key);
-  return base64UrlEncode(sig);
-}
-
-function buildDeviceAuthPayloadV3(params: {
-  deviceId: string;
-  clientId: string;
-  clientMode: string;
-  role: string;
-  scopes: string[];
-  signedAtMs: number;
-  token?: string | null;
-  nonce: string;
-  platform?: string | null;
-  deviceFamily?: string | null;
-}): string {
-  const scopes = params.scopes.join(",");
-  const token = params.token ?? "";
-  const platform = (params.platform ?? "").trim().toLowerCase();
-  const deviceFamily = (params.deviceFamily ?? "").trim().toLowerCase();
-  return [
-    "v3",
-    params.deviceId,
-    params.clientId,
-    params.clientMode,
-    params.role,
-    scopes,
-    String(params.signedAtMs),
-    token,
-    params.nonce,
-    platform,
-    deviceFamily,
-  ].join("|");
-}
-
-function buildDeviceAuthPayload(params: {
-  deviceId: string;
-  clientId: string;
-  clientMode: string;
-  role: string;
-  scopes: string[];
-  signedAtMs: number;
-  token?: string | null;
-  nonce: string;
-}): string {
-  const scopes = params.scopes.join(",");
-  const token = params.token ?? "";
-  return [
-    "v2",
-    params.deviceId,
-    params.clientId,
-    params.clientMode,
-    params.role,
-    scopes,
-    String(params.signedAtMs),
-    token,
-    params.nonce,
-  ].join("|");
-}
-
-function parseApprovalRequested(event: string, payload: unknown): ParsedApprovalRequest | null {
-  const root = asRecord(payload);
-  if (!root) return null;
-  const id = asNonEmptyString(root.id);
-  if (!id) return null;
-  const request = asRecord(root.request) ?? {};
-  const expiresAtMs = typeof root.expiresAtMs === "number" ? root.expiresAtMs : undefined;
-
-  if (event === "exec.approval.requested") {
-    const command = asNonEmptyString(request.command);
-    if (!command) return null;
-    const host = asNonEmptyString(request.host);
-    const cwd = asNonEmptyString(request.cwd);
-    const security = asNonEmptyString(request.security);
-    const ask = asNonEmptyString(request.ask);
-
-    return {
-      id,
-      kind: "exec",
-      message: `Allow OpenClaw to run this command?\n${command}`,
-      description: command,
-      params: {
-        command,
-        host,
-        cwd,
-        security,
-        ask,
-      },
-      expiresAtMs,
-    };
-  }
-
-  if (event === "plugin.approval.requested") {
-    const title = asNonEmptyString(request.title);
-    if (!title) return null;
-    const description = asNonEmptyString(request.description);
-    const severity = asNonEmptyString(request.severity);
-    const pluginId = asNonEmptyString(request.pluginId);
-
-    return {
-      id,
-      kind: "plugin",
-      message: description
-        ? `Allow plugin action: ${title}\n${description}`
-        : `Allow plugin action: ${title}`,
-      description: title,
-      params: {
-        title,
-        description,
-        severity,
-        pluginId,
-      },
-      expiresAtMs,
-    };
-  }
-
-  return null;
-}
-
-function parseApprovalResolved(payload: unknown): ParsedApprovalResolved | null {
-  const root = asRecord(payload);
-  if (!root) return null;
-  const id = asNonEmptyString(root.id);
-  if (!id) return null;
-  const decision = asNonEmptyString(root.decision) ?? undefined;
-  return { id, decision };
-}
-
-function decodeWsRawData(data: unknown): string {
-  if (typeof data === "string") {
-    return data;
-  }
-  if (Buffer.isBuffer(data)) {
-    return data.toString("utf8");
-  }
-  if (data instanceof ArrayBuffer) {
-    return Buffer.from(data).toString("utf8");
-  }
-  if (Array.isArray(data)) {
-    const chunks = data
-      .map((entry) => {
-        if (Buffer.isBuffer(entry)) return entry;
-        if (entry instanceof ArrayBuffer) return Buffer.from(entry);
-        return Buffer.from(String(entry), "utf8");
-      });
-    return Buffer.concat(chunks).toString("utf8");
-  }
-  return String(data);
-}
+const GATEWAY_AUTOMATION_REFUSAL_RE =
+  /\b(?:text-based ai assistant|do not have the ability|cannot control your (?:web )?browser|can't control your (?:web )?browser|you(?:'ll| will) need to do that manually)\b/i;
 
 export class GatewayManager {
-  private static readonly gatewayOperatorScopes = [
-    "operator.admin",
-    "operator.read",
-    "operator.write",
-    "operator.approvals",
-    "operator.pairing",
-  ] as const;
-
   private gatewayProcess: ChildProcess | null = null;
   private ws: WebSocket | null = null;
   private connected = false;
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timeout: NodeJS.Timeout }>();
-  private pendingApprovals = new Map<string, { kind: ApprovalKind; taskId?: string; timeout: NodeJS.Timeout | null }>();
   private onConnected: (() => void) | null = null;
   private runtimeStatus: RuntimeStatus;
   private bootstrapState: BootstrapState;
   private openClawEntryPath: string | null = null;
   private openClawRootPath: string | null = null;
+  private deviceIdentity: DeviceIdentity | null = null;
+  private storedDeviceToken: string | null = null;
   private activeMessageId: string | null = null;
+  private activeTaskId: string | null = null;
   private activeRunId: string | null = null;
-  private activeSessionKey: string | null = null;
-  private activeRun: OpenClawRun | null = null;
   private streamedText = "";
-  private desktopAutoContinueCount = 0;
+  private bufferedTokenMessageId: string | null = null;
+  private bufferedTokenText = "";
+  private bufferedTokenTimer: NodeJS.Timeout | null = null;
   private chatDoneResolve: ((text: string) => void) | null = null;
   private chatDoneReject: ((err: Error) => void) | null = null;
-
-  private reconnectTimer: NodeJS.Timeout | null = null;
-  private keepAliveTimer: NodeJS.Timeout | null = null;
-  private gatewayDeviceIdentity: GatewayDeviceIdentity | null = null;
-  private readonly openClawBuildTimeoutMs = 12 * 60_000;
-  private lastBundleIntegrityMissingFiles: string[] = [];
-  private lastConnectErrorMessage: string | null = null;
-  private bootstrapDeadlineMs = 120_000;
-  private gatewayPortWaitTimeoutMs = 75_000;
-  private gatewayFreshBootGraceMs = 1_500;
-  private gatewayReadyHintTimeoutMs = 20_000;
-
-  private safeConsoleLog(line: string): void {
-    try {
-      console.log(line);
-    } catch (error) {
-      if (!isBrokenPipeError(error)) {
-        // Prevent logging failures from crashing the managed runtime process.
-      }
-    }
-  }
-
-  private safeConsoleWarn(line: string): void {
-    try {
-      console.warn(line);
-    } catch (error) {
-      if (!isBrokenPipeError(error)) {
-        // Prevent logging failures from crashing the managed runtime process.
-      }
-    }
-  }
-
-  private loadOrCreateGatewayDeviceIdentity(): GatewayDeviceIdentity | null {
-    if (this.gatewayDeviceIdentity) {
-      return this.gatewayDeviceIdentity;
-    }
-    try {
-      const filePath = path.join(this.configManager.getOpenClawHomePath(), ".openclaw", "identity", "aura-device.json");
-      const fromDisk = (): GatewayDeviceIdentity | null => {
-        if (!fs.existsSync(filePath)) {
-          return null;
-        }
-        const raw = fs.readFileSync(filePath, "utf8");
-        const parsed = JSON.parse(raw) as Partial<GatewayDeviceIdentity>;
-        if (
-          typeof parsed.deviceId === "string" &&
-          typeof parsed.publicKeyPem === "string" &&
-          typeof parsed.privateKeyPem === "string" &&
-          parsed.deviceId.trim().length > 0 &&
-          parsed.publicKeyPem.trim().length > 0 &&
-          parsed.privateKeyPem.trim().length > 0
-        ) {
-          return {
-            deviceId: parsed.deviceId,
-            publicKeyPem: parsed.publicKeyPem,
-            privateKeyPem: parsed.privateKeyPem,
-          };
-        }
-        return null;
-      };
-
-      const existing = fromDisk();
-      if (existing) {
-        this.gatewayDeviceIdentity = existing;
-        return existing;
-      }
-
-      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
-      const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
-      const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-      const deviceId = crypto.createHash("sha256").update(derivePublicKeyRaw(publicKeyPem)).digest("hex");
-      const created: GatewayDeviceIdentity = { deviceId, publicKeyPem, privateKeyPem };
-      fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      fs.writeFileSync(filePath, `${JSON.stringify(created, null, 2)}\n`, { mode: 0o600 });
-      try {
-        fs.chmodSync(filePath, 0o600);
-      } catch {
-        // best effort
-      }
-      this.gatewayDeviceIdentity = created;
-      return created;
-    } catch (error) {
-      this.safeConsoleWarn(
-        `[GatewayManager] Device identity setup failed: ${error instanceof Error ? error.message : String(error)}`
-      );
-      return null;
-    }
-  }
-
-  private beginRun(
-    taskId: string,
-    messageId: string,
-    sessionId: string | undefined,
-    prompt: string,
-    surface: OpenClawRunSurface,
-  ): OpenClawRun {
-    const run: OpenClawRun = {
-      id: taskId,
-      taskId,
-      messageId,
-      sessionId,
-      prompt,
-      status: "running",
-      surface,
-      startedAt: now(),
-      updatedAt: now(),
-      toolCount: 0,
-    };
-    this.activeSessionKey = sessionId ?? this.activeSessionKey;
-    this.activeRun = run;
-    this.emit({ type: "RUN_STATUS", payload: { run } });
-    return run;
-  }
-
-  private patchActiveRun(partial: Partial<OpenClawRun>): void {
-    if (!this.activeRun) return;
-    this.activeRun = {
-      ...this.activeRun,
-      ...partial,
-      updatedAt: partial.updatedAt ?? now(),
-    };
-    this.emit({ type: "RUN_STATUS", payload: { run: this.activeRun } });
-  }
-
-  private clearActiveChatContext(): void {
-    this.activeMessageId = null;
-    this.activeRunId = null;
-    this.activeSessionKey = null;
-    this.streamedText = "";
-    this.desktopAutoContinueCount = 0;
-  }
-
-  private updateActiveSessionKey(sessionKey: string | null | undefined): void {
-    if (!sessionKey) return;
-    this.activeSessionKey = sessionKey;
-    if (this.activeRun && this.activeRun.sessionId !== sessionKey) {
-      this.patchActiveRun({ sessionId: sessionKey });
-    }
-  }
-
-  private inferToolSurface(tool: string): OpenClawRunSurface {
-    if (tool === "browser") return "browser";
-    if (tool === "nodes" || tool === "exec" || tool.startsWith("desktop")) return "desktop";
-    if (tool === "cron") return "automation";
-    return this.activeRun?.surface ?? "chat";
-  }
-
-  private isActiveRunEvent(runId: string | null | undefined): boolean {
-    if (!runId) return false;
-    return runId === this.activeRunId || runId === this.activeRun?.runId;
-  }
-
-  private handleGatewayAgentEvent(payload: unknown, sourceEvent: string): void {
-    const root = asRecord(payload) as GatewayAgentEventPayload | null;
-    const runId = asNonEmptyString(root?.runId);
-    const stream = asNonEmptyString(root?.stream);
-    const sessionKey = asNonEmptyString(root?.sessionKey);
-    const data = asRecord(root?.data) ?? {};
-    if (!runId || !stream) {
-      return;
-    }
-
-    this.updateActiveSessionKey(sessionKey);
-
-    if (stream === "tool" || sourceEvent === "session.tool") {
-      const tool = asNonEmptyString(data.name) ?? "tool";
-      const phase = asNonEmptyString(data.phase) ?? "update";
-      const toolUseId = asNonEmptyString(data.toolCallId) ?? undefined;
-      const params = asRecord(data.args) ?? {};
-      const surface = this.inferToolSurface(tool);
-      const isError = data.isError === true;
-      const status: "running" | "done" | "error" =
-        phase === "result" ? (isError ? "error" : "done") : "running";
-      const output = coerceToolOutput(data.result ?? data.partialResult);
-
-      if (this.isActiveRunEvent(runId)) {
-        this.patchActiveRun({
-          runId,
-          sessionId: sessionKey ?? this.activeRun?.sessionId,
-          surface: this.activeRun?.surface === surface ? this.activeRun.surface : surface,
-          toolCount: phase === "start" ? (this.activeRun?.toolCount ?? 0) + 1 : (this.activeRun?.toolCount ?? 0),
-          lastTool: `${tool}:${phase}`,
-        });
-      }
-
-      this.emit({
-        type: "TOOL_USE",
-        payload: {
-          tool,
-          toolUseId,
-          runId,
-          taskId: this.activeRun?.taskId ?? undefined,
-          messageId: this.activeMessageId ?? undefined,
-          surface,
-          action: phase,
-          params,
-          status,
-          output,
-          timestamp: typeof root?.ts === "number" ? root.ts : now(),
-        },
-      });
-      return;
-    }
-
-    if (stream === "lifecycle") {
-      const phase = asNonEmptyString(data.phase);
-      if (!phase) return;
-
-      if (phase === "start" && this.isActiveRunEvent(runId)) {
-        this.patchActiveRun({
-          runId,
-          sessionId: sessionKey ?? this.activeRun?.sessionId,
-          status: "running",
-        });
-        return;
-      }
-
-      if (phase === "error" && this.isActiveRunEvent(runId)) {
-        const errorText = asNonEmptyString(data.error) ?? "OpenClaw reported an error.";
-        if (this.chatDoneReject) {
-          const reject = this.chatDoneReject;
-          this.chatDoneResolve = null;
-          this.chatDoneReject = null;
-          reject(new Error(errorText));
-          return;
-        }
-        if (this.activeMessageId && this.activeRun?.taskId) {
-          this.handleChatError(this.activeMessageId, this.activeRun.taskId, { message: this.activeRun.prompt, source: "text" }, errorText);
-        }
-        return;
-      }
-
-      if (phase === "end" && this.isActiveRunEvent(runId)) {
-        if (this.chatDoneResolve && this.streamedText.trim()) {
-          const resolve = this.chatDoneResolve;
-          this.chatDoneResolve = null;
-          this.chatDoneReject = null;
-          resolve(this.streamedText);
-          return;
-        }
-        this.patchActiveRun({
-          runId,
-          status: "done",
-          completedAt: now(),
-        });
-      }
-    }
-  }
-
-  private shouldAutoContinueDesktopTask(finalText: string): boolean {
-    if (this.desktopAutoContinueCount >= 2) return false;
-    if (this.activeRun?.lastTool !== "desktop:open_app") return false;
-    const trimmed = finalText.trim();
-    if (!trimmed) return false;
-    return (
-      trimmed.includes('"continueRequired": true')
-      || trimmed.includes('"taskComplete": false')
-      || /The task is not complete yet\./i.test(trimmed)
-      || /Continue with the next desktop action inside that app\./i.test(trimmed)
-    );
-  }
-
-  private looksLikeInternalDesktopDrift(finalText: string): boolean {
-    if (this.desktopAutoContinueCount >= 2) return false;
-    const trimmed = finalText.trim();
-    if (!trimmed) return false;
-    return (
-      /HEARTBEAT\.md Template/i.test(trimmed)
-      || /Keep this file empty/i.test(trimmed)
-      || /HEARTBEAT_OK/i.test(trimmed)
-      || /I've checked the recent session history and my memory/i.test(trimmed)
-      || (trimmed.includes('"results"') && trimmed.includes('"provider"') && trimmed.includes('"mode"'))
-      || (trimmed.includes('"truncated"') && trimmed.includes('"contentTruncated"') && trimmed.includes('"bytes"'))
-    );
-  }
-
-  private requestDesktopContinuation(sessionKey: string): void {
-    this.desktopAutoContinueCount += 1;
-    this.streamedText = "";
-    const originalPrompt = this.activeRun?.prompt?.trim() || "Finish the original desktop task.";
-    this.request<{ runId?: string }>("chat.send", {
-      sessionKey,
-      message:
-        `${AURA_INTERNAL_CONTINUE_MARKER} Resume the unfinished desktop task for the original request: ${originalPrompt}`,
-      idempotencyKey: crypto.randomUUID(),
-      extraSystemPrompt:
-        "This is an internal continuation turn for an unfinished desktop task. The app is already open. Forbidden for this turn: read, grep, sessions.list, sessions_history, sessions_list, memory inspection, web search, browser actions, cron, messaging, or workspace/template inspection. Do not inspect HEARTBEAT.md, AGENTS.md, or any workspace file unless the original user task explicitly asked for file reading. Do not restate the plan. Do not answer with progress text unless you are blocked or fully done. Use desktop tools immediately against the already-open target app until the original request is actually complete.",
-    }, { timeoutMs: 120_000 })
-      .then((res) => {
-        if (res?.runId) {
-          this.activeRunId = res.runId;
-          this.patchActiveRun({ runId: res.runId, status: "running" });
-        }
-      })
-      .catch((err: Error) => {
-        if (this.chatDoneReject) {
-          const reject = this.chatDoneReject;
-          this.chatDoneResolve = null;
-          this.chatDoneReject = null;
-          reject(err);
-        }
-      });
-  }
+  private readonly taskExecutor = new TaskExecutor();
+  private readonly desktopAutomation: DesktopAutomationService;
+  private readonly skillService: OpenClawSkillService;
+  private readonly domainActionRegistry: DomainActionRegistry;
+  private activeAgent: AgentRunner | null = null;
+  private activeGatewayAgentTask: GatewayAgentTaskState | null = null;
+  private readonly subscribedSessionKeys = new Set<string>();
+  private readonly pendingConfirmations = new Map<string, { resolve: (v: boolean) => void; timeout: NodeJS.Timeout }>();
+  private readonly backgroundMessageIds = new Set<string>();
+  private readonly backgroundTaskIds = new Set<string>();
+  private scheduledTaskHandler: ((task: ScheduledTask) => ScheduledTask[] | Promise<ScheduledTask[]>) | null = null;
+  private monitorHandler: ((monitor: PageMonitor) => PageMonitor[] | Promise<PageMonitor[]>) | null = null;
+  private gatewayCooldownUntil = 0;
+  private gatewayHealthState: GatewayHealthState = "offline";
+  private gatewayHealthReason: string | null = null;
+  private bootstrapInFlight: Promise<BootstrapState> | null = null;
+  private rotationInFlight: Promise<void> | null = null;
+  private lastRotationAt = 0;
 
   constructor(
     private readonly openClawRootCandidates: string[],
@@ -810,23 +275,19 @@ export class GatewayManager {
     private readonly store: AuraStore,
     private readonly browserController: BrowserController,
     private readonly emit: (message: ExtensionMessage<unknown>) => void,
-    private readonly isPackagedApp = false,
   ) {
-    if (!this.isPackagedApp) {
-      this.bootstrapDeadlineMs = 240_000;
-      this.gatewayPortWaitTimeoutMs = 180_000;
-      this.gatewayReadyHintTimeoutMs = 60_000;
-    }
+    this.desktopAutomation = new DesktopAutomationService(
+      configManager,
+      emit,
+      path.join(configManager.getOpenClawHomePath(), "desktop-automation"),
+    );
+    this.skillService = new OpenClawSkillService(openClawRootCandidates, () => this.configManager.readConfig());
+    this.domainActionRegistry = new DomainActionRegistry(configManager.getOpenClawHomePath());
     this.runtimeStatus = {
       phase: "idle",
       running: false,
       openClawDetected: false,
-      bundleDetected: false,
-      gatewayConnected: false,
-      degraded: false,
-      lastCheckedAt: Date.now(),
-      message: "Managed OpenClaw runtime has not been checked yet.",
-      diagnostics: this.buildDiagnostics(),
+      message: "OpenClaw has not been checked yet.",
     };
     this.bootstrapState = {
       stage: "idle",
@@ -848,548 +309,154 @@ export class GatewayManager {
       connected: this.connected,
       port: this.configManager.getGatewayPort(),
       processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
-      error: this.runtimeStatus.error,
+      error: this.runtimeStatus.phase === "error" ? this.runtimeStatus.error : undefined,
     };
   }
 
-  private evaluateBundleIntegrity(rootPath: string | null): { ok: boolean; missingFiles: string[] } {
-    const missingFiles: string[] = [];
-    if (!rootPath) {
-      return { ok: false, missingFiles: ["openclaw.mjs", "package.json", "dist/entry.(m)js"] };
-    }
-
-    if (!fs.existsSync(path.join(rootPath, "openclaw.mjs"))) {
-      missingFiles.push("openclaw.mjs");
-    }
-    if (!fs.existsSync(path.join(rootPath, "package.json"))) {
-      missingFiles.push("package.json");
-    }
-    if (!hasOpenClawBuildEntry(rootPath)) {
-      missingFiles.push("dist/entry.(m)js");
-    }
-    return { ok: missingFiles.length === 0, missingFiles };
-  }
-
-  private async getChatPreflightBlocker(): Promise<ChatPreflightBlocker | null> {
-    if (this.connected) {
-      return null;
-    }
-
-    const phase = this.runtimeStatus.phase;
-    const processRunning = this.gatewayProcess !== null && this.gatewayProcess.exitCode === null;
-    const port = this.configManager.getGatewayPort();
-    const portOpen = await this.probePort(port);
-    const missingFiles = this.runtimeStatus.diagnostics?.missingBundleFiles ?? this.lastBundleIntegrityMissingFiles;
-
-    if (phase === "install-required") {
-      const missingLabel = missingFiles.length ? `Missing bundled files: ${missingFiles.join(", ")}.` : "OpenClaw bundle is missing.";
-      return {
-        statusMessage: "Managed OpenClaw runtime is blocked: bundled files are missing.",
-        errorMessage: `OpenClaw runtime is not ready. ${missingLabel} Reinstall Aura with a complete OpenClaw bundle.`,
-        blockedReason: missingLabel,
-        supportNote: "Reinstall Aura so bundled OpenClaw runtime assets are complete.",
-      };
-    }
-
-    if (phase === "checking" || phase === "bootstrapping" || phase === "starting") {
-      const startupDetail = processRunning || portOpen
-        ? `Gateway is still starting (port ${port} not ready yet).`
-        : "Runtime bootstrap has not finished.";
-      return {
-        statusMessage: "Managed OpenClaw runtime is still starting.",
-        errorMessage: `OpenClaw runtime is still starting. ${startupDetail} Try again in a few seconds.`,
-        blockedReason: startupDetail,
-        supportNote: "Wait for runtime status to become ready, or restart managed runtime from Settings.",
-      };
-    }
-
-    if (phase === "idle") {
-      return {
-        statusMessage: "Managed OpenClaw runtime has not bootstrapped yet.",
-        errorMessage: "OpenClaw runtime has not started yet. Restart the managed runtime from Settings.",
-        blockedReason: "Runtime bootstrap did not run yet.",
-        supportNote: "Use Restart Managed Runtime in Settings and wait for ready state.",
-      };
-    }
-
-    if (phase === "error") {
-      const reason = this.runtimeStatus.error ?? "Runtime startup failed.";
-      const processDetail = processRunning || portOpen
-        ? "Gateway process is present but connection handshake is not healthy."
-        : "Gateway process is not running.";
-      return {
-        statusMessage: "Managed OpenClaw runtime is degraded.",
-        errorMessage: `OpenClaw runtime is unavailable. ${reason}`,
-        blockedReason: `${processDetail} ${reason}`,
-        supportNote: "Restart managed runtime and export support bundle if this keeps happening.",
-      };
-    }
-
+  getAutomationRuntimePolicy(): {
+    providerPrimary: string;
+    strictPrimary: boolean;
+    disableLocalFallback: boolean;
+    policyTier: "safe_auto" | "confirm" | "locked";
+  } {
     return {
-      statusMessage: "Managed OpenClaw runtime is unavailable.",
-      errorMessage: "OpenClaw runtime is not connected yet. Restart the managed runtime from Settings and try again.",
-      blockedReason: processRunning || portOpen
-        ? "Gateway process exists but Aura is not connected."
-        : "Gateway process is offline.",
-      supportNote: "Restart managed runtime and confirm the gateway reaches ready state.",
+      providerPrimary: this.configManager.readConfig().agents?.main?.provider?.trim().toLowerCase() || "unknown",
+      strictPrimary: this.configManager.isOpenClawPrimaryStrict(),
+      disableLocalFallback: this.configManager.shouldDisableLocalFallback(),
+      policyTier: this.configManager.getAutomationPolicyTier(),
     };
   }
 
-  private async runOpenClawBuildCommand(command: string, args: string[]): Promise<void> {
-    if (!this.openClawRootPath) {
-      throw new Error("OpenClaw root path is not set.");
-    }
+  async executeSystemCapability(taskId: string, request: SystemCapabilityRequest): Promise<SystemCapabilityResult> {
+    return this.desktopAutomation.executeSystemCapability(taskId, request);
+  }
 
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn(command, args, {
-        cwd: this.openClawRootPath!,
-        env: process.env,
-        stdio: ["ignore", "pipe", "pipe"],
+  getTaskExecutor(): TaskExecutor {
+    return this.taskExecutor;
+  }
+
+  setScheduledTaskHandler(handler: (task: ScheduledTask) => ScheduledTask[] | Promise<ScheduledTask[]>): void {
+    this.scheduledTaskHandler = handler;
+  }
+
+  setMonitorHandler(handler: (monitor: PageMonitor) => PageMonitor[] | Promise<PageMonitor[]>): void {
+    this.monitorHandler = handler;
+  }
+
+  resolveConfirmation(requestId: string, confirmed: boolean): void {
+    const pending = this.pendingConfirmations.get(requestId);
+    if (pending) {
+      clearTimeout(pending.timeout);
+      pending.resolve(confirmed);
+      this.pendingConfirmations.delete(requestId);
+    }
+  }
+
+  cancelTask(taskId: string): void {
+    this.taskExecutor.cancel(taskId);
+    if (this.activeAgent && this.activeTaskId === taskId) {
+      this.activeAgent.cancel();
+    }
+    if (this.activeGatewayAgentTask && this.activeTaskId === taskId && this.connected && this.activeRunId) {
+      void this.request("chat.abort", { runId: this.activeRunId }).catch(() => {
+        // best effort
       });
-
-      let output = "";
-      const appendOutput = (text: string): void => {
-        output += text;
-        if (output.length > 10_000) {
-          output = output.slice(-10_000);
-        }
-      };
-
-      child.stdout?.on("data", (chunk: Buffer) => {
-        const text = chunk.toString("utf8");
-        appendOutput(text);
-        this.safeConsoleLog(`[OpenClaw build:${command}] ${text.trimEnd()}`);
-      });
-
-      child.stderr?.on("data", (chunk: Buffer) => {
-        const text = chunk.toString("utf8");
-        appendOutput(text);
-        this.safeConsoleWarn(`[OpenClaw build:${command}] ${text.trimEnd()}`);
-      });
-
-      const timeout = setTimeout(() => {
-        if (child.exitCode === null) {
-          child.kill();
-        }
-        reject(new Error(`OpenClaw build timed out after ${Math.round(this.openClawBuildTimeoutMs / 1000)}s.`));
-      }, this.openClawBuildTimeoutMs);
-
-      child.on("error", (err) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
-
-      child.on("close", (code) => {
-        clearTimeout(timeout);
-        if (code === 0) {
-          resolve();
-          return;
-        }
-        reject(new Error(`${command} ${args.join(" ")} exited with code ${code}\n${output.slice(-2000)}`));
-      });
-    });
-  }
-
-  private getOpenClawBuildAttempts(): OpenClawBuildAttempt[] {
-    if (process.platform === "win32") {
-      return [
-        { command: "cmd.exe", args: ["/d", "/s", "/c", "pnpm build"], label: "pnpm build" },
-        { command: "cmd.exe", args: ["/d", "/s", "/c", "npm run build"], label: "npm run build" },
-        { command: "cmd.exe", args: ["/d", "/s", "/c", "corepack pnpm build"], label: "corepack pnpm build" },
-      ];
     }
-    return [
-      { command: "pnpm", args: ["build"], label: "pnpm build" },
-      { command: "npm", args: ["run", "build"], label: "npm run build" },
-      { command: "corepack", args: ["pnpm", "build"], label: "corepack pnpm build" },
-    ];
-  }
-
-  private async ensureOpenClawBuildArtifacts(): Promise<void> {
-    if (hasOpenClawBuildEntry(this.openClawRootPath)) {
-      return;
-    }
-    if (!this.openClawRootPath) {
-      throw new Error("OpenClaw root path is missing.");
-    }
-
-    if (this.isPackagedApp) {
-      throw new Error("OpenClaw bundle is missing dist/entry.(m)js build output. Reinstall Aura with a complete bundled runtime.");
-    }
-
-    const attempts = this.getOpenClawBuildAttempts();
-    const failures: string[] = [];
-
-    for (const attempt of attempts) {
-      try {
-        console.log(`[GatewayManager] OpenClaw build output missing. Running ${attempt.label}...`);
-        await this.runOpenClawBuildCommand(attempt.command, attempt.args);
-        if (hasOpenClawBuildEntry(this.openClawRootPath)) {
-          console.log("[GatewayManager] OpenClaw build artifacts restored.");
-          return;
-        }
-        const detail = `${attempt.label}: completed but dist/entry.(m)js is still missing.`;
-        failures.push(detail);
-        console.warn(`[GatewayManager] ${detail}`);
-      } catch (err) {
-        const detail = `${attempt.label}: ${err instanceof Error ? err.message : String(err)}`;
-        failures.push(detail);
-        console.warn(`[GatewayManager] ${detail}`);
-      }
-    }
-
-    throw new Error(`OpenClaw build output is missing and auto-build failed.\n${failures.join("\n")}`);
-  }
-
-  async resolveChatConfirmation(requestId: string, decision: ApprovalDecision): Promise<void> {
-    const normalizedId = requestId.trim();
-    if (!normalizedId) return;
-    const approval = this.pendingApprovals.get(normalizedId);
-
-    try {
-      if (approval?.kind === "plugin") {
-        await this.request("plugin.approval.resolve", { id: normalizedId, decision }, { timeoutMs: 20_000 });
-      } else if (approval?.kind === "exec") {
-        await this.request("exec.approval.resolve", { id: normalizedId, decision }, { timeoutMs: 20_000 });
-      } else {
-        try {
-          await this.request("exec.approval.resolve", { id: normalizedId, decision }, { timeoutMs: 20_000 });
-        } catch {
-          await this.request("plugin.approval.resolve", { id: normalizedId, decision }, { timeoutMs: 20_000 });
-        }
-      }
-      this.clearPendingApproval(normalizedId);
-      this.emit({ type: "CONFIRM_ACTION_RESOLVED", payload: { requestId: normalizedId, decision } });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      console.warn(`[GatewayManager] Failed resolving approval ${normalizedId}: ${detail}`);
-      this.clearPendingApproval(normalizedId);
-      this.emit({ type: "CONFIRM_ACTION_RESOLVED", payload: { requestId: normalizedId, decision: "error" } });
-    }
-  }
-
-  private clearPendingApproval(requestId: string): { kind: ApprovalKind; taskId?: string } | null {
-    const existing = this.pendingApprovals.get(requestId);
-    if (!existing) return null;
-    if (existing.timeout) {
-      clearTimeout(existing.timeout);
-    }
-    this.pendingApprovals.delete(requestId);
-    return { kind: existing.kind, taskId: existing.taskId };
-  }
-
-  private handleApprovalRequestedEvent(event: string, payload: unknown): void {
-    const parsed = parseApprovalRequested(event, payload);
-    if (!parsed) return;
-    this.clearPendingApproval(parsed.id);
-
-    const taskId = this.activeRun?.taskId ?? parsed.id;
-    const step: TaskStep = {
-      index: 0,
-      tool: "ask_user",
-      description: parsed.description,
-      status: "running",
-      params: parsed.params,
-      requiresConfirmation: true,
-      startedAt: now(),
-    };
-    const confirmPayload: ConfirmActionPayload = {
-      requestId: parsed.id,
-      taskId,
-      message: parsed.message,
-      step,
-    };
-    this.emit({ type: "CONFIRM_ACTION", payload: confirmPayload });
-
-    const timeoutMs = parsed.expiresAtMs ? Math.max(0, parsed.expiresAtMs - Date.now() + 500) : 0;
-    const timeout = timeoutMs
-      ? setTimeout(() => {
-          this.clearPendingApproval(parsed.id);
-          this.emit({
-            type: "CONFIRM_ACTION_RESOLVED",
-            payload: { requestId: parsed.id, decision: "timeout" },
-          });
-        }, timeoutMs)
-      : null;
-
-    this.pendingApprovals.set(parsed.id, { kind: parsed.kind, taskId, timeout });
-  }
-
-  private handleApprovalResolvedEvent(payload: unknown): void {
-    const resolved = parseApprovalResolved(payload);
-    if (!resolved) return;
-    this.clearPendingApproval(resolved.id);
-    this.emit({
-      type: "CONFIRM_ACTION_RESOLVED",
-      payload: { requestId: resolved.id, decision: resolved.decision },
-    });
+    this.desktopAutomation.cancel(taskId);
   }
 
   async bootstrap(): Promise<BootstrapState> {
-    if (
-      this.runtimeStatus.phase === "checking"
-      || this.runtimeStatus.phase === "starting"
-      || this.runtimeStatus.phase === "bootstrapping"
-      || this.bootstrapState.stage === "checking-runtime"
-      || this.bootstrapState.stage === "installing-runtime"
-      || this.bootstrapState.stage === "starting-runtime"
-    ) {
+    if (this.bootstrapInFlight) {
+      return this.bootstrapInFlight;
+    }
+    if (this.connected) {
+      // Already connected — no need to tear down and redo it
       return this.getBootstrap();
     }
-
-    this.setBootstrap({ stage: "checking-runtime", progress: 15, message: "Checking local OpenClaw runtime." });
-    this.setStatus({
-      phase: "checking",
-      running: false,
-      openClawDetected: false,
-      bundleDetected: false,
-      gatewayConnected: false,
-      degraded: false,
-      lastCheckedAt: Date.now(),
-      message: "Checking managed OpenClaw runtime.",
-      diagnostics: this.buildDiagnostics({ startupState: "checking" }),
+    this.bootstrapInFlight = this.runBootstrap().finally(() => {
+      this.bootstrapInFlight = null;
     });
+    return this.bootstrapInFlight;
+  }
 
-    const candidates = this.openClawRootCandidates.map((c) => path.join(c, "openclaw.mjs"));
-    this.openClawEntryPath = candidates.find((c) => fs.existsSync(c)) ?? null;
-    console.log(`[GatewayManager] Selected OpenClaw entry path: ${this.openClawEntryPath}`);
+  private async runBootstrap(): Promise<BootstrapState> {
+    this.setBootstrap({ stage: "checking-runtime", progress: 15, message: "Checking desktop runtime and gateway." });
+    this.setStatus({ phase: "checking", running: false, openClawDetected: false, message: "Checking desktop runtime." });
+
+    const candidates = this.openClawRootCandidates.map((candidate) => path.join(candidate, "openclaw.mjs"));
+    this.openClawEntryPath = candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
     this.openClawRootPath = this.openClawEntryPath ? path.dirname(this.openClawEntryPath) : null;
-    const bundleIntegrity = this.evaluateBundleIntegrity(this.openClawRootPath);
-    this.lastBundleIntegrityMissingFiles = bundleIntegrity.missingFiles;
-
-    if (!this.openClawEntryPath) {
-      this.setBootstrap({
-        stage: "error",
-        progress: 100,
-        message: "OpenClaw source was not found.",
-        detail: "Place the desktop app beside an OpenClaw checkout or bundle OpenClaw with the build.",
-      });
-      this.setStatus({
-        phase: "install-required",
-        running: false,
-        openClawDetected: false,
-        bundleDetected: false,
-        gatewayConnected: false,
-        degraded: true,
-        lastCheckedAt: Date.now(),
-        message: "OpenClaw bundle was not detected.",
-        error: `Local OpenClaw entrypoint not found in ${this.openClawRootCandidates.join(", ")}.`,
-        diagnostics: this.buildDiagnostics({
-          bundleRootPath: this.openClawRootCandidates.join(", "),
-          blockedReason: "OpenClaw runtime entrypoint is missing.",
-          startupState: "install-required",
-          supportNote: "Bundle OpenClaw with Aura or place the app beside a compatible checkout.",
-        }),
-      });
-      return this.getBootstrap();
-    }
-
-    if (this.isPackagedApp && !bundleIntegrity.ok) {
-      const missingFiles = bundleIntegrity.missingFiles.join(", ");
-      this.setBootstrap({
-        stage: "error",
-        progress: 100,
-        message: "Bundled OpenClaw runtime is incomplete.",
-        detail: `Missing required bundle files: ${missingFiles}`,
-      });
-      this.setStatus({
-        phase: "install-required",
-        running: false,
-        openClawDetected: true,
-        bundleDetected: false,
-        gatewayConnected: false,
-        degraded: true,
-        lastCheckedAt: Date.now(),
-        message: "Bundled OpenClaw runtime is incomplete.",
-        error: `Missing required bundle files: ${missingFiles}`,
-        diagnostics: this.buildDiagnostics({
-          bundleRootPath: this.openClawRootPath ?? undefined,
-          bundleIntegrity: "missing-files",
-          missingBundleFiles: bundleIntegrity.missingFiles,
-          blockedReason: "Required OpenClaw bundle files are missing.",
-          startupState: "install-required",
-          supportNote: "Reinstall Aura so bundled OpenClaw runtime files are present and compatible.",
-        }),
-      });
-      return this.getBootstrap();
-    }
-
-    if (!hasOpenClawBuildEntry(this.openClawRootPath)) {
-      this.setBootstrap({
-        stage: "installing-runtime",
-        progress: 35,
-        message: this.isPackagedApp
-          ? "Validating bundled OpenClaw runtime artifacts."
-          : "Preparing local OpenClaw runtime artifacts.",
-      });
-      this.setStatus({
-        phase: "bootstrapping",
-        running: false,
-        openClawDetected: true,
-        bundleDetected: true,
-        gatewayConnected: false,
-        degraded: false,
-        lastCheckedAt: Date.now(),
-        message: this.isPackagedApp
-          ? "Checking bundled OpenClaw runtime artifacts."
-          : "Building local OpenClaw runtime artifacts.",
-        diagnostics: this.buildDiagnostics({
-          bundleRootPath: this.openClawRootPath ?? undefined,
-          startupState: "bootstrapping",
-        }),
-      });
-
-      try {
-        await this.ensureOpenClawBuildArtifacts();
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        this.setBootstrap({
-          stage: "error",
-          progress: 100,
-          message: "OpenClaw runtime build output is missing.",
-          detail,
-        });
-        this.setStatus({
-          phase: "install-required",
-          running: false,
-          openClawDetected: true,
-          bundleDetected: true,
-          gatewayConnected: false,
-          degraded: true,
-          lastCheckedAt: Date.now(),
-          message: "OpenClaw runtime build output is missing.",
-          error: detail,
-          diagnostics: this.buildDiagnostics({
-            bundleRootPath: this.openClawRootPath ?? undefined,
-            blockedReason: "OpenClaw build output is missing.",
-            startupState: "install-required",
-            supportNote: this.isPackagedApp
-              ? "Reinstall Aura so the bundled OpenClaw runtime includes dist/entry artifacts."
-              : "Run `pnpm build` in the OpenClaw source tree and restart Aura.",
-          }),
-        });
-        return this.getBootstrap();
-      }
-    }
-
-    const refreshedBundleIntegrity = this.evaluateBundleIntegrity(this.openClawRootPath);
-    this.lastBundleIntegrityMissingFiles = refreshedBundleIntegrity.missingFiles;
+    console.log("[GatewayManager] OpenClaw entry:", this.openClawEntryPath ?? "NOT FOUND", "autostart:", this.configManager.shouldAutoStartGateway());
 
     this.configManager.ensureDefaults();
-    const version = readOpenClawVersion(this.openClawRootPath) ?? "local-source";
+    this.deviceIdentity = await this.getOrCreateDeviceIdentity();
+    const version = readOpenClawVersion(this.openClawRootPath) ?? "external-gateway";
     const port = this.configManager.getGatewayPort();
 
-    this.setBootstrap({ stage: "starting-runtime", progress: 50, message: "Starting OpenClaw Gateway." });
+    this.setBootstrap({ stage: "starting-runtime", progress: 50, message: "Connecting Aura to the OpenClaw gateway." });
     this.setStatus({
       phase: "starting",
       running: false,
-      openClawDetected: true,
-      bundleDetected: true,
+      openClawDetected: Boolean(this.openClawEntryPath),
       version,
       port,
-      gatewayConnected: false,
-      degraded: false,
-      lastCheckedAt: Date.now(),
-      message: "Starting managed OpenClaw gateway.",
-      diagnostics: this.buildDiagnostics({
-        bundleRootPath: this.openClawRootPath ?? undefined,
-        processRunning: false,
-        startupState: "starting",
-      }),
+      message: "Connecting to the OpenClaw gateway.",
     });
 
-    // Try starting the gateway and tolerate slow first-run startup.
-    // OpenClaw can take minutes while preparing UI assets on fresh installs.
-    const bootstrapDeadlineMs = this.bootstrapDeadlineMs;
-    const portWaitTimeoutMs = this.gatewayPortWaitTimeoutMs;
-    let bootstrapError: string | undefined;
-    try {
-      await Promise.race([
-        (async () => {
-          console.log(`[GatewayManager] Probing port ${port}...`);
-          const alreadyUp = await this.probePort(port);
-          if (alreadyUp) {
-            console.log(`[GatewayManager] Port ${port} already in use Ã¢â‚¬â€ connecting to existing gateway.`);
-            await this.connectWebSocketWithRetry(3);
-          } else {
-            console.log(`[GatewayManager] Port ${port} is not open yet; checking gateway process state...`);
-            const hasLiveGatewayProcess = this.gatewayProcess !== null && this.gatewayProcess.exitCode === null;
-            const startedFreshGateway = !hasLiveGatewayProcess;
-            if (hasLiveGatewayProcess) {
-              console.log(`[GatewayManager] Gateway process is already running; waiting for port ${port} to open...`);
-            } else {
-              // Ensure Groq auth profile is written before starting so the agent has API access.
-              this.configManager.ensureGroqAuthProfile();
-              await this.startGatewayProcess();
-            }
-            // startGatewayProcess resolves when the process prints a ready signal or times out,
-            // but the TCP port may still not be open. Poll until it accepts connections.
-            console.log("[GatewayManager] Waiting for gateway port to become available...");
-            const portOpen = await this.waitForPort(port, portWaitTimeoutMs);
-            if (!portOpen) {
-              throw new Error(`Gateway process started but port ${port} never opened within ${Math.round(portWaitTimeoutMs / 1000)}s`);
-            }
-            if (startedFreshGateway) {
-              console.log(`[GatewayManager] Port ${port} is open; waiting ${this.gatewayFreshBootGraceMs}ms for gateway readiness...`);
-              await new Promise<void>((resolve) => setTimeout(resolve, this.gatewayFreshBootGraceMs));
-            }
-            console.log(`[GatewayManager] Port ${port} is open Ã¢â‚¬â€ connecting WebSocket...`);
-            await this.connectWebSocketWithRetry(3);
-          }
-          console.log(`[GatewayManager] WebSocket connected! connected=${this.connected}`);
-        })(),
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new Error(`Gateway bootstrap deadline exceeded (${Math.round(bootstrapDeadlineMs / 1000)}s)`)),
-            bootstrapDeadlineMs
-          )
-        ),
-      ]);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      bootstrapError = detail;
-      console.warn("[GatewayManager] Managed gateway bootstrap failed:", detail);
+    let gatewayError: string | undefined;
+    // Skip spawning if we've already got a live child from a previous bootstrap
+    const haveLiveChild = this.gatewayProcess && !this.gatewayProcess.killed && this.gatewayProcess.exitCode === null;
+    if (haveLiveChild) {
+      console.log("[GatewayManager] Reusing existing gateway process PID:", this.gatewayProcess?.pid);
+    } else if (this.configManager.shouldAutoStartGateway() && this.openClawEntryPath) {
+      try {
+        await this.startGatewayProcess();
+      } catch (err) {
+        // If a gateway is already running on the port, still attempt to connect to it
+        console.warn("[GatewayManager] Gateway start failed (may already be running):", err instanceof Error ? err.message : String(err));
+      }
+    }
+    // Wait for the TCP port to actually accept connections before trying WebSocket.
+    // The OpenClaw gateway takes several seconds to bind the port on Windows,
+    // and log lines can lag behind actual readiness due to stdout buffering.
+    const portReady = await this.waitForPort(port, 30_000);
+    if (!portReady) {
+      gatewayError = `Gateway port ${port} did not become ready within 30s.`;
+      console.warn("[GatewayManager]", gatewayError);
+    } else {
+      try {
+        await this.connectWebSocket();
+      } catch (err) {
+        gatewayError = err instanceof Error ? err.message : String(err);
+        console.warn("[GatewayManager] Gateway WebSocket handshake failed:", gatewayError);
+      }
     }
 
-    if (!bootstrapError && !this.connected) {
-      bootstrapError = "OpenClaw gateway bootstrap failed.";
-    }
+    const availability = this.resolveRuntimeAvailability();
 
-    const bootstrapSucceeded = this.connected;
-    const bootstrapFailure = bootstrapError ? classifyGatewayError(bootstrapError) : null;
-
-    this.setBootstrap(
-      bootstrapSucceeded
-        ? { stage: "ready", progress: 100, message: "Managed OpenClaw runtime is online." }
-        : {
-            stage: "error",
-            progress: 100,
-            message: bootstrapFailure?.statusMessage ?? "Managed OpenClaw runtime is unavailable.",
-            detail: bootstrapFailure?.message ?? bootstrapError ?? "Aura could not connect to the packaged OpenClaw gateway.",
-          },
-    );
+    this.setBootstrap({
+      stage: availability.available ? "ready" : "error",
+      progress: 100,
+      message: this.connected
+        ? "Aura is connected and ready."
+        : availability.usingLocalFallback
+          ? "Aura is ready in local mode."
+          : availability.reason ?? "Aura could not start a usable AI runtime.",
+      detail: gatewayError ?? (!availability.available ? availability.reason : undefined),
+    });
     this.setStatus({
-      phase: bootstrapSucceeded ? "ready" : "error",
-      running: bootstrapSucceeded,
-      openClawDetected: true,
-      bundleDetected: true,
+      phase: availability.available ? "ready" : "error",
+      running: availability.available,
+      openClawDetected: Boolean(this.openClawEntryPath),
       version,
       port,
-      gatewayConnected: this.connected,
-      degraded: !this.connected,
-      lastCheckedAt: Date.now(),
       workspacePath: path.join(this.configManager.getOpenClawHomePath(), ".openclaw", "workspace"),
-      message: bootstrapSucceeded ? "Managed OpenClaw runtime is online." : (bootstrapFailure?.statusMessage ?? "Managed OpenClaw runtime is unavailable."),
-      error: bootstrapSucceeded ? undefined : (bootstrapFailure?.message ?? bootstrapError ?? "OpenClaw gateway bootstrap failed."),
-      diagnostics: this.buildDiagnostics({
-        bundleRootPath: this.openClawRootPath ?? undefined,
-        processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
-        startupState: bootstrapSucceeded ? "ready" : "error",
-        blockedReason: bootstrapSucceeded ? undefined : (bootstrapFailure?.blockedReason ?? bootstrapError ?? "OpenClaw gateway bootstrap failed."),
-        supportNote: bootstrapSucceeded
-          ? "Aura is connected to the managed OpenClaw gateway."
-          : (bootstrapFailure?.supportNote ?? "Restart the runtime from Settings after checking the bundled OpenClaw assets."),
-      }),
+      message: this.connected
+        ? "OpenClaw gateway connected."
+        : availability.usingLocalFallback
+          ? "OpenClaw gateway unavailable. Using local AI mode."
+          : availability.reason ?? "Gateway offline and no local AI provider is configured.",
+      error: availability.available ? undefined : gatewayError ?? availability.reason,
     });
 
     return this.getBootstrap();
@@ -1403,174 +470,114 @@ export class GatewayManager {
 
   async shutdown(): Promise<void> {
     this.disconnectWebSocket();
-    this.activeRun = null;
-    this.clearActiveChatContext();
     if (this.gatewayProcess && this.gatewayProcess.exitCode === null) {
       this.gatewayProcess.kill();
       this.gatewayProcess = null;
     }
-    this.setStatus({
-      ...this.runtimeStatus,
-      phase: "idle",
-      running: false,
-      gatewayConnected: false,
-      degraded: false,
-      lastCheckedAt: Date.now(),
-      message: "Managed OpenClaw runtime is stopped.",
-      diagnostics: this.buildDiagnostics({
-        bundleRootPath: this.openClawRootPath ?? undefined,
-        processRunning: false,
-      }),
-    });
+  }
+
+  /**
+   * Rotate the gateway's agent provider to the next one in the configured
+   * chain that has an API key. Restarts the gateway so OpenClaw picks up
+   * the new provider. Idempotent when multiple rate-limit signals arrive
+   * in quick succession.
+   */
+  async rotateToNextProvider(reason: string): Promise<void> {
+    if (this.rotationInFlight) return this.rotationInFlight;
+    // Debounce: don't rotate more than once every 10s
+    if (Date.now() - this.lastRotationAt < 10_000) return;
+    const chain = this.configManager.getProviderChain();
+    if (chain.length <= 1) {
+      console.warn("[GatewayManager] Provider rotation skipped — chain has", chain.length, "entry");
+      return;
+    }
+    const current = this.configManager.readConfig().agents?.main?.provider?.trim().toLowerCase() || chain[0];
+    const idx = chain.indexOf(current);
+    const next = chain[(idx + 1) % chain.length];
+    if (!next || next === current) return;
+    this.lastRotationAt = Date.now();
+    console.log(`[GatewayManager] Rotating provider: ${current} → ${next} (${reason})`);
+    this.rotationInFlight = (async () => {
+      try {
+        this.configManager.setAgentProvider(next);
+        await this.shutdown();
+        await this.bootstrap();
+      } finally {
+        this.rotationInFlight = null;
+      }
+    })();
+    return this.rotationInFlight;
   }
 
   async stopResponse(): Promise<void> {
-    if (!this.connected || !this.activeRunId) return;
-    const sessionKey = this.activeSessionKey ?? this.activeRun?.sessionId ?? null;
-    try {
-      if (sessionKey) {
-        await this.request("chat.abort", { runId: this.activeRunId, sessionKey });
-      } else {
-        console.warn("[GatewayManager] Skipping chat.abort because no active sessionKey is available.");
+    this.flushBufferedTokens();
+    if (this.activeTaskId) {
+      this.desktopAutomation.cancel(this.activeTaskId);
+      if (this.activeAgent) {
+        this.activeAgent.cancel();
       }
+    }
+    if (!this.connected || !this.activeRunId) return;
+    try {
+      await this.request("chat.abort", { runId: this.activeRunId });
     } catch {
       // best effort
     }
-    this.patchActiveRun({
-      status: "cancelled",
-      completedAt: now(),
-      summary: this.streamedText || "Response stopped.",
-    });
-    this.activeRun = null;
-    this.clearActiveChatContext();
+    this.activeMessageId = null;
+    this.activeTaskId = null;
+    this.activeRunId = null;
     this.setStatus({
       ...this.runtimeStatus,
       phase: "ready",
       message: "Response stopped.",
     });
   }
-  async cronAdd(params: Record<string, unknown>): Promise<OpenClawCronJob> {
-    return this.request<OpenClawCronJob>("cron.add", params);
-  }
 
-  async cronList(): Promise<OpenClawCronJob[]> {
-    const result = await this.request<{ jobs?: OpenClawCronJob[] } | OpenClawCronJob[]>("cron.list", {});
-    return Array.isArray(result) ? result : result?.jobs ?? [];
-  }
-
-  async cronUpdate(id: string, params: Record<string, unknown>): Promise<OpenClawCronJob | null> {
-    const result = await this.request<OpenClawCronJob | { job?: OpenClawCronJob } | null>("cron.update", { id, ...params });
-    const root = asRecord(result);
-    if (root && "job" in root) {
-      return (root.job as OpenClawCronJob | null | undefined) ?? null;
-    }
-    return (result as OpenClawCronJob | null) ?? null;
-  }
-
-  async cronRemove(id: string): Promise<void> {
-    await this.request("cron.remove", { id });
-  }
-
-  async cronRun(id: string): Promise<void> {
-    await this.request("cron.run", { id });
-  }
-
-  async cronRuns(id: string): Promise<OpenClawCronRun[]> {
-    const result = await this.request<{ runs?: OpenClawCronRun[] } | OpenClawCronRun[]>("cron.runs", { id });
-    return Array.isArray(result) ? result : result?.runs ?? [];
-  }
-
-  async cronStatus(id: string): Promise<Record<string, unknown> | null> {
-    return this.request<Record<string, unknown> | null>("cron.status", { id });
-  }
-
-  async toolsCatalog(): Promise<OpenClawToolEntry[]> {
-    const result = await this.request<{ tools?: OpenClawToolEntry[] } | OpenClawToolEntry[]>("tools.catalog", {});
-    return Array.isArray(result) ? result : result?.tools ?? [];
-  }
-
-  async skillsStatus(): Promise<OpenClawSkillEntry[]> {
-    const result = await this.request<{ skills?: OpenClawSkillEntry[] } | OpenClawSkillEntry[]>("skills.status", {});
-    return Array.isArray(result) ? result : result?.skills ?? [];
-  }
-
-  async skillsInstall(id: string): Promise<void> {
-    await this.request("skills.install", { id });
-  }
-
-  async sessionsCreate(params?: OpenClawSessionCreateParams): Promise<{ sessionKey: string }> {
-    const result = await this.request<Record<string, unknown>>("sessions.create", params ?? {});
-    console.log("[GatewayManager] sessions.create result:", JSON.stringify(result));
-    const root = result && typeof result === "object" ? result : {};
-    const sessionKey =
-      asNonEmptyString(root.key)
-      ?? asNonEmptyString(root.sessionKey)
-      ?? asNonEmptyString(root.session_key)
-      ?? asNonEmptyString(root.sessionId)
-      ?? asNonEmptyString(root.id);
-    if (!sessionKey) {
-      throw new Error("sessions.create did not return a session key. Response: " + JSON.stringify(result).slice(0, 200));
-    }
-    return { sessionKey };
-  }
-
-  async sessionsList(): Promise<OpenClawSessionSummary[]> {
-    const result = await this.request<{ sessions?: OpenClawSessionSummary[] } | OpenClawSessionSummary[]>("sessions.list", {});
-    return Array.isArray(result) ? result : result?.sessions ?? [];
-  }
-
-  async sessionsGet(sessionKey: string): Promise<OpenClawSessionDetail | null> {
-    const result = await this.request<OpenClawSessionDetail | { session?: OpenClawSessionDetail } | null>("sessions.get", { sessionKey });
-    const root = asRecord(result);
-    if (root && "session" in root) {
-      return (root.session as OpenClawSessionDetail | null | undefined) ?? null;
-    }
-    return (result as OpenClawSessionDetail | null) ?? null;
-  }
-    async sendChat(request: ChatSendRequest): Promise<{ messageId: string; taskId: string }> {
-    console.log(`\n[GatewayManager] sendChat Ã¢â‚¬â€ message="${request.message.slice(0, 80)}" source=${request.source}`);
-    console.log(`[GatewayManager] connected=${this.connected} phase=${this.runtimeStatus.phase}`);
-
-    const preflightBlocker = await this.getChatPreflightBlocker();
-    if (preflightBlocker) {
-      const processRunning = this.gatewayProcess !== null && this.gatewayProcess.exitCode === null;
-      const statusPhase = this.runtimeStatus.phase === "ready" || this.runtimeStatus.phase === "running"
-        ? "error"
-        : this.runtimeStatus.phase;
-      this.setStatus({
-        ...this.runtimeStatus,
-        phase: statusPhase,
-        running: false,
-        gatewayConnected: false,
-        degraded: true,
-        lastCheckedAt: Date.now(),
-        message: preflightBlocker.statusMessage,
-        error: preflightBlocker.errorMessage,
-        diagnostics: this.buildDiagnostics({
-          ...(this.runtimeStatus.diagnostics ?? {}),
-          bundleRootPath: this.openClawRootPath ?? this.runtimeStatus.diagnostics?.bundleRootPath,
-          processRunning,
-          blockedReason: preflightBlocker.blockedReason,
-          startupState: statusPhase,
-          supportNote: preflightBlocker.supportNote,
-        }),
-      });
-      throw new Error(preflightBlocker.errorMessage);
-    }
-
+  async sendChat(request: ChatSendRequest): Promise<ChatSendResult> {
     const messageId = crypto.randomUUID();
     const taskId = crypto.randomUUID();
+    let effectiveRequest = this.resolveEffectiveRequest(request);
+    const heuristic = classifyHeuristic(effectiveRequest.message);
+    const likelyDesktopAutomation = this.desktopAutomation.isLikelyAutomationRequest(effectiveRequest.message);
+    const policyDecision = evaluateAutomationPolicy(
+      effectiveRequest.message,
+      this.configManager.getAutomationPolicyTier(),
+      Boolean(effectiveRequest.background),
+    );
+    if (likelyDesktopAutomation && !policyDecision.allowed) {
+      throw new Error(policyDecision.reason);
+    }
+    if (policyDecision.requiresConfirmation) {
+      effectiveRequest = { ...effectiveRequest, autoApprovePolicy: "none" };
+    }
+
+    if (this.shouldRequireOpenClawRuntime(effectiveRequest, heuristic.intent) && !this.connected) {
+      throw new Error("OpenClaw strict primary mode is enabled but the gateway is offline. Disable primaryStrict in settings to use local automation.");
+    }
+
+    const prefersDesktopAgentLoop =
+      likelyDesktopAutomation && this.desktopAutomation.shouldUseAgentLoop(effectiveRequest.message);
+    const requestServiceLaunchPreference = this.desktopAutomation.resolveServiceLaunchPreference(effectiveRequest.message);
     this.activeMessageId = messageId;
+    this.activeTaskId = taskId;
     this.activeRunId = null;
-    this.activeSessionKey = request.sessionId ?? null;
     this.streamedText = "";
+    this.resetBufferedTokens();
+    if (effectiveRequest.background) {
+      this.backgroundMessageIds.add(messageId);
+      this.backgroundTaskIds.add(taskId);
+    }
 
-    const pageContext = await this.browserController.getPageContext();
-    console.log(`[GatewayManager] pageContext url="${pageContext?.url ?? "none"}" title="${pageContext?.title ?? "none"}"`);
-
-    const classification = classifyFastPath(request.message, pageContext);
-    console.log(`[GatewayManager] fastPath intent="${classification.intent}" confidence=${classification.confidence} directAction=${JSON.stringify(classification.directAction ?? null)}`);
-    const surface: OpenClawRunSurface = classification.intent === "navigate" ? "browser" : "chat";
+    const session = this.ensureSession(request.message, !effectiveRequest.background);
+    const userMessage: AuraSessionMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: request.message,
+      timestamp: now(),
+      source: request.source,
+    };
+    session.messages.push(userMessage);
+    this.persistSession(session, !effectiveRequest.background);
 
     this.setStatus({
       ...this.runtimeStatus,
@@ -1578,152 +585,1829 @@ export class GatewayManager {
       message: "Processing your request.",
     });
 
-    if (classification.intent === "navigate" && classification.directAction) {
-      return this.handleNavigateAction(messageId, taskId, request, classification.directAction);
-    }
-
-    console.log("[GatewayManager] -> streamViaOpenClaw (unified path)");
-    return this.handleQueryIntent(messageId, taskId, request, pageContext, AURA_PERSONALITY_PROMPT, surface);
-  }
-
-  // Ã¢â€â‚¬Ã¢â€â‚¬ Query intent: stream LLM response Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
-
-    private async handleQueryIntent(
-    messageId: string,
-    taskId: string,
-    request: ChatSendRequest,
-    pageContext: PageContext | null,
-    extraSystemPrompt?: string,
-    surface: OpenClawRunSurface = "chat",
-  ): Promise<{ messageId: string; taskId: string }> {
-    this.beginRun(taskId, messageId, request.sessionId, request.message, surface);
-
-    try {
-      if (!this.connected) {
-        throw new Error("Managed OpenClaw runtime is unavailable. Restart the runtime from Settings and try again.");
-      }
-      const responseText = await this.streamViaOpenClaw(
-        messageId,
-        request.message,
-        request.sessionId ?? "main",
-        extraSystemPrompt,
-        request.images,
+    const scheduledRequest = !effectiveRequest.skipScheduleDetection && this.scheduledTaskHandler
+      ? tryParseScheduledCommand(effectiveRequest.message)
+      : null;
+    if (scheduledRequest && this.scheduledTaskHandler) {
+      const timestamp = now();
+      const scheduledHeuristic = classifyHeuristic(scheduledRequest.command);
+      const scheduledSkillContext = this.selectSkillContext(scheduledRequest.command, null, "adaptive", effectiveRequest.explicitSkillIds);
+      const scheduledLikelyDesktopAutomation = this.desktopAutomation.isLikelyAutomationRequest(scheduledRequest.command);
+      const scheduledServiceLaunchPreference = this.desktopAutomation.resolveServiceLaunchPreference(scheduledRequest.command);
+      const scheduledExecution = this.resolveExecutionPreference(
+        {
+          ...effectiveRequest,
+          message: scheduledRequest.command,
+          preferredSurface: undefined,
+          executionMode: "auto",
+        },
+        scheduledHeuristic,
+        null,
+        scheduledSkillContext,
+        {
+          prefersDesktopAgentLoop:
+            scheduledLikelyDesktopAutomation
+            && this.desktopAutomation.shouldUseAgentLoop(scheduledRequest.command),
+          serviceLaunchPreference: scheduledServiceLaunchPreference,
+        },
       );
-      this.handleChatSuccess(messageId, taskId, request, responseText);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.handleChatError(messageId, taskId, request, message);
-    }
-
-    this.activeRun = null;
-    this.clearActiveChatContext();
-    return { messageId, taskId };
-  }
-
-  private async handleNavigateAction(
-    messageId: string,
-    taskId: string,
-    request: ChatSendRequest,
-    directAction: DirectAction,
-  ): Promise<{ messageId: string; taskId: string }> {
-    this.beginRun(taskId, messageId, request.sessionId, request.message, "browser");
-
-    try {
-      let responseText = "Done.";
-      switch (directAction.tool) {
-        case "navigate": {
-          const url = typeof directAction.params.url === "string" ? directAction.params.url : "";
-          await this.browserController.navigate({ url });
-          responseText = url ? `Opened ${url}.` : "Opened the requested page.";
-          break;
-        }
-        case "scroll":
-          await this.browserController.runDomAction({ action: "scroll", params: directAction.params });
-          responseText = "Scrolled the page.";
-          break;
-        case "back":
-          await this.browserController.back();
-          responseText = "Went back.";
-          break;
-        case "forward":
-          await this.browserController.forward();
-          responseText = "Went forward.";
-          break;
-        case "reload":
-          await this.browserController.reload();
-          responseText = "Reloaded the page.";
-          break;
-      }
-
-      this.handleChatSuccess(messageId, taskId, request, responseText);
-    } catch (err) {
-      this.handleChatError(messageId, taskId, request, err instanceof Error ? err.message : String(err));
-    }
-
-    this.activeRun = null;
-    this.clearActiveChatContext();
-    return { messageId, taskId };
-  }
-
-  // --- Private: OpenClaw Gateway Chat ---
-
-  private streamViaOpenClaw(
-    messageId: string,
-    message: string,
-    sessionKey: string,
-    extraSystemPrompt?: string,
-    images?: string[]
-  ): Promise<string> {
-    return new Promise<string>((resolve, reject) => {
-      this.streamedText = "";
-      this.activeSessionKey = sessionKey;
-      // Set callbacks before sending so streaming events don't race ahead
-      this.chatDoneResolve = resolve;
-      this.chatDoneReject = reject;
-
-      const idempotencyKey = crypto.randomUUID();
-
-      const attachments = images?.map(img => {
-        const match = img.match(/^data:(image\/\w+);base64,/);
-        const mimeType = match?.[1] || "image/jpeg";
-        const content = img.replace(/^data:image\/\w+;base64,/, "");
-        return { mimeType, content, type: "image", fileName: `upload-${crypto.randomUUID().slice(0, 6)}.${mimeType.split("/")[1]}` };
+      await this.scheduledTaskHandler({
+        id: crypto.randomUUID(),
+        title: scheduledRequest.command.split(/\s+/).slice(0, 6).join(" ") || "Scheduled task",
+        command: scheduledRequest.command,
+        type: scheduledRequest.cron ? "recurring" : "one-time",
+        scheduledFor: scheduledRequest.scheduledFor,
+        cron: scheduledRequest.cron,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        status: "pending",
+        enabled: true,
+        skillPack: scheduledSkillContext.label,
+        preferredSurface: scheduledExecution.preferredSurface,
+        executionMode: scheduledExecution.executionMode,
+        background: true,
+        autoApprovePolicy: "scheduled_safe",
       });
 
-      this.request<{ runId?: string }>("chat.send", {
-        sessionKey,
-        message,
-        idempotencyKey,
-        ...(extraSystemPrompt ? { extraSystemPrompt } : {}),
-        ...(attachments?.length ? { attachments } : {})
-      }, { timeoutMs: 120_000 })
-        .then((res) => {
-          if (res?.runId) {
-            this.activeRunId = res.runId;
-            this.patchActiveRun({ runId: res.runId, status: "running" });
+      const confirmation = scheduledRequest.cron
+        ? `Scheduled recurring task: "${scheduledRequest.command}" (Cron: ${scheduledRequest.cron})`
+        : `Scheduled it. Aura will run "${scheduledRequest.command}" on ${formatScheduledTime(scheduledRequest.scheduledFor!)}.`;
+
+      this.finalizeConversationSuccess(messageId, taskId, session, request, confirmation, {
+        runtime: scheduledExecution.executionMode === "gateway" ? "openclaw" : "aura-local",
+        surface: scheduledExecution.preferredSurface,
+        executionMode: scheduledExecution.executionMode,
+      });
+      this.activeMessageId = null;
+      this.activeTaskId = null;
+      this.activeRunId = null;
+      return this.createSendResult({
+        messageId,
+        taskId,
+        status: "done",
+        resultText: confirmation,
+        runtime: scheduledExecution.executionMode === "gateway" ? "openclaw" : "aura-local",
+        surface: scheduledExecution.preferredSurface,
+        executionMode: scheduledExecution.executionMode,
+      });
+    }
+
+    const needsPageContext = this.shouldCollectPageContext(effectiveRequest.message, heuristic);
+    const pageContextPromise = needsPageContext
+      ? this.browserController.getPageContext().catch(() => null)
+      : Promise.resolve<PageContext | null>(null);
+
+    let classification: Classification = heuristic;
+    if (heuristic.confidence < 0.9) {
+      try {
+        const llm = resolveDirectLlmConfig(this.configManager.readConfig(), "fast");
+        classification = await classify(effectiveRequest.message, await pageContextPromise, llm);
+      } catch {
+        classification = heuristic;
+      }
+    }
+
+    const pageContext = await pageContextPromise;
+    const skillContext = this.selectSkillContext(effectiveRequest.message, pageContext, "adaptive", effectiveRequest.explicitSkillIds);
+    const serviceLaunchPreference = requestServiceLaunchPreference;
+    const classificationBeforeComplexPromotion = classification;
+    classification = this.applyLocalBrowserContextHint(effectiveRequest.message, pageContext, classification);
+    classification = this.promoteComplexTaskIntent(effectiveRequest.message, classification, likelyDesktopAutomation);
+    if (classification.intent !== classificationBeforeComplexPromotion.intent) {
+      console.log(
+        `[Aura Router] intent adjusted ${classificationBeforeComplexPromotion.intent} -> ${classification.intent} for complex/local browser flow`,
+      );
+    }
+    const executionPreference = this.resolveExecutionPreference(
+      effectiveRequest,
+      classification,
+      pageContext,
+      skillContext,
+      {
+        prefersDesktopAgentLoop,
+        serviceLaunchPreference,
+        preferLocalBrowserAgent: this.shouldPreferAuraBrowserAgent(effectiveRequest.message, classification, pageContext),
+      },
+    );
+    if (this.shouldRequireOpenClawRuntime(effectiveRequest, classification.intent) && !this.connected) {
+      throw new Error("OpenClaw strict primary mode requires a connected gateway for this request. Disable primaryStrict in settings to use local automation.");
+    }
+    const agentLaunchHints = this.buildAgentLaunchHints(serviceLaunchPreference, executionPreference.preferredSurface);
+
+    this.setStatus({
+      ...this.runtimeStatus,
+      phase: "running",
+      message: "Processing your request.",
+    });
+
+    // ── Route by intent ──
+    console.log(
+      `[Aura Router] intent=${classification.intent} confidence=${classification.confidence} ` +
+      `directAction=${Boolean(classification.directAction)} skill=${skillContext.label ?? "none"} ` +
+      `gateway=${this.connected}`,
+    );
+
+    if (classification.intent === "monitor" && this.monitorHandler) {
+      console.log("[Aura Router] -> handleMonitorIntent");
+      return this.handleMonitorIntent(messageId, taskId, session, effectiveRequest, pageContext);
+    }
+
+    if (classification.intent === "query") {
+      console.log("[Aura Router] → handleQueryIntent (text response)");
+      return this.handleQueryIntent(messageId, taskId, session, effectiveRequest, pageContext);
+    }
+
+    if (executionPreference.executionMode === "local_browser") {
+      console.log("[Aura Router] -> handleAgenticTask (scheduled/local browser workflow)");
+      return this.handleAgenticTask(
+        messageId,
+        taskId,
+        session,
+        effectiveRequest,
+        pageContext,
+        executionPreference.preferredSurface ?? "browser",
+        agentLaunchHints,
+      );
+    }
+
+    if (executionPreference.executionMode === "local_desktop") {
+      console.log("[Aura Router] -> handleAgenticTask (scheduled/local desktop workflow)");
+      if (likelyDesktopAutomation && !prefersDesktopAgentLoop) {
+        try {
+          const automationResult = await this.desktopAutomation.tryHandle(
+            taskId,
+            effectiveRequest.message,
+            {
+              profile: this.store.getState().profile,
+              confirmStep: (payload) => this.confirmStep(payload, effectiveRequest),
+              source: request.source,
+              background: effectiveRequest.background,
+            },
+          );
+          if (automationResult.handled) {
+            this.finalizeConversationSuccess(
+              messageId,
+              taskId,
+              session,
+              request,
+              automationResult.responseText || "Automation completed.",
+              {
+                runtime: "aura-local",
+                surface: executionPreference.preferredSurface ?? "desktop",
+                executionMode: "local_desktop",
+              },
+            );
+            this.activeMessageId = null;
+            this.activeTaskId = null;
+            this.activeRunId = null;
+            return this.createSendResult({
+              messageId,
+              taskId,
+              status: "done",
+              resultText: automationResult.responseText || "Automation completed.",
+              runtime: "aura-local",
+              surface: executionPreference.preferredSurface ?? "desktop",
+              executionMode: "local_desktop",
+            });
           }
-          // Response will arrive via handleChatStreamEvent()
-        })
-        .catch((err: Error) => {
-          const rej = this.chatDoneReject;
+        } catch (err) {
+          const isCancellation = err instanceof Error && err.message.toLowerCase().includes("cancel");
+          if (isCancellation) {
+            const message = err instanceof Error ? err.message : String(err);
+            this.finalizeConversationError(messageId, taskId, request.message, session, message, {
+              runtime: "aura-local",
+              surface: executionPreference.preferredSurface ?? "desktop",
+              executionMode: "local_desktop",
+            });
+            this.activeMessageId = null;
+            this.activeTaskId = null;
+            this.activeRunId = null;
+            return this.createSendResult({
+              messageId,
+              taskId,
+              status: "cancelled",
+              errorText: message,
+              runtime: "aura-local",
+              surface: executionPreference.preferredSurface ?? "desktop",
+              executionMode: "local_desktop",
+            });
+          }
+        }
+      }
+
+      return this.handleAgenticTask(
+        messageId,
+        taskId,
+        session,
+        effectiveRequest,
+        pageContext,
+        executionPreference.preferredSurface ?? "desktop",
+        agentLaunchHints,
+      );
+    }
+
+    if (executionPreference.executionMode === "gateway") {
+      console.log("[Aura Router] -> handleGatewayAgenticTask (scheduled/OpenClaw workflow)");
+      return this.handleGatewayAgenticTask(
+        messageId,
+        taskId,
+        session,
+        effectiveRequest,
+        pageContext,
+        executionPreference.preferredSurface,
+      );
+    }
+
+    // Fast path: direct action (navigate/scroll) — skip the agent loop entirely
+    if (this.shouldPreferAuraBrowserAgent(effectiveRequest.message, classification, pageContext)) {
+      console.log("[Aura Router] → handleAgenticTask (local browser agent, app match)");
+      return this.handleAgenticTask(messageId, taskId, session, effectiveRequest, pageContext, "browser", agentLaunchHints);
+    }
+
+    if (
+      skillContext.browserPreferred
+      && (classification.intent === "task" || classification.intent === "autofill")
+    ) {
+      console.log("[Aura Router] → handleAgenticTask (local browser agent, workflow pack)");
+      return this.handleAgenticTask(messageId, taskId, session, effectiveRequest, pageContext, "browser", agentLaunchHints);
+    }
+
+    if (
+      skillContext.desktopPreferred
+      && (classification.intent === "task" || classification.intent === "autofill")
+    ) {
+      console.log("[Aura Router] → handleAgenticTask (local desktop agent, skill pack)");
+      return this.handleAgenticTask(messageId, taskId, session, effectiveRequest, pageContext, "desktop", agentLaunchHints);
+    }
+
+    if (
+      skillContext.preferredSurface
+      && (classification.intent === "task" || classification.intent === "autofill")
+      && !this.shouldUseGatewayForAutomation(effectiveRequest, classification.intent)
+    ) {
+      console.log("[Aura Router] → handleAgenticTask (domain action pack)");
+      return this.handleAgenticTask(
+        messageId,
+        taskId,
+        session,
+        effectiveRequest,
+        pageContext,
+        skillContext.preferredSurface,
+        agentLaunchHints,
+      );
+    }
+
+    if (this.shouldUseGatewayForAutomation(effectiveRequest, classification.intent)) {
+      const preferredSurface = classification.intent === "autofill" ? "mixed" : "browser";
+      console.log("[Aura Router] → handleGatewayAgenticTask (OpenClaw gateway)");
+      return this.handleGatewayAgenticTask(messageId, taskId, session, effectiveRequest, pageContext, preferredSurface);
+    }
+
+    if (classification.directAction) {
+      console.log(`[Aura Router] → handleDirectAction (${classification.directAction.tool})`);
+      return this.handleDirectAction(messageId, taskId, session, effectiveRequest, classification);
+    }
+
+    // Full agentic loop — local AgentRunner handles task/autofill when gateway is offline.
+    console.log("[Aura Router] → handleAgenticTask (local AgentRunner)");
+    return this.handleAgenticTask(messageId, taskId, session, effectiveRequest, pageContext, undefined, agentLaunchHints);
+  }
+
+  async runSkill(payload: {
+    skillId: string;
+    message?: string;
+    source?: "text" | "voice";
+    background?: boolean;
+    sessionId?: string;
+  }): Promise<ChatSendResult> {
+    const skill = this.skillService.getSkillSummary(payload.skillId);
+    if (!skill) {
+      throw new Error(`Skill not found: ${payload.skillId}`);
+    }
+    if (skill.enabled === false || skill.readiness === "disabled" || skill.readiness === "unsupported") {
+      throw new Error(`${skill.name} is not available in this environment.`);
+    }
+
+    const message = payload.message?.trim()
+      || `Use the ${skill.name} skill for the current context and complete the workflow with OpenClaw.`;
+
+    return this.sendChat({
+      message,
+      source: payload.source ?? "text",
+      sessionId: payload.sessionId,
+      background: payload.background ?? false,
+      executionMode: "gateway",
+      explicitSkillIds: [skill.id],
+      preferredSurface: skill.browserBacked ? "browser" : undefined,
+      workflowId: `skill:${skill.id}`,
+      workflowName: skill.name,
+      workflowOrigin: "skill",
+      checkpointLabel: "skill_requested",
+    });
+  }
+
+  // ── Agentic Task Loop ─────────────────────────────────────────────────────
+
+  private async handleGatewayAgenticTask(
+    messageId: string,
+    taskId: string,
+    session: AuraSession,
+    request: ChatSendRequest,
+    pageContext: PageContext | null,
+    preferredSurface?: "browser" | "desktop" | "mixed",
+  ): Promise<ChatSendResult> {
+    const sessionKey = this.configManager.getDefaultSessionKey();
+    const skillContext = this.selectSkillContext(request.message, pageContext, "gateway", request.explicitSkillIds);
+    const enrichedMessage = this.buildGatewayEnrichedMessage(
+      request.message,
+      pageContext,
+      skillContext.context,
+      preferredSurface,
+    );
+    const gatewayRequest = { ...request, message: enrichedMessage };
+    let screenshotDataUrl: string | null = null;
+    if (preferredSurface !== "desktop") {
+      try {
+        screenshotDataUrl = await this.browserController.captureScreenshot();
+      } catch {
+        screenshotDataUrl = null;
+      }
+    }
+    const task = this.createGatewayAgentTask(
+      taskId,
+      request.message,
+      preferredSurface,
+      skillContext.autoLabel ?? skillContext.label,
+    );
+    const executionProfile = this.resolveGatewayExecutionProfile(request.message, preferredSurface);
+    this.activeGatewayAgentTask = {
+      messageId,
+      sessionKey,
+      task,
+      toolStepIndexByCallId: new Map<string, number>(),
+      assistantText: "",
+      sawAgentEvent: false,
+      sawToolEvent: false,
+    };
+
+    this.emitProgress(task, { type: "status", statusText: "Handing this task to OpenClaw runtime." });
+
+    try {
+      const responseText = await this.streamViaGateway(messageId, gatewayRequest, {
+        sessionKey,
+        thinking: executionProfile.thinking,
+        timeoutMs: executionProfile.timeoutMs,
+        screenshotDataUrl,
+      });
+
+      const gatewayTask = this.activeGatewayAgentTask;
+      const finalTask = gatewayTask?.task ?? task;
+      const finalText = responseText || gatewayTask?.assistantText || "Task complete.";
+      if (gatewayTask && this.shouldFallbackFromGatewayAgent(finalText, gatewayTask)) {
+        const shouldBlockFallback = this.configManager.shouldDisableLocalFallback();
+        if (shouldBlockFallback) {
+          throw new Error("OpenClaw did not emit any executable automation steps, so Aura will not mark this task as completed.");
+        }
+        this.emitProgress(finalTask, {
+          type: "status",
+          statusText: "OpenClaw gateway unavailable. Switching to local agent.",
+        });
+        this.activeGatewayAgentTask = null;
+        this.activeRunId = null;
+        this.streamedText = "";
+        return this.handleAgenticTask(messageId, taskId, session, request, pageContext, preferredSurface);
+      }
+
+      this.markGatewayTaskAccepted(finalTask, "OpenClaw accepted the task.");
+      finalTask.status = "done";
+      finalTask.updatedAt = now();
+
+      const lastRunningStep = [...finalTask.steps].reverse().find((step) => step.status === "running");
+      if (lastRunningStep) {
+        lastRunningStep.status = "done";
+        lastRunningStep.completedAt = now();
+      }
+
+      this.emitProgress(finalTask, { type: "result", output: finalText, statusText: "Task complete." });
+      this.finalizeConversationSuccess(messageId, taskId, session, request, finalText, finalTask);
+      this.activeGatewayAgentTask = null;
+      this.activeMessageId = null;
+      this.activeTaskId = null;
+      this.activeRunId = null;
+      return this.createSendResult({
+        messageId,
+        taskId,
+        task: finalTask,
+        resultText: finalText,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (this.shouldFallbackToLocalFromGatewayError(message) && !this.configManager.shouldDisableLocalFallback()) {
+        const failedTask = this.activeGatewayAgentTask?.task ?? task;
+        failedTask.status = "error";
+        failedTask.updatedAt = now();
+        failedTask.error = message;
+        this.emitProgress(failedTask, {
+          type: "status",
+          statusText: "OpenClaw is unavailable or rate-limited. Switching to local Gemini.",
+        });
+        this.activeGatewayAgentTask = null;
+        this.activeRunId = null;
+        this.streamedText = "";
+        return this.handleAgenticTask(messageId, taskId, session, request, pageContext, preferredSurface);
+      }
+      if (this.activeGatewayAgentTask) {
+        this.activeGatewayAgentTask.task.status = "error";
+        this.activeGatewayAgentTask.task.updatedAt = now();
+        this.activeGatewayAgentTask.task.error = message;
+        this.emitProgress(this.activeGatewayAgentTask.task, { type: "error", statusText: message });
+      }
+      this.finalizeConversationError(
+        messageId,
+        taskId,
+        request.message,
+        session,
+        message,
+        this.activeGatewayAgentTask?.task ?? {
+          runtime: "openclaw",
+          surface: preferredSurface,
+          executionMode: "gateway",
+        },
+      );
+      this.activeGatewayAgentTask = null;
+      this.activeMessageId = null;
+      this.activeTaskId = null;
+      this.activeRunId = null;
+      return this.createSendResult({
+        messageId,
+        taskId,
+        status: "error",
+        errorText: message,
+        runtime: "openclaw",
+        surface: preferredSurface,
+        executionMode: "gateway",
+      });
+    }
+  }
+
+  private async handleAgenticTask(
+    messageId: string,
+    taskId: string,
+    session: AuraSession,
+    request: ChatSendRequest,
+    pageContext: PageContext | null,
+    preferredSurface?: "browser" | "desktop" | "mixed",
+    launchHints?: AgentLaunchHints,
+  ): Promise<ChatSendResult> {
+    this.activeAgent = new AgentRunner();
+    let lastError = "";
+
+    try {
+      const llm = resolveDirectLlmConfig(this.configManager.readConfig(), "chat");
+      const profile = this.store.getState().profile;
+      const skillContext = this.selectSkillContext(request.message, pageContext, "adaptive", request.explicitSkillIds);
+
+      const responseText = await this.activeAgent.run({
+        taskId,
+        messageId,
+        userMessage: request.message,
+        history: request.history,
+        llmConfig: llm,
+        browserController: this.browserController,
+        desktopAutomation: this.desktopAutomation,
+        emit: this.getTaskEventEmitter(request),
+        profile,
+        preferredSurface,
+        skills: skillContext.context,
+        skillLabel: skillContext.label,
+        launchHint: launchHints?.launchHint,
+        externalBrowserHintOverride: launchHints?.externalBrowserHintOverride,
+        executionMode:
+          preferredSurface === "browser"
+            ? "local_browser"
+            : preferredSurface === "desktop"
+              ? "local_desktop"
+              : "auto",
+        background: request.background,
+        confirmStep: (payload) => this.confirmStep(payload, request),
+      });
+
+      const result = this.createSendResult({
+        messageId,
+        taskId,
+        status: "done",
+        resultText: responseText,
+        runtime: "aura-local",
+        surface: preferredSurface,
+        executionMode:
+          preferredSurface === "browser"
+            ? "local_browser"
+            : preferredSurface === "desktop"
+              ? "local_desktop"
+              : "auto",
+      });
+      this.finalizeConversationSuccess(messageId, taskId, session, request, responseText, {
+        runtime: result.runtime,
+        surface: result.surface,
+        executionMode: result.executionMode,
+      });
+      return result;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      this.finalizeConversationError(messageId, taskId, request.message, session, lastError, {
+        runtime: "aura-local",
+        surface: preferredSurface,
+        executionMode:
+          preferredSurface === "browser"
+            ? "local_browser"
+            : preferredSurface === "desktop"
+              ? "local_desktop"
+              : "auto",
+      });
+      return this.createSendResult({
+        messageId,
+        taskId,
+        status: "error",
+        errorText: lastError,
+        runtime: "aura-local",
+        surface: preferredSurface,
+        executionMode:
+          preferredSurface === "browser"
+            ? "local_browser"
+            : preferredSurface === "desktop"
+              ? "local_desktop"
+              : "auto",
+      });
+    }
+    finally {
+      this.activeAgent = null;
+      this.activeMessageId = null;
+      this.activeTaskId = null;
+      this.activeRunId = null;
+    }
+  }
+
+  // ── Query intent: stream LLM response ──────────────────────────────────────
+
+  private async handleQueryIntent(
+    messageId: string,
+    taskId: string,
+    session: AuraSession,
+    request: ChatSendRequest,
+    pageContext: PageContext | null,
+  ): Promise<ChatSendResult> {
+    const skillContext = this.selectSkillContext(
+      request.message,
+      pageContext,
+      this.shouldUseGatewayForChat() ? "gateway" : "adaptive",
+      request.explicitSkillIds,
+    );
+    const task = this.createLegacyTask(taskId, request.message);
+    task.runtime = this.shouldUseGatewayForChat() ? "openclaw" : "aura-local";
+    task.executionMode = this.shouldUseGatewayForChat() ? "gateway" : "auto";
+    task.skillPack = skillContext.label;
+    this.emitProgress(task, { type: "status", statusText: "Thinking..." });
+
+    const prompt = this.composePrompt(request, pageContext, skillContext.label);
+    task.status = "running";
+    task.updatedAt = now();
+    task.steps[0]!.status = "done";
+    task.steps[0]!.completedAt = now();
+    task.steps[1]!.status = "running";
+    task.steps[1]!.startedAt = now();
+    this.emitProgress(task, { type: "step_start", statusText: "Generating response." });
+
+    try {
+      const gatewayRequest = this.shouldUseGatewayForChat() && skillContext.context
+        ? {
+          ...request,
+          message: this.buildGatewaySkillAugmentedMessage(request.message, skillContext.context),
+        }
+        : request;
+      const responseText = this.shouldUseGatewayForChat()
+        ? await this.streamViaGateway(messageId, gatewayRequest)
+        : await this.streamViaDirectLlm(messageId, prompt, request.history, skillContext.context);
+      this.handleChatSuccess(messageId, taskId, task, session, request, responseText);
+      return this.createSendResult({
+        messageId,
+        taskId,
+        task,
+        resultText: responseText,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.handleChatError(messageId, taskId, task, session, message);
+      return this.createSendResult({
+        messageId,
+        taskId,
+        task,
+        status: "error",
+        errorText: message,
+      });
+    }
+    finally {
+      this.activeMessageId = null;
+      this.activeTaskId = null;
+      this.activeRunId = null;
+    }
+  }
+
+  // ── Direct action: execute immediately, skip planning ─────────────────────
+
+  private async handleDirectAction(
+    messageId: string,
+    taskId: string,
+    session: AuraSession,
+    request: ChatSendRequest,
+    classification: Classification,
+  ): Promise<ChatSendResult> {
+    const action = classification.directAction!;
+    const step: TaskStep = {
+      index: 0,
+      tool: action.tool as ToolName,
+      description: `${action.tool}: ${JSON.stringify(action.params)}`,
+      status: "pending",
+      params: action.params,
+    };
+
+    const task: AuraTask = {
+      id: taskId,
+      command: request.message,
+      status: "running",
+      createdAt: now(),
+      updatedAt: now(),
+      retries: 0,
+      steps: [step],
+      runtime: "aura-local",
+      surface: "browser",
+      executionMode: "local_browser",
+    };
+
+    this.emitProgress(task, { type: "status", statusText: "Executing..." });
+
+    try {
+      const profile = this.store.getState().profile;
+      const result = await this.taskExecutor.execute({
+        task,
+        browserController: this.browserController,
+        emit: this.getTaskEventEmitter(request),
+        confirmStep: (payload) => this.confirmStep(payload, request),
+        profile,
+      });
+
+      const rawResult = result || "Done";
+      const friendlyResult = await this.generateTaskSummary(request.message, rawResult);
+      this.handleChatSuccess(messageId, taskId, task, session, request, friendlyResult);
+      return this.createSendResult({
+        messageId,
+        taskId,
+        task,
+        resultText: friendlyResult,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.handleChatError(messageId, taskId, task, session, message);
+      return this.createSendResult({
+        messageId,
+        taskId,
+        task,
+        status: task.status,
+        errorText: message,
+      });
+    }
+    finally {
+      this.activeMessageId = null;
+      this.activeTaskId = null;
+    }
+  }
+
+  private async handleMonitorIntent(
+    messageId: string,
+    taskId: string,
+    session: AuraSession,
+    request: ChatSendRequest,
+    pageContext: PageContext | null,
+  ): Promise<ChatSendResult> {
+    try {
+      const monitor = this.buildMonitorFromRequest(request.message, pageContext);
+      await this.monitorHandler?.(monitor);
+
+      const summary = `I'll monitor ${monitor.url} every ${monitor.intervalMinutes} minutes and alert you when ${monitor.condition}.`;
+      const task = this.createAutomationSummaryTask(taskId, request.message, summary);
+      task.surface = "browser";
+      task.executionMode = "auto";
+      task.appContext = "browser";
+
+      this.emitProgress(task, { type: "result", statusText: "Monitor created.", output: summary });
+      this.finalizeConversationSuccess(messageId, taskId, session, request, summary, task);
+
+      return this.createSendResult({
+        messageId,
+        taskId,
+        task,
+        resultText: summary,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.finalizeConversationError(messageId, taskId, request.message, session, message, {
+        runtime: "aura-local",
+        surface: "browser",
+        executionMode: "auto",
+      });
+      return this.createSendResult({
+        messageId,
+        taskId,
+        status: "error",
+        errorText: message,
+        runtime: "aura-local",
+        surface: "browser",
+        executionMode: "auto",
+      });
+    } finally {
+      this.activeMessageId = null;
+      this.activeTaskId = null;
+      this.activeRunId = null;
+    }
+  }
+
+  // ── Task intent: plan steps → execute ─────────────────────────────────────
+
+  private async handleTaskIntent(
+    messageId: string,
+    taskId: string,
+    session: AuraSession,
+    request: ChatSendRequest,
+    pageContext: PageContext | null,
+    classification: Classification,
+  ): Promise<ChatSendResult> {
+    const skillContext = this.selectSkillContext(request.message, pageContext, "adaptive", request.explicitSkillIds);
+    // Emit planning status
+    const planningTask: AuraTask = {
+      id: taskId,
+      command: request.message,
+      status: "planning",
+      createdAt: now(),
+      updatedAt: now(),
+      retries: 0,
+      steps: [],
+      skillPack: skillContext.label,
+      runtime: "aura-local",
+    };
+    this.emitProgress(planningTask, { type: "status", statusText: "Planning your task..." });
+
+    // Plan the task
+    let steps: TaskStep[];
+    try {
+      steps = await this.planTask(request.message, pageContext, classification, skillContext.context);
+    } catch {
+      // Planning failed → fall back to query mode
+      console.warn("[GatewayManager] Task planning failed, falling back to chat.");
+      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
+    }
+
+    if (steps.length === 0) {
+      // No steps planned → fall back to query
+      return this.handleQueryIntent(messageId, taskId, session, request, pageContext);
+    }
+
+    const task: AuraTask = {
+      id: taskId,
+      command: request.message,
+      status: "running",
+      createdAt: now(),
+      updatedAt: now(),
+      retries: 0,
+      steps,
+      skillPack: skillContext.label,
+      runtime: "aura-local",
+    };
+
+    this.emitProgress(task, { type: "status", statusText: "Running task..." });
+
+    try {
+      const profile = this.store.getState().profile;
+      const result = await this.taskExecutor.execute({
+        task,
+        browserController: this.browserController,
+        emit: this.getTaskEventEmitter(request),
+        confirmStep: (payload) => this.confirmStep(payload, request),
+        profile,
+      });
+
+      const rawResult = result || "Task completed";
+      const friendlyResult = await this.generateTaskSummary(request.message, rawResult);
+      this.handleChatSuccess(messageId, taskId, task, session, request, friendlyResult);
+      return this.createSendResult({
+        messageId,
+        taskId,
+        task,
+        resultText: friendlyResult,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.handleChatError(messageId, taskId, task, session, message);
+      return this.createSendResult({
+        messageId,
+        taskId,
+        task,
+        status: task.status,
+        errorText: message,
+      });
+    }
+    finally {
+      this.activeMessageId = null;
+      this.activeTaskId = null;
+    }
+  }
+
+  // ── Task planner: LLM generates step array ───────────────────────────────
+
+  private async planTask(
+    userMessage: string,
+    pageContext: PageContext | null,
+    classification: Classification,
+    skillContext?: string,
+  ): Promise<TaskStep[]> {
+    const config = this.configManager.readConfig();
+    const llm = resolveDirectLlmConfig(config, "fast");
+    const profile = this.store.getState().profile;
+    const systemPrompt = this.buildPlannerPrompt(pageContext, profile, classification, skillContext);
+
+    const result = await completeResolvedChat(llm, [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userMessage },
+    ], { model: llm.model, maxTokens: 800, temperature: 0.1 });
+
+    // Extract JSON array from response (handle markdown fences)
+    const jsonMatch = result.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error("Planner did not return a valid JSON array.");
+
+    const raw = JSON.parse(jsonMatch[0]) as Array<{
+      tool: string;
+      params: Record<string, unknown>;
+      description: string;
+      requiresConfirmation?: boolean;
+    }>;
+
+    return raw.map((s, i) => ({
+      index: i,
+      tool: s.tool as ToolName,
+      description: s.description,
+      status: "pending" as const,
+      params: s.params,
+      requiresConfirmation: s.requiresConfirmation ?? false,
+    }));
+  }
+
+  private buildPlannerPrompt(
+    pageContext: PageContext | null,
+    profile: { fullName: string; email: string; phone: string },
+    classification: Classification,
+    skillContext?: string,
+  ): string {
+    const lines = [
+      "You are a task planner for Aura Desktop, an AI assistant that automates browser actions.",
+      "Users may describe tasks conversationally (e.g. 'I need help to open ChatGPT and ask it what Python is'). Extract the actual browser actions from their natural language request.",
+      "Given the user's request and the current page context, output a JSON array of steps.",
+      "",
+      "Each step object must have:",
+      '  "tool": one of "navigate", "open", "open_tab", "switch_tab", "click", "type", "edit", "clear", "focus", "press", "scroll", "submit", "select", "find", "screenshot", "read", "wait", "execute_js", "hover"',
+      '  "params": object with tool-specific parameters',
+      '  "description": human-readable description of what this step does',
+      '  "requiresConfirmation": true if the action is destructive (submit, payment, delete, execute_js)',
+      "",
+      "Tool parameter details:",
+      '  navigate/open: { "url": "..." }',
+      '  open_tab: { "url": "..." }',
+      '  switch_tab: { "tabId": "existing tab id" } or { "target": "partial title/url match" }',
+      '  click: { "elementId": "stable id from interactive elements", "selector": "fallback CSS selector", "target": "fallback text label" }',
+      '  type/edit: { "elementId": "stable id", "selector": "fallback CSS selector", "field": "field label", "value": "text to type", "useProfile": true/false }',
+      '  clear/focus: { "elementId": "stable id", "selector": "fallback CSS selector", "field": "field label" }',
+      '  press: { "key": "Enter|Tab|Escape|Space", "elementId": "optional stable id", "target": "optional fallback label" }',
+      '  scroll: { "direction": "up|down|top|bottom" }',
+      '  submit: { "selector": "form selector" } — ALWAYS requiresConfirmation: true',
+      '  select: { "elementId": "stable id", "selector": "fallback CSS selector", "value": "option value" }',
+      '  find: { "text": "text to locate on the page" }',
+      '  wait: { "ms": 1000 }',
+      '  read: {} — reads current page content',
+      "",
+      "Rules:",
+      "- Max 20 steps",
+      "- requiresConfirmation MUST be true for: submit, execute_js, payment actions, delete actions",
+      "- Use useProfile: true when filling profile data (name, email, phone, address)",
+      "- When an interactive element includes an id like aura-el-7, use that value as params.elementId instead of guessing selectors",
+      "- Prefer params.elementId first, params.selector second, and params.target/field only as a human-readable fallback",
+      "- For type/edit/focus/clear/select steps: use the EXACT elementId or selector from the interactive elements list above. If unavailable, use specific attribute selectors like input[name='identifier'] or #fieldId",
+      "- For Google/Gmail sign-in pages: email field selector is input[name='identifier'] or #identifierId",
+      "- For click steps: prefer selectors with IDs or specific attributes. For buttons, use the button text as selector fallback",
+      "- Use switch_tab when the task needs an existing tab, and open_tab only when a genuinely new tab is useful",
+      "- Use find when the user asks to locate/highlight/check whether text exists on the current page",
+      "- ALWAYS prefer interactive element ids/selectors from the interactive elements list — they are grounded in the current page",
+      "- Output ONLY the JSON array — no prose, no markdown fences, no explanation",
+    ];
+
+    if (classification.intent === "autofill" && profile.fullName) {
+      lines.push("");
+      lines.push(`User profile: name="${profile.fullName}", email="${profile.email}", phone="${profile.phone}"`);
+    }
+
+    if (pageContext) {
+      lines.push("");
+      lines.push(`Current page: ${pageContext.title} — ${pageContext.url}`);
+      if (pageContext.interactiveElements.length > 0) {
+        const elements = pageContext.interactiveElements.slice(0, 20).map(
+          (el) => `  [${el.id}] ${el.tagName}${el.selector ? ` (${el.selector})` : ""}${el.role ? ` role=${el.role}` : ""}: ${el.name || el.text || el.placeholder || ""}`,
+        );
+        lines.push("Interactive elements:");
+        lines.push(...elements);
+      }
+      if (pageContext.visibleText) {
+        lines.push(`Page text (first 1200 chars): ${pageContext.visibleText.slice(0, 1200)}`);
+      }
+    }
+
+    if (skillContext) {
+      lines.push("");
+      lines.push("Relevant OpenClaw skill guidance:");
+      lines.push(skillContext);
+    }
+
+    return lines.join("\n");
+  }
+
+  // ── Natural language task completion summary ──────────────────────────────
+
+  private async generateTaskSummary(
+    userRequest: string,
+    executionResult: string,
+  ): Promise<string> {
+    const fallback = executionResult;
+    try {
+      const config = this.configManager.readConfig();
+      const llm = resolveDirectLlmConfig(config, "fast");
+      const summary = await Promise.race([
+        completeResolvedChat(llm, [
+          {
+            role: "system",
+            content: `You are Aura, a friendly AI assistant. The user asked you to do something and you just completed it.
+Write a short, natural, friendly confirmation message (1-3 sentences) telling the user what you did.
+Be warm and conversational — like texting a friend. Don't be robotic. Don't list technical steps.
+If the task navigated to a website, say something like "I've opened [site] for you!" not "Navigated to [url]".`,
+          },
+          {
+            role: "user",
+            content: `User asked: "${userRequest}"\nWhat happened: ${executionResult}\n\nWrite a friendly confirmation message:`,
+          },
+        ], { model: llm.model, maxTokens: 120, temperature: 0.7 }),
+        new Promise<string>((resolve) => {
+          setTimeout(() => resolve(fallback), TASK_SUMMARY_TIMEOUT_MS);
+        }),
+      ]);
+      return summary.trim() || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  private buildMonitorFromRequest(message: string, pageContext: PageContext | null): PageMonitor {
+    const explicitUrl = message.match(/https?:\/\/[^\s)]+/i)?.[0]?.trim();
+    const url = explicitUrl || pageContext?.url?.trim();
+    if (!url) {
+      throw new Error("Open the page you want to watch, or include its full URL in the monitor request.");
+    }
+
+    const intervalMinutes = this.extractMonitorIntervalMinutes(message);
+    const condition = this.extractMonitorCondition(message, pageContext);
+    const title = this.buildMonitorTitle(condition, pageContext, url);
+
+    return {
+      id: crypto.randomUUID(),
+      title,
+      url,
+      condition,
+      intervalMinutes,
+      createdAt: now(),
+      lastCheckedAt: 0,
+      status: "active",
+      triggerCount: 0,
+      autoRunEnabled: false,
+      autoRunCommand: "",
+      triggerCooldownMinutes: 60,
+    };
+  }
+
+  private extractMonitorIntervalMinutes(message: string): number {
+    const match = message.match(/\bevery\s+(\d+)\s*(minute|minutes|min|mins|hour|hours|hr|hrs)\b/i);
+    if (!match) {
+      return 30;
+    }
+
+    const value = Number(match[1] || "30");
+    const unit = (match[2] || "minutes").toLowerCase();
+    if (!Number.isFinite(value) || value <= 0) {
+      return 30;
+    }
+    return unit.startsWith("hour") || unit.startsWith("hr") ? value * 60 : value;
+  }
+
+  private extractMonitorCondition(message: string, pageContext: PageContext | null): string {
+    const cleaned = message
+      .replace(/https?:\/\/[^\s)]+/gi, " ")
+      .replace(/\bevery\s+\d+\s*(?:minute|minutes|min|mins|hour|hours|hr|hrs)\b/gi, " ")
+      .replace(/\b(?:this|the|that)\s+page\b/gi, " ")
+      .replace(/\b(?:monitor|watch|track)\b/gi, " ")
+      .replace(/\b(?:alert me|notify me|tell me|let me know)\s+when\b/gi, " ")
+      .replace(/\bwatch\s+for\b/gi, " ")
+      .replace(/\bchanges?\b/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^[,.\-:; ]+|[,.\-:; ]+$/g, "");
+
+    if (cleaned) {
+      return cleaned;
+    }
+
+    return pageContext?.title
+      ? `something changes on ${pageContext.title}`
+      : "the page changes";
+  }
+
+  private buildMonitorTitle(condition: string, pageContext: PageContext | null, url: string): string {
+    const shortCondition = condition.split(/\s+/).slice(0, 6).join(" ").trim();
+    if (shortCondition) {
+      return shortCondition.charAt(0).toUpperCase() + shortCondition.slice(1);
+    }
+
+    if (pageContext?.title?.trim()) {
+      return `Watch ${pageContext.title.trim()}`;
+    }
+
+    try {
+      return `Watch ${new URL(url).hostname}`;
+    } catch {
+      return "Page monitor";
+    }
+  }
+
+  // ── Step confirmation ─────────────────────────────────────────────────────
+
+  private confirmStep(
+    payload: Omit<ConfirmActionPayload, "requestId">,
+    request?: Pick<ChatSendRequest, "background" | "autoApprovePolicy">,
+  ): Promise<boolean> {
+    if (this.shouldAutoApproveStep(payload, request)) {
+      return Promise.resolve(true);
+    }
+
+    if (request?.background) {
+      return Promise.resolve(false);
+    }
+
+    const requestId = crypto.randomUUID();
+    return new Promise<boolean>((resolve) => {
+      const timeout = setTimeout(() => {
+        this.pendingConfirmations.delete(requestId);
+        resolve(false); // Auto-deny after 30s
+      }, 30_000);
+
+      this.pendingConfirmations.set(requestId, { resolve, timeout });
+      this.emit({
+        type: "CONFIRM_ACTION",
+        payload: { ...payload, requestId },
+      });
+    });
+  }
+
+  private shouldAutoApproveStep(
+    payload: Omit<ConfirmActionPayload, "requestId">,
+    request?: Pick<ChatSendRequest, "background" | "autoApprovePolicy">,
+  ): boolean {
+    const summary = `${payload.message} ${payload.step.description}`.toLowerCase();
+
+    if (request?.background && request.autoApprovePolicy === "scheduled_safe") {
+      return true;
+    }
+
+    if (!request?.background) {
+      const blocks = /\b(?:delete|remove\s+account|pay(?:ment)?|purchase|checkout|transfer|sign out|logout|uninstall|close account|factory reset|wipe|format)\b/;
+      return !blocks.test(summary);
+    }
+
+    return false;
+  }
+
+  /**
+   * Stream chat via direct LLM API call.
+   * Emits LLM_TOKEN events in real-time as tokens arrive.
+   */
+  private streamViaDirectLlm(
+    messageId: string,
+    prompt: string,
+    history?: Array<{ role: string; content: string }>,
+    skillContext?: string,
+  ): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const config = this.configManager.readConfig();
+      const llm = resolveDirectLlmConfig(config, "chat");
+
+      const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+        {
+          role: "system", content: `You are Aura, an intelligent AI assistant and browser automation agent built into Aura Desktop. You have a warm, natural personality — you talk like a knowledgeable friend, not a robot.
+
+Your personality:
+- Conversational and warm — greet users naturally, acknowledge what they said before jumping into tasks
+- Proactive — if the user describes something they want to do (even casually), understand the intent and help them
+- Clear — explain what you're doing in simple, friendly terms
+- Never robotic — don't respond like a command parser. Respond like a human who also happens to be very capable
+
+Your capabilities (always be aware of these):
+- You can control a web browser: navigate to sites, search, click, fill forms, read pages, type text
+- You can handle multi-step tasks: "open YouTube, search for lo-fi music, play the first video" — you understand this as one task
+- You can answer questions, explain things, summarize pages, and have normal conversations
+- You can fill forms automatically using the user's saved profile
+
+How to handle messages:
+- If someone says "Hello, can you help me open Google and search for news?" — acknowledge them warmly and tell them you're on it
+- If someone just chats (like "what is Python?") — answer conversationally
+- If someone describes a task naturally ("I need to find a recipe for pasta on YouTube") — understand it as an automation request
+- Always be friendly first, capable second
+
+Never say "I cannot browse the web" — you can. Never respond in a cold, robotic way. Be like a smart assistant who actually listens and understands.
+
+Use markdown for formatting when it helps clarity.
+If OpenClaw skill guidance is provided, treat it as domain knowledge and workflow guidance.
+Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned there. Translate that guidance into Aura's browser and desktop capabilities.` },
+      ];
+
+      if (skillContext) {
+        messages[0] = {
+          ...messages[0],
+          content: `${messages[0]!.content}\n\nRelevant OpenClaw skill guidance:\n${skillContext}`,
+        };
+      }
+
+      // Add conversation history for context
+      if (history && history.length > 0) {
+        for (const msg of history.slice(-10)) {
+          messages.push({
+            role: msg.role as "user" | "assistant",
+            content: msg.content,
+          });
+        }
+      }
+
+      messages.push({ role: "user", content: prompt });
+
+      let resolved = false;
+
+      streamResolvedChat(llm, messages, {
+        onToken: (token) => {
+          this.queueToken(messageId, token);
+        },
+        onDone: (fullText) => {
+          this.flushBufferedTokens();
+          if (!resolved) {
+            resolved = true;
+            resolve(fullText);
+          }
+        },
+        onError: (err) => {
+          this.resetBufferedTokens();
+          if (!resolved) {
+            resolved = true;
+            reject(err);
+          }
+        },
+      }, { model: llm.model });
+    });
+  }
+
+  private shouldUseGatewayForChat(): boolean {
+    if (!this.connected) return false;
+    return this.shouldBindAllTrafficToOpenClaw() || this.shouldPreferOpenClawPrimary();
+  }
+
+  private shouldRequireOpenClawRuntime(
+    request: Pick<ChatSendRequest, "executionMode">,
+    intent: Classification["intent"],
+  ): boolean {
+    if (!this.configManager.isOpenClawPrimaryStrict()) {
+      return false;
+    }
+    if (!this.shouldBindAllTrafficToOpenClaw()) {
+      return false;
+    }
+    if (request.executionMode === "gateway") {
+      return true;
+    }
+    if (request.executionMode === "local_browser" || request.executionMode === "local_desktop") {
+      return true;
+    }
+    return intent !== "monitor";
+  }
+
+  private shouldPreferOpenClawPrimary(): boolean {
+    if (this.configManager.isOpenClawPrimaryStrict()) {
+      return true;
+    }
+    const preferred = this.configManager.readConfig().agents?.main?.provider?.trim().toLowerCase();
+    return preferred === "openclaw";
+  }
+
+  private shouldBindAllTrafficToOpenClaw(): boolean {
+    return this.configManager.isOpenClawPrimaryStrict() && this.configManager.shouldDisableLocalFallback();
+  }
+
+  private resolveEffectiveRequest(request: ChatSendRequest): ChatSendRequest {
+    const anchoredTask = this.findFollowThroughAnchor(request.message, request.history);
+    if (!anchoredTask) {
+      return request;
+    }
+
+    return {
+      ...request,
+      message: [
+        "Continue and complete this previously approved task now.",
+        `Original task: ${anchoredTask}`,
+        `Latest user reply: ${request.message}`,
+      ].join("\n"),
+    };
+  }
+
+  private findFollowThroughAnchor(
+    message: string,
+    history?: ChatSendRequest["history"],
+  ): string | null {
+    const normalizedMessage = normalizeTextContent(message).trim();
+    if (!this.isFollowThroughMessage(normalizedMessage)) {
+      return null;
+    }
+
+    const recentHistory = [...(history ?? [])].reverse();
+    for (const entry of recentHistory) {
+      if (entry.role === "user" && this.isActionableHistoryMessage(entry.content)) {
+        return normalizeTextContent(entry.content).trim();
+      }
+    }
+
+    for (const entry of recentHistory) {
+      if (entry.role !== "assistant") continue;
+      const commitment = this.extractAssistantActionCommitment(entry.content);
+      if (commitment) {
+        return commitment;
+      }
+    }
+
+    return null;
+  }
+
+  private isFollowThroughMessage(message: string): boolean {
+    if (!FOLLOW_THROUGH_RE.test(message)) {
+      return false;
+    }
+    return message.split(/\s+/).filter(Boolean).length <= 6;
+  }
+
+  private isActionableHistoryMessage(message: string): boolean {
+    const normalized = normalizeTextContent(message).trim();
+    if (!normalized) {
+      return false;
+    }
+
+    const heuristic = classifyHeuristic(normalized);
+    if (heuristic.intent !== "query") {
+      return true;
+    }
+
+    return this.desktopAutomation.isLikelyAutomationRequest(normalized)
+      || (LOCAL_BROWSER_APP_RE.test(normalized) && LOCAL_BROWSER_ACTION_RE.test(normalized));
+  }
+
+  private extractAssistantActionCommitment(message: string): string | null {
+    const normalized = normalizeTextContent(message).replace(/\s+/g, " ").trim();
+    if (!ASSISTANT_ACTION_COMMITMENT_RE.test(normalized)) {
+      return null;
+    }
+
+    const directMatch = normalized.match(/\b(?:i(?:'ll| will)|let me)\s+(.+?)(?:[.!?]|$)/i);
+    if (directMatch?.[1]?.trim()) {
+      return directMatch[1].trim();
+    }
+
+    return normalized;
+  }
+
+  private shouldUseGatewayForAutomation(
+    request: Pick<ChatSendRequest, "executionMode">,
+    intent: Classification["intent"],
+  ): boolean {
+    if (!this.connected) return false;
+    if (Date.now() < this.gatewayCooldownUntil) {
+      const remaining = Math.ceil((this.gatewayCooldownUntil - Date.now()) / 1000);
+      console.log(`[Gateway] Circuit breaker active (${this.gatewayHealthState}), skipping gateway for ${remaining}s`);
+      return false;
+    }
+    if (request.executionMode === "gateway") {
+      return true;
+    }
+    if (this.shouldBindAllTrafficToOpenClaw()) {
+      return intent === "task" || intent === "autofill" || intent === "navigate";
+    }
+    if (request.executionMode === "local_browser" || request.executionMode === "local_desktop") {
+      return false;
+    }
+    // Route actionable automation requests through OpenClaw whenever the
+    // gateway is online so it owns planning and execution by default.
+    return intent === "task" || intent === "autofill" || intent === "navigate";
+  }
+
+  private isBrowserExecutionForced(
+    request: Pick<ChatSendRequest, "executionMode" | "preferredSurface">,
+  ): boolean {
+    if (request.executionMode === "local_browser") {
+      return true;
+    }
+    if (request.executionMode === "local_desktop") {
+      return false;
+    }
+    return request.preferredSurface === "browser";
+  }
+
+  private resolveExecutionPreference(
+    request: Pick<ChatSendRequest, "executionMode" | "preferredSurface" | "message">,
+    classification: Classification,
+    pageContext: PageContext | null,
+    skillContext: {
+      autoLabel?: string;
+      browserPreferred?: boolean;
+      desktopPreferred?: boolean;
+    },
+    hints?: {
+      prefersDesktopAgentLoop?: boolean;
+      preferLocalBrowserAgent?: boolean;
+      serviceLaunchPreference?: ServiceLaunchPreference | null;
+    },
+  ): { executionMode: RequestedExecutionMode; preferredSurface?: "browser" | "desktop" | "mixed" } {
+    return resolveAutomationExecutionPreference({
+      connected: this.connected,
+      strictBinding: this.shouldBindAllTrafficToOpenClaw(),
+      request,
+      classification,
+      skillContext,
+      hints: {
+        prefersDesktopAgentLoop: hints?.prefersDesktopAgentLoop,
+        preferLocalBrowserAgent: hints?.preferLocalBrowserAgent ?? this.shouldPreferAuraBrowserAgent(request.message, classification, pageContext),
+        serviceLaunchPreference: hints?.serviceLaunchPreference,
+      },
+    });
+  }
+
+  private buildAgentLaunchHints(
+    serviceLaunchPreference: ServiceLaunchPreference | null,
+    preferredSurface?: "browser" | "desktop" | "mixed",
+  ): AgentLaunchHints | undefined {
+    if (!serviceLaunchPreference) {
+      return undefined;
+    }
+
+    return {
+      launchHint: serviceLaunchPreference.launchHint,
+      externalBrowserHintOverride:
+        preferredSurface === "browser"
+          ? serviceLaunchPreference.externalBrowserHint
+          : undefined,
+    };
+  }
+
+  private shouldPreferAuraBrowserAgent(
+    message: string,
+    classification: Classification,
+    pageContext: PageContext | null,
+  ): boolean {
+    if (classification.intent !== "task" && classification.intent !== "autofill") {
+      return false;
+    }
+    if (LOCAL_BROWSER_APP_RE.test(message) && LOCAL_BROWSER_ACTION_RE.test(message)) {
+      return true;
+    }
+    return this.isLocalBrowserAppContext(pageContext) && LOCAL_BROWSER_ACTION_RE.test(message);
+  }
+
+  private applyLocalBrowserContextHint(
+    message: string,
+    pageContext: PageContext | null,
+    classification: Classification,
+  ): Classification {
+    if (!this.isLocalBrowserAppContext(pageContext) || !LOCAL_BROWSER_ACTION_RE.test(message)) {
+      return classification;
+    }
+
+    if (classification.intent === "query") {
+      return { intent: "task", confidence: 0.96 };
+    }
+
+    if (classification.intent === "navigate" && !classification.directAction) {
+      return { intent: "task", confidence: 0.94 };
+    }
+
+    return classification;
+  }
+
+  private promoteComplexTaskIntent(
+    message: string,
+    classification: Classification,
+    likelyDesktopAutomation: boolean,
+  ): Classification {
+    if (!likelyDesktopAutomation) {
+      return classification;
+    }
+
+    if (classification.intent === "query") {
+      return { intent: "task", confidence: 0.97 };
+    }
+
+    const normalized = message.trim().toLowerCase();
+    const actionCount = [...normalized.matchAll(COMPLEX_TASK_ACTION_RE)].length;
+    const hasSequence = COMPLEX_TASK_SEQUENCE_RE.test(normalized);
+    const hasApp = COMPLEX_TASK_APP_RE.test(normalized);
+
+    if (classification.intent === "navigate" && !classification.directAction) {
+      if (hasSequence || actionCount >= 3) {
+        return { intent: "task", confidence: 0.95 };
+      }
+    }
+
+    return classification;
+  }
+
+  private isLocalBrowserAppContext(pageContext: PageContext | null): boolean {
+    const pageUrl = pageContext?.url?.trim();
+    if (!pageUrl) {
+      return false;
+    }
+
+    try {
+      const host = new URL(pageUrl).hostname.toLowerCase();
+      return LOCAL_BROWSER_CONTEXT_HOSTS.some((candidate) =>
+        host === candidate || host.endsWith(`.${candidate}`),
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private selectSkillContext(
+    userMessage: string,
+    pageContext: PageContext | null,
+    executionTarget: "adaptive" | "gateway" = "adaptive",
+    explicitSkillIds?: string[],
+  ): {
+    context: string;
+    label?: string;
+    autoLabel?: string;
+    browserPreferred?: boolean;
+    desktopPreferred?: boolean;
+    preferredSurface?: "browser" | "desktop" | "mixed";
+  } {
+    const selection = this.skillService.selectRelevantSkills(userMessage, pageContext, explicitSkillIds, {
+      executionTarget,
+    });
+    const domainSelection = this.domainActionRegistry.selectContext(userMessage, pageContext);
+    const combinedContext = [selection.context, domainSelection.context].filter(Boolean).join("\n\n");
+    const combinedLabel = [selection.label, domainSelection.label].filter(Boolean).join(" + ") || undefined;
+    return {
+      context: combinedContext,
+      label: combinedLabel,
+      autoLabel: selection.autoLabel,
+      browserPreferred: selection.browserPreferred,
+      desktopPreferred: selection.desktopPreferred,
+      preferredSurface: selection.browserPreferred
+        ? "browser"
+        : selection.desktopPreferred
+          ? "desktop"
+          : domainSelection.preferredSurface,
+    };
+  }
+
+  private buildGatewaySkillAugmentedMessage(
+    userMessage: string,
+    skillContext: string,
+    preferredSurface?: "browser" | "desktop" | "mixed",
+  ): string {
+    return this.buildGatewayEnrichedMessage(userMessage, null, skillContext, preferredSurface);
+  }
+
+  private buildGatewayEnrichedMessage(
+    userMessage: string,
+    pageContext: PageContext | null,
+    skillContext?: string,
+    preferredSurface?: "browser" | "desktop" | "mixed",
+  ): string {
+    return [
+      "You are the OpenClaw runtime. Execute this automation task end-to-end using your real browser and tool capabilities.",
+      "Do not hand the task back to Aura-local automation or claim completion without actually doing the work.",
+      "If a required auth session, skill, or integration is missing, stop immediately and report the specific blocker.",
+      preferredSurface ? `Preferred surface: ${preferredSurface}.` : null,
+      pageContext
+        ? [
+            "",
+            "[Current browser state]",
+            `URL: ${pageContext.url}`,
+            `Title: ${pageContext.title}`,
+            pageContext.visibleText ? `Visible text: ${pageContext.visibleText.slice(0, 2000)}` : null,
+            pageContext.interactiveElements?.length
+              ? `Interactive elements: ${pageContext.interactiveElements
+                  .slice(0, 20)
+                  .map((element) => `${element.name || element.text || element.role || element.tagName} (${element.id})`)
+                  .join("; ")}`
+              : null,
+            "[End browser state]",
+          ]
+            .filter(Boolean)
+            .join("\n")
+        : null,
+      skillContext
+        ? [
+            "",
+            "[Skill guidance - highest priority when applicable]",
+            skillContext,
+            "[End skill guidance]",
+          ].join("\n")
+        : null,
+      "",
+      `User request: ${userMessage}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  private getGatewayCooldownRemainingMs(): number {
+    return Math.max(0, this.gatewayCooldownUntil - Date.now());
+  }
+
+  private parseGatewayRetryDelayMs(text: string): number | undefined {
+    const normalized = text.toLowerCase();
+    const retryAfterMatch = normalized.match(/retry[- ]after[:=]?\s*(\d+)(?:\s*ms|\s*s|\b)/i);
+    if (retryAfterMatch?.[1]) {
+      const amount = Number(retryAfterMatch[1]);
+      if (Number.isFinite(amount) && amount > 0) {
+        return normalized.includes("ms") ? amount : amount * 1000;
+      }
+    }
+
+    const inSecondsMatch = normalized.match(/\bin\s+(\d+)\s*(seconds?|secs?|s)\b/i);
+    if (inSecondsMatch?.[1]) {
+      const seconds = Number(inSecondsMatch[1]);
+      if (Number.isFinite(seconds) && seconds > 0) {
+        return seconds * 1000;
+      }
+    }
+
+    return undefined;
+  }
+
+  private markGatewayHealthy(reason?: string): void {
+    this.gatewayHealthState = "healthy";
+    this.gatewayHealthReason = reason ?? null;
+    this.gatewayCooldownUntil = 0;
+  }
+
+  private markGatewayOffline(reason?: string): void {
+    this.gatewayHealthState = "offline";
+    this.gatewayHealthReason = reason ?? null;
+  }
+
+  private markGatewayRateLimited(reason: string, retryAfterMs?: number): void {
+    const durationMs = Math.max(10_000, retryAfterMs ?? 45_000);
+    this.gatewayHealthState = "rate_limited";
+    this.gatewayHealthReason = reason;
+    this.gatewayCooldownUntil = Date.now() + durationMs;
+  }
+
+  private shouldFallbackToLocalFromGatewayError(message: string): boolean {
+    const normalized = message.toLowerCase();
+    return normalized.includes("429")
+      || normalized.includes("rate limit")
+      || normalized.includes("resource exhausted")
+      || normalized.includes("gateway not connected")
+      || normalized.includes("gateway disconnected")
+      || normalized.includes("timed out");
+  }
+
+  private isComplexGatewayTask(message: string): boolean {
+    const normalized = message.trim().toLowerCase();
+    const actionCount = [...normalized.matchAll(COMPLEX_TASK_ACTION_RE)].length;
+    return COMPLEX_TASK_SEQUENCE_RE.test(normalized) || actionCount >= 3;
+  }
+
+  private resolveGatewayExecutionProfile(
+    message: string,
+    preferredSurface?: "browser" | "desktop" | "mixed",
+  ): { thinking: "low" | "medium" | "high"; timeoutMs: number } {
+    const complex = this.isComplexGatewayTask(message);
+    if (preferredSurface === "desktop") {
+      return complex
+        ? { thinking: "high", timeoutMs: 75_000 }
+        : { thinking: "medium", timeoutMs: 35_000 };
+    }
+    if (preferredSurface === "mixed") {
+      return complex
+        ? { thinking: "high", timeoutMs: 60_000 }
+        : { thinking: "medium", timeoutMs: 35_000 };
+    }
+    return complex
+      ? { thinking: "medium", timeoutMs: 45_000 }
+      : { thinking: "low", timeoutMs: 25_000 };
+  }
+
+  private resolveRuntimeAvailability(): {
+    available: boolean;
+    usingLocalFallback: boolean;
+    reason?: string;
+  } {
+    if (this.connected && this.gatewayHealthState === "rate_limited") {
+      const remaining = Math.ceil(this.getGatewayCooldownRemainingMs() / 1000);
+      return {
+        available: true,
+        usingLocalFallback: true,
+        reason: `OpenClaw is rate-limited. Aura will use local Gemini for about ${remaining}s.`,
+      };
+    }
+
+    if (this.connected) {
+      return { available: true, usingLocalFallback: false };
+    }
+
+    if (this.shouldBindAllTrafficToOpenClaw()) {
+      return {
+        available: false,
+        usingLocalFallback: false,
+        reason: "OpenClaw strict binding is enabled, but the gateway is offline.",
+      };
+    }
+
+    try {
+      resolveDirectLlmConfig(this.configManager.readConfig(), "chat");
+      return { available: true, usingLocalFallback: true };
+    } catch (error) {
+      return {
+        available: false,
+        usingLocalFallback: false,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  private getOperationalReadyMessage(): string {
+    if (this.connected && this.gatewayHealthState === "rate_limited") {
+      const remaining = Math.ceil(this.getGatewayCooldownRemainingMs() / 1000);
+      return `OpenClaw is rate-limited. Aura is temporarily using local Gemini for ${remaining}s.`;
+    }
+    if (this.connected && this.configManager.shouldDisableLocalFallback()) {
+      return "OpenClaw gateway connected. Local browser and desktop automation are now bound to OpenClaw.";
+    }
+    return this.connected ? "OpenClaw gateway connected." : "OpenClaw gateway is offline.";
+  }
+
+  private async ensureGatewayChatSubscription(sessionKey: string): Promise<void> {
+    if (!this.connected) return;
+    const normalizedSessionKey = normalizeGatewaySessionKey(sessionKey);
+    if (!normalizedSessionKey || this.subscribedSessionKeys.has(normalizedSessionKey)) {
+      return;
+    }
+    // Operator websocket clients already receive the response stream for their
+    // own chat.send requests. node.event/chat.subscribe is a node-only event
+    // channel in upstream OpenClaw and returns "unauthorized role: operator".
+    // Track the session key locally so we do not keep retrying a subscription
+    // that the gateway will reject.
+    this.subscribedSessionKeys.add(normalizedSessionKey);
+  }
+
+  private async streamViaGateway(
+    _messageId: string,
+    request: ChatSendRequest,
+    options?: {
+      sessionKey?: string;
+      thinking?: "low" | "medium" | "high";
+      timeoutMs?: number;
+      screenshotDataUrl?: string | null;
+    },
+  ): Promise<string> {
+    if (!this.connected) {
+      throw new Error("Gateway not connected.");
+    }
+    const cooldownRemainingMs = this.getGatewayCooldownRemainingMs();
+    if (cooldownRemainingMs > 0) {
+      throw new Error(`OpenClaw is cooling down after a rate limit. Retry in ${Math.ceil(cooldownRemainingMs / 1000)}s.`);
+    }
+
+    const sessionKey = options?.sessionKey ?? this.configManager.getDefaultSessionKey();
+    await this.ensureGatewayChatSubscription(sessionKey);
+
+    const attachments: Array<{ type: string; data?: string; mimeType?: string }> = [];
+    if (options?.screenshotDataUrl) {
+      const base64Match = /^data:(image\/[^;]+);base64,(.+)$/.exec(options.screenshotDataUrl);
+      if (base64Match) {
+        attachments.push({
+          type: "image",
+          mimeType: base64Match[1],
+          data: base64Match[2],
+        });
+      }
+    }
+
+    this.streamedText = "";
+    return new Promise<string>((resolve, reject) => {
+      const completionTimeout = setTimeout(() => {
+        if (this.chatDoneReject === wrappedReject) {
           this.chatDoneResolve = null;
           this.chatDoneReject = null;
-          if (rej) rej(err); else reject(err);
-        });
+        }
+        reject(new Error("OpenClaw task timed out."));
+      }, Math.max((options?.timeoutMs ?? 30_000) + 10_000, 30_000));
+
+      const wrappedResolve = (text: string) => {
+        clearTimeout(completionTimeout);
+        resolve(text);
+      };
+      const wrappedReject = (error: Error) => {
+        clearTimeout(completionTimeout);
+        reject(error);
+      };
+
+      this.chatDoneResolve = wrappedResolve;
+      this.chatDoneReject = wrappedReject;
+
+      void this.request<{ runId?: string }>("chat.send", {
+        sessionKey,
+        message: request.message,
+        deliver: true,
+        attachments: attachments.length > 0 ? attachments : undefined,
+        thinking: options?.thinking,
+        timeoutMs: options?.timeoutMs,
+        idempotencyKey: crypto.randomUUID(),
+      }).then((payload) => {
+        this.activeRunId = typeof payload?.runId === "string" ? payload.runId : null;
+      }).catch((error) => {
+        clearTimeout(completionTimeout);
+        this.chatDoneResolve = null;
+        this.chatDoneReject = null;
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
     });
   }
 
   // --- Private: Gateway Process ---
 
+  private async waitForPort(port: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const ok = await new Promise<boolean>((resolve) => {
+        const socket = new net.Socket();
+        let done = false;
+        const finish = (result: boolean) => {
+          if (done) return;
+          done = true;
+          try { socket.destroy(); } catch { /* ignore */ }
+          resolve(result);
+        };
+        socket.setTimeout(1000);
+        socket.once("connect", () => finish(true));
+        socket.once("error", () => finish(false));
+        socket.once("timeout", () => finish(false));
+        socket.connect(port, "127.0.0.1");
+      });
+      if (ok) return true;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return false;
+  }
+
+  private resolveNodeBinary(): { cmd: string; useElectronAsNode: boolean } {
+    // Prefer a real system Node.js — OpenClaw uses native modules that don't
+    // play well with Electron's bundled Node runtime. Fall back to
+    // ELECTRON_RUN_AS_NODE only if no system Node is available.
+    const override = process.env.AURA_NATIVE_NODE;
+    if (override && fs.existsSync(override)) {
+      return { cmd: override, useElectronAsNode: false };
+    }
+    const candidates = process.platform === "win32"
+      ? ["node.exe", "node"]
+      : ["node"];
+    for (const c of candidates) {
+      const found = spawnSync(c, ["--version"], { stdio: "ignore", shell: false });
+      if (found.status === 0) {
+        return { cmd: c, useElectronAsNode: false };
+      }
+    }
+    // Last resort: Electron-as-Node (bundled with the app)
+    return { cmd: process.execPath, useElectronAsNode: true };
+  }
+
   private startGatewayProcess(): Promise<void> {
     return new Promise((resolve, reject) => {
       if (!this.openClawEntryPath) {
         reject(new Error("OpenClaw entry path not set."));
-        return;
-      }
-
-      if (this.gatewayProcess && this.gatewayProcess.exitCode === null) {
-        resolve();
         return;
       }
 
@@ -1739,54 +2423,96 @@ export class GatewayManager {
         "--bind", "loopback",
         "--auth", "token",
         "--allow-unconfigured",
-        "--force",
       ];
 
-      // Resolve API keys so OpenClaw's agent can use them
-      const config = this.configManager.readConfig();
-      const groqApiKey = resolveGroqApiKey(config.providers?.groq?.apiKey);
-      const geminiApiKey = resolveGeminiApiKey(config.providers?.google?.apiKey);
+      const { cmd, useElectronAsNode } = this.resolveNodeBinary();
+      console.log("[GatewayManager] Spawning gateway:", cmd, useElectronAsNode ? "(Electron-as-Node)" : "(system Node)");
+      console.log("[GatewayManager] cwd:", path.dirname(this.openClawEntryPath));
 
-      const child = spawn(process.execPath, args, {
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        OPENCLAW_HOME: this.configManager.getOpenClawHomePath(),
+      };
+      // Explicitly forward LLM credentials. These `process.env.X` references
+      // are replaced at build time by tsup's env inlining (see tsup.config.ts),
+      // so the packaged main.cjs carries the embedded keys even when the OS
+      // environment doesn't have them. Spreading `process.env` alone would
+      // not be enough: it reflects the *runtime* env, which is empty for
+      // end-user installs. The gateway child needs these to service chat.send.
+      const forwardKey = (name: string, value: string | undefined) => {
+        if (typeof value === "string" && value.trim().length > 0 && !childEnv[name]) {
+          childEnv[name] = value;
+        }
+      };
+      forwardKey("GROQ_API_KEY", process.env.GROQ_API_KEY);
+      forwardKey("VITE_GROQ_API_KEY", process.env.VITE_GROQ_API_KEY);
+      forwardKey("GOOGLE_API_KEY", process.env.GOOGLE_API_KEY);
+      forwardKey("GEMINI_API_KEY", process.env.GEMINI_API_KEY);
+      forwardKey("VITE_GEMINI_API_KEY", process.env.VITE_GEMINI_API_KEY);
+      if (useElectronAsNode) {
+        childEnv.ELECTRON_RUN_AS_NODE = "1";
+      } else {
+        // Make sure a stray ELECTRON_RUN_AS_NODE from parent shell doesn't leak in
+        delete childEnv.ELECTRON_RUN_AS_NODE;
+      }
+
+      const child = spawn(cmd, args, {
         cwd: path.dirname(this.openClawEntryPath),
-        env: {
-          ...process.env,
-          ELECTRON_RUN_AS_NODE: "1",
-          OPENCLAW_HOME: this.configManager.getOpenClawHomePath(),
-          ...(groqApiKey ? { GROQ_API_KEY: groqApiKey } : {}),
-          ...(geminiApiKey ? { GOOGLE_API_KEY: geminiApiKey } : {}),
-        },
+        env: childEnv,
         stdio: ["ignore", "pipe", "pipe"],
       });
+
+      console.log("[GatewayManager] Spawned gateway PID:", child.pid);
 
       this.gatewayProcess = child;
       let resolved = false;
       let stderr = "";
 
-      const checkReady = (text: string) => {
-        if (!resolved && (
-          text.includes("listening") ||
-          text.includes("ready") ||
-          text.includes(String(port)) ||
-          text.includes("[gateway]") ||
-          text.includes("Gateway")
-        )) {
-          resolved = true;
-          resolve();
-        }
-      };
-
       child.stderr?.on("data", (chunk: Buffer) => {
         const text = chunk.toString("utf8");
         stderr += text;
-        this.safeConsoleLog(`[Gateway:stderr] ${text.trimEnd()}`);
-        checkReady(text);
+        console.error("[GatewayManager] STDERR:", text.trim());
+        // Gateway writes its ready signal to stderr
+        if (!resolved && (text.includes("listening") || text.includes("ready") || text.includes(String(port)))) {
+          this.markGatewayHealthy();
+          resolved = true;
+          resolve();
+        }
+        if (text.includes("429") || text.includes("rate limit") || text.includes("Resource exhausted")) {
+          const retryAfterMs = this.parseGatewayRetryDelayMs(text);
+          this.markGatewayRateLimited(
+            "Provider hit a rate limit. Rotating to the next provider in the chain.",
+            retryAfterMs,
+          );
+          const remaining = Math.ceil(this.getGatewayCooldownRemainingMs() / 1000);
+          console.log(`[Gateway] Rate limit detected, circuit breaker engaged for ${remaining}s`);
+          this.setStatus({
+            ...this.runtimeStatus,
+            phase: "ready",
+            running: true,
+            message: this.getOperationalReadyMessage(),
+            error: undefined,
+          });
+          if (this.chatDoneReject) {
+            const rejectFn = this.chatDoneReject;
+            this.chatDoneResolve = null;
+            this.chatDoneReject = null;
+            rejectFn(new Error("Provider hit rate limit (429). Rotating to next provider in chain."));
+          }
+          // Fire-and-forget: rotate the provider so the NEXT request uses a different key.
+          void this.rotateToNextProvider("rate limit 429");
+        }
       });
 
       child.stdout?.on("data", (chunk: Buffer) => {
         const text = chunk.toString("utf8");
-        this.safeConsoleLog(`[Gateway:stdout] ${text.trimEnd()}`);
-        checkReady(text);
+        console.log("[GatewayManager] STDOUT:", text.trim());
+        // Also check stdout in case gateway behavior changes
+        if (!resolved && (text.includes("listening") || text.includes("ready") || text.includes(String(port)))) {
+          this.markGatewayHealthy();
+          resolved = true;
+          resolve();
+        }
       });
 
       child.on("error", (err) => {
@@ -1804,160 +2530,96 @@ export class GatewayManager {
         if (this.gatewayProcess === child) {
           this.gatewayProcess = null;
           this.connected = false;
+          this.markGatewayOffline("Gateway process exited.");
+          const availability = this.resolveRuntimeAvailability();
           this.setStatus({
             ...this.runtimeStatus,
-            phase: "error",
-            running: false,
-            gatewayConnected: false,
-            degraded: true,
-            lastCheckedAt: Date.now(),
-            message: "Managed OpenClaw gateway exited unexpectedly.",
-            error: `Exit code: ${code}`,
-            diagnostics: this.buildDiagnostics({
-              bundleRootPath: this.openClawRootPath ?? undefined,
-              processRunning: false,
-              supportNote: "Aura could not keep the bundled OpenClaw gateway alive.",
-            }),
+            phase: availability.available ? "ready" : "error",
+            running: availability.available,
+            message: availability.usingLocalFallback
+              ? "Gateway stopped. Aura switched to local AI mode."
+              : availability.reason ?? "Gateway process exited unexpectedly.",
+            error: availability.available ? undefined : `Exit code: ${code}`,
           });
         }
       });
 
-      // Timeout: if gateway does not signal ready, resolve and continue with explicit port probing.
+      // Timeout: if gateway doesn't signal ready in 15s, resolve anyway and try connecting
       setTimeout(() => {
         if (!resolved) {
           resolved = true;
           resolve();
         }
-      }, this.gatewayReadyHintTimeoutMs);
+      }, 15_000);
     });
   }
 
   // --- Private: WebSocket Connection ---
 
-  private async connectWebSocketWithRetry(maxAttempts: number): Promise<void> {
-    let lastError: Error | undefined;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        console.log(`[GatewayManager] WebSocket connect attempt ${attempt}/${maxAttempts}...`);
-        await this.connectWebSocket();
-        return;
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-        console.warn(`[GatewayManager] WebSocket connect attempt ${attempt} failed: ${lastError.message}`);
-        if (attempt < maxAttempts) {
-          const delay = attempt * 2000;
-          console.log(`[GatewayManager] Retrying WebSocket in ${delay}ms...`);
-          await new Promise<void>((r) => setTimeout(r, delay));
-        }
-      }
-    }
-    throw lastError ?? new Error("WebSocket connection failed after retries.");
-  }
-
   private connectWebSocket(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const port = this.configManager.getGatewayPort();
-      const url = `ws://127.0.0.1:${port}`;
+      const url = this.configManager.getGatewayWebSocketUrl();
       const token = this.configManager.getGatewayToken();
-
       let resolved = false;
-      this.lastConnectErrorMessage = null;
 
       this.onConnected = () => {
         if (!resolved) {
           resolved = true;
           this.connected = true;
-          this.lastConnectErrorMessage = null;
-          this.setStatus({
-            ...this.runtimeStatus,
-            phase: "ready",
-            running: true,
-            gatewayConnected: true,
-            degraded: false,
-            lastCheckedAt: Date.now(),
-            message: "Managed OpenClaw runtime is online.",
-            error: undefined,
-            diagnostics: this.buildDiagnostics({
-              bundleRootPath: this.openClawRootPath ?? undefined,
-              processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
-              supportNote: "Aura is connected to the managed OpenClaw gateway.",
-            }),
-          });
+          this.markGatewayHealthy();
           resolve();
         }
       };
 
-      // Start keep-alive heartbeat to prevent idle TCP drops
-      this.clearKeepAlive();
-      this.keepAliveTimer = setInterval(() => {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          try {
-            this.ws.ping();
-          } catch { /* ignore ping failures */ }
-        }
-      }, 15_000);
-
-      const ws = new WebSocket(url, { maxPayload: 25 * 1024 * 1024 });
+      const ws = new WebSocket(url, {
+        maxPayload: 25 * 1024 * 1024,
+        handshakeTimeout: 8_000,
+        headers: {
+          Origin: this.configManager.getGatewayHttpOrigin(),
+        },
+      });
       this.ws = ws;
 
       ws.on("open", () => {
-        // Wait for connect.challenge from server
+        setTimeout(() => {
+          if (this.ws === ws && ws.readyState === WebSocket.OPEN && !this.connected) {
+            this.sendConnectFrame(token, "");
+          }
+        }, 1_200);
       });
 
       ws.on("message", (data) => {
-        const raw = decodeWsRawData(data);
+        const raw = typeof data === "string" ? data : data.toString("utf8");
         try {
-          const parsed = JSON.parse(raw);
-          this.handleWsMessage(parsed, token);
-        } catch (error) {
-          this.safeConsoleWarn(
-            `[GatewayManager] Ignoring non-JSON gateway frame during handshake: ${
-              error instanceof Error ? error.message : String(error)
-            } :: ${raw.slice(0, 180)}`
-          );
+          this.handleWsMessage(JSON.parse(raw), token);
+        } catch {
+          // Ignore malformed frames from the gateway.
         }
       });
 
-      ws.on("close", () => {
-        this.clearKeepAlive();
-        const wasConnected = this.connected;
-        const connectError = this.lastConnectErrorMessage ? classifyGatewayError(this.lastConnectErrorMessage) : null;
-        if (this.ws === ws) {
+      ws.on("close", (code) => {
+        const wasCurrentSocket = this.ws === ws;
+        if (wasCurrentSocket) {
           this.ws = null;
           this.connected = false;
+          this.markGatewayOffline("Gateway WebSocket disconnected.");
         }
         if (!resolved) {
           resolved = true;
-          reject(new Error(this.lastConnectErrorMessage ?? "WebSocket closed before connection established."));
+          reject(new Error(`WebSocket closed before connection established (code ${code}).`));
+          return;
         }
-        this.setStatus({
-          ...this.runtimeStatus,
-          phase: wasConnected ? "starting" : "error",
-          running: false,
-          gatewayConnected: false,
-          degraded: true,
-          lastCheckedAt: Date.now(),
-          message: wasConnected
-            ? "Reconnecting to the managed OpenClaw gateway."
-            : (connectError?.statusMessage ?? "Managed OpenClaw gateway is unavailable."),
-          error: wasConnected ? undefined : (connectError?.message ?? "WebSocket closed before the gateway finished connecting."),
-          diagnostics: this.buildDiagnostics({
-            bundleRootPath: this.openClawRootPath ?? undefined,
-            processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
-            blockedReason: wasConnected ? undefined : (connectError?.blockedReason ?? this.lastConnectErrorMessage ?? "WebSocket closed before the gateway finished connecting."),
-            supportNote: wasConnected
-              ? "Aura will retry the OpenClaw gateway connection automatically."
-              : (connectError?.supportNote ?? "The managed OpenClaw gateway could not complete its startup handshake."),
-          }),
-        });
-        // Auto-reconnect after a successful connection drops
-        if (wasConnected && this.gatewayProcess !== null) {
-          this.reconnectTimer = setTimeout(() => {
-            console.log("[GatewayManager] WebSocket dropped Ã¢â‚¬â€ reconnecting...");
-            this.connectWebSocket().catch((e) => {
-              console.warn("[GatewayManager] Reconnect failed:", (e as Error).message);
-            });
-          }, 3_000);
+        if (wasCurrentSocket) {
+          const availability = this.resolveRuntimeAvailability();
+          this.setStatus({
+            ...this.runtimeStatus,
+            phase: availability.available ? "ready" : "error",
+            running: availability.available,
+            message: availability.usingLocalFallback
+              ? "Gateway disconnected. Aura is using local AI mode."
+              : availability.reason ?? "Gateway disconnected.",
+            error: availability.available ? undefined : `WebSocket closed with code ${code}.`,
+          });
         }
       });
 
@@ -1974,74 +2636,32 @@ export class GatewayManager {
           reject(new Error("WebSocket connection timed out."));
           ws.close();
         }
-      }, 90_000);
-    });
-  }
-
-  /** Polls the port every 500ms until it accepts a connection or the deadline passes. */
-  private async waitForPort(port: number, timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    let attempt = 0;
-    const logEveryAttempts = 10;
-    while (Date.now() < deadline) {
-      attempt++;
-      if (this.gatewayProcess && this.gatewayProcess.exitCode !== null) {
-        console.warn(`[GatewayManager] waitForPort aborted: gateway process exited with code ${this.gatewayProcess.exitCode}.`);
-        return false;
-      }
-      const open = await this.probePort(port);
-      if (attempt === 1 || attempt % logEveryAttempts === 0 || open) {
-        console.log(`[GatewayManager] waitForPort attempt ${attempt}: port ${port} open=${open}`);
-      }
-      if (open) return true;
-      await new Promise<void>((r) => setTimeout(r, 500));
-    }
-    return false;
-  }
-
-  /** Returns true if something is already listening on the given port. */
-  private probePort(port: number): Promise<boolean> {
-    return new Promise((resolve) => {
-      const net = require("node:net") as typeof import("node:net");
-      const socket = new net.Socket();
-      socket.setTimeout(800);
-      socket.once("connect", () => { socket.destroy(); resolve(true); });
-      socket.once("error", () => { socket.destroy(); resolve(false); });
-      socket.once("timeout", () => { socket.destroy(); resolve(false); });
-      socket.connect(port, "127.0.0.1");
+      }, 10_000);
     });
   }
 
   private disconnectWebSocket(): void {
-    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.connected = false;
-    this.lastConnectErrorMessage = null;
+    this.markGatewayOffline("Gateway disconnected.");
     this.onConnected = null;
+    this.subscribedSessionKeys.clear();
+    this.activeGatewayAgentTask = null;
     this.pending.forEach(({ reject, timeout }) => {
       clearTimeout(timeout);
       reject(new Error("Gateway disconnected."));
     });
     this.pending.clear();
-    const pendingApprovalIds = [...this.pendingApprovals.keys()];
-    for (const requestId of pendingApprovalIds) {
-      this.clearPendingApproval(requestId);
-      this.emit({
-        type: "CONFIRM_ACTION_RESOLVED",
-        payload: { requestId, decision: "disconnected" },
-      });
+
+    if (this.chatDoneReject) {
+      const reject = this.chatDoneReject;
+      this.chatDoneResolve = null;
+      this.chatDoneReject = null;
+      reject(new Error("Gateway disconnected."));
     }
 
-    this.clearKeepAlive();
     if (this.ws) {
       try { this.ws.close(); } catch { /* ignore */ }
       this.ws = null;
-    }
-  }
-
-  private clearKeepAlive(): void {
-    if (this.keepAliveTimer) {
-      clearInterval(this.keepAliveTimer);
-      this.keepAliveTimer = null;
     }
   }
 
@@ -2049,46 +2669,73 @@ export class GatewayManager {
     if (!parsed || typeof parsed !== "object") return;
     const msg = parsed as Record<string, unknown>;
 
-    // Event frame
     if (msg.type === "event") {
       const evt = msg as unknown as EventFrame;
 
       if (evt.event === "connect.challenge") {
-        const payload = asRecord(evt.payload);
-        const nonce = asNonEmptyString(payload?.nonce);
-        if (!nonce) {
-          this.safeConsoleWarn("[GatewayManager] connect.challenge missing nonce.");
-          return;
-        }
-        this.sendConnectFrame(token, nonce);
+        const payload = evt.payload as { nonce?: string } | undefined;
+        this.sendConnectFrame(token, payload?.nonce ?? "");
         return;
       }
 
-      // Chat streaming events from OpenClaw
+      if (evt.event === "connect.ok") {
+        this.connected = true;
+        this.markGatewayHealthy();
+        this.onConnected?.();
+        return;
+      }
+
+      if (evt.event === "connect.error") {
+        this.connected = false;
+        this.markGatewayOffline("Gateway authentication failed.");
+        const payload = evt.payload as { message?: string } | undefined;
+        const availability = this.resolveRuntimeAvailability();
+        this.setStatus({
+          ...this.runtimeStatus,
+          phase: availability.available ? "ready" : "error",
+          running: availability.available,
+          message: availability.usingLocalFallback
+            ? "Gateway authentication failed. Using local AI mode."
+            : availability.reason ?? "Gateway authentication failed.",
+          error: availability.available ? undefined : payload?.message ?? "Gateway rejected the connection.",
+        });
+        return;
+      }
+
       if (evt.event === "chat") {
         this.handleChatStreamEvent(evt);
         return;
       }
 
-      if (evt.event === "agent" || evt.event === "session.tool") {
-        this.handleGatewayAgentEvent(evt.payload, evt.event);
-        return;
+      if (evt.event === "agent") {
+        this.handleAgentStreamEvent(evt);
       }
-
-      if (evt.event === "exec.approval.requested" || evt.event === "plugin.approval.requested") {
-        this.handleApprovalRequestedEvent(evt.event, evt.payload);
-        return;
-      }
-
-      if (evt.event === "exec.approval.resolved" || evt.event === "plugin.approval.resolved") {
-        this.handleApprovalResolvedEvent(evt.payload);
-        return;
-      }
-
       return;
     }
 
-    // Response frame
+    if (msg.type === "hello-ok") {
+      this.connected = true;
+      this.markGatewayHealthy();
+      this.onConnected?.();
+      return;
+    }
+
+    if (msg.type === "hello-error") {
+      this.connected = false;
+      this.markGatewayOffline("Gateway authentication failed.");
+      const availability = this.resolveRuntimeAvailability();
+      this.setStatus({
+        ...this.runtimeStatus,
+        phase: availability.available ? "ready" : "error",
+        running: availability.available,
+        message: availability.usingLocalFallback
+          ? "Gateway authentication failed. Using local AI mode."
+          : availability.reason ?? "Gateway authentication failed.",
+        error: availability.available ? undefined : "OpenClaw gateway rejected the connection.",
+      });
+      return;
+    }
+
     if (msg.type === "res") {
       const res = msg as unknown as ResponseFrame;
       const pending = this.pending.get(res.id);
@@ -2102,39 +2749,24 @@ export class GatewayManager {
       } else {
         pending.reject(new Error(res.error?.message ?? "Gateway request failed"));
       }
-      return;
     }
   }
 
-  private sendConnectFrame(token: string, nonce: string): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    const role = "operator";
-    const scopes = [...GatewayManager.gatewayOperatorScopes];
-    const deviceIdentity = this.loadOrCreateGatewayDeviceIdentity();
+  private sendConnectFrame(token: string, nonce = ""): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.deviceIdentity) return;
+
     const signedAtMs = Date.now();
-    const normalizedToken = token.trim();
-    const signatureToken = normalizedToken.length ? normalizedToken : undefined;
-    const device = deviceIdentity
-      ? (() => {
-          const payload = buildDeviceAuthPayload({
-            deviceId: deviceIdentity.deviceId,
-            clientId: "gateway-client",
-            clientMode: "backend",
-            role,
-            scopes,
-            signedAtMs,
-            token: signatureToken ?? null,
-            nonce,
-          });
-          return {
-            id: deviceIdentity.deviceId,
-            publicKey: publicKeyRawBase64UrlFromPem(deviceIdentity.publicKeyPem),
-            signature: signDevicePayload(deviceIdentity.privateKeyPem, payload),
-            signedAt: signedAtMs,
-            nonce,
-          };
-        })()
-      : undefined;
+    const message = buildSignedMessage(
+      this.deviceIdentity.deviceId,
+      CLIENT_ID,
+      CLIENT_MODE,
+      ROLE,
+      SCOPES,
+      signedAtMs,
+      token,
+      nonce,
+    );
+    const signature = b64url(ed25519.sign(Buffer.from(message, "utf8"), fromB64url(this.deviceIdentity.privateKey)));
 
     const connectReq = {
       type: "req",
@@ -2144,43 +2776,41 @@ export class GatewayManager {
         minProtocol: 3,
         maxProtocol: 3,
         client: {
-          id: "gateway-client",
-          displayName: "Aura Desktop",
-          version: "0.1.0",
+          id: CLIENT_ID,
+          version: "aura-desktop",
           platform: process.platform,
-          mode: "backend",
+          mode: CLIENT_MODE,
+          instanceId: this.deviceIdentity.deviceId,
         },
-        auth: { token: normalizedToken },
-        role,
-        scopes,
-        ...(device ? { device } : {}),
+        role: ROLE,
+        scopes: SCOPES,
+        device: {
+          id: this.deviceIdentity.deviceId,
+          publicKey: this.deviceIdentity.publicKey,
+          signature,
+          signedAt: signedAtMs,
+          nonce,
+        },
+        caps: ["tool-events"],
+        auth: this.storedDeviceToken ? { token, deviceToken: this.storedDeviceToken } : { token },
+        userAgent: "electron/aura-desktop",
+        locale: "en-US",
       },
     };
 
-    // The connect response is a normal res frame with payload.type === "hello-ok".
-    // When it resolves, trigger the onConnected callback.
     const timeout = setTimeout(() => {
       this.pending.delete(connectReq.id);
-      const socketStillOpen = this.ws?.readyState === WebSocket.OPEN;
-      if (!socketStillOpen) {
-        this.lastConnectErrorMessage = "Gateway connect handshake timed out and the socket is no longer open.";
-        console.warn("[GatewayManager] Connect request timed out (45s) - socket closed before handshake completed.");
-        return;
-      }
-      console.warn("[GatewayManager] Connect request timed out (45s) - no response from gateway. Treating as connected.");
-      // The gateway is reachable (port opened, WS connected) but some versions may
-      // not emit the connect handshake response. Fall through to connected.
-      this.onConnected?.();
-      return;
-    }, 45_000);
+    }, 10_000);
 
     this.pending.set(connectReq.id, {
-      resolve: () => {
+      resolve: (payload) => {
+        const hello = payload as { auth?: { deviceToken?: string } } | undefined;
+        if (hello?.auth?.deviceToken) {
+          this.storedDeviceToken = hello.auth.deviceToken;
+        }
         this.onConnected?.();
       },
       reject: (err) => {
-        this.lastConnectErrorMessage = err.message;
-        // If connect is rejected, the ws.close handler will propagate the error
         console.error("[GatewayManager] Connect rejected:", err.message);
       },
       timeout,
@@ -2192,87 +2822,28 @@ export class GatewayManager {
   private handleChatStreamEvent(evt: EventFrame): void {
     const payload = evt.payload as ChatEventPayload | undefined;
     if (!payload || !this.activeMessageId) return;
-    this.updateActiveSessionKey(payload.sessionKey);
+    const sessionKey = this.activeGatewayAgentTask?.sessionKey ?? this.configManager.getDefaultSessionKey();
+    if (!matchesGatewaySessionKey(payload.sessionKey, sessionKey)) return;
+    if (payload.runId && this.activeRunId && payload.runId !== this.activeRunId) return;
 
     const state = payload.state;
 
     if (state === "delta") {
-      // Extract and emit text tokens
-      const text = extractTextFromChatPayload(payload);
+      // Extract text from the delta message
+      const text = payload.message?.text ?? payload.message?.content ?? "";
       if (text) {
         this.streamedText += text;
-        this.emit({
-          type: "LLM_TOKEN",
-          payload: { messageId: this.activeMessageId, token: text },
-        });
-      }
-
-            // Extract and emit tool_use blocks for live automation visualization
-      const toolBlocks = extractToolUseBlocks(payload);
-      for (const block of toolBlocks) {
-        const action = typeof block.input?.action === "string" ? block.input.action : "execute";
-        const surface = this.inferToolSurface(block.tool);
-        
-        // --- Added: Visual Step Overlays ---
-        if (block.tool === "browser" && typeof block.input?.selector === "string") {
-          void this.browserController?.highlightElement(block.input.selector);
+        if (!this.activeGatewayAgentTask) {
+          this.queueToken(this.activeMessageId, text);
         }
-        this.patchActiveRun({
-          runId: payload.runId ?? this.activeRunId ?? this.activeRun?.runId,
-          surface: this.activeRun?.surface === surface ? this.activeRun.surface : "mixed",
-          toolCount: (this.activeRun?.toolCount ?? 0) + 1,
-          lastTool: `${block.tool}:${action}`,
-        });
-        
-        this.emit({
-          type: "TOOL_USE",
-          payload: {
-            tool: block.tool,
-            toolUseId: block.toolUseId,
-            runId: payload.runId ?? this.activeRunId ?? undefined,
-            taskId: this.activeRun?.taskId ?? undefined,
-            messageId: this.activeMessageId ?? undefined,
-            surface,
-            action,
-            params: block.input,
-            status: "running",
-            timestamp: now(),
-          },
-        });
       }
       return;
     }
 
     if (state === "final") {
-      const finalText = extractTextFromChatPayload(payload) || this.streamedText;
-
-      // Emit final tool_use blocks (e.g. tool results)
-      const toolBlocks = extractToolUseBlocks(payload);
-      for (const block of toolBlocks) {
-        const action = typeof block.input?.action === "string" ? block.input.action : "execute";
-        const surface = this.inferToolSurface(block.tool);
-        this.emit({
-          type: "TOOL_USE",
-          payload: {
-            tool: block.tool,
-            toolUseId: block.toolUseId,
-            runId: payload.runId ?? this.activeRunId ?? undefined,
-            taskId: this.activeRun?.taskId ?? undefined,
-            messageId: this.activeMessageId ?? undefined,
-            surface,
-            action,
-            params: block.input,
-            status: "done",
-            timestamp: now(),
-          },
-        });
-      }
-
-      if (this.activeSessionKey && (this.shouldAutoContinueDesktopTask(finalText) || this.looksLikeInternalDesktopDrift(finalText))) {
-        this.requestDesktopContinuation(this.activeSessionKey);
-        return;
-      }
-
+      this.flushBufferedTokens();
+      // Use final message text if provided, otherwise use accumulated stream
+      const finalText = payload.message?.text ?? payload.message?.content ?? this.streamedText;
       if (this.chatDoneResolve) {
         const resolve = this.chatDoneResolve;
         this.chatDoneResolve = null;
@@ -2283,6 +2854,7 @@ export class GatewayManager {
     }
 
     if (state === "error") {
+      this.flushBufferedTokens();
       const errorMsg = payload.errorMessage ?? "OpenClaw returned an error.";
       if (this.chatDoneReject) {
         const reject = this.chatDoneReject;
@@ -2294,7 +2866,8 @@ export class GatewayManager {
     }
 
     if (state === "aborted") {
-      // User cancelled Ã¢â‚¬â€ resolve with whatever streamed so far
+      this.flushBufferedTokens();
+      // User cancelled — resolve with whatever streamed so far
       if (this.chatDoneResolve) {
         const resolve = this.chatDoneResolve;
         this.chatDoneResolve = null;
@@ -2303,6 +2876,245 @@ export class GatewayManager {
       }
       return;
     }
+  }
+
+  private handleAgentStreamEvent(evt: EventFrame): void {
+    const payload = evt.payload as AgentEventPayload | undefined;
+    const gatewayTask = this.activeGatewayAgentTask;
+    if (!payload || !gatewayTask) return;
+    if (!matchesGatewaySessionKey(payload.sessionKey, gatewayTask.sessionKey)) return;
+    if (payload.runId && this.activeRunId && payload.runId !== this.activeRunId) return;
+
+    const data = isRecord(payload.data) ? payload.data : {};
+    const task = gatewayTask.task;
+    gatewayTask.sawAgentEvent = true;
+    this.markGatewayTaskAccepted(task, "OpenClaw accepted the task.");
+
+    if (payload.stream === "assistant") {
+      const text = typeof data.text === "string" ? normalizeTextContent(data.text) : "";
+      if (text) {
+        gatewayTask.assistantText = text;
+        task.result = text;
+        task.updatedAt = now();
+      }
+      return;
+    }
+
+    if (payload.stream === "lifecycle") {
+      const statusText = typeof data.status === "string"
+        ? data.status
+        : typeof data.phase === "string"
+          ? data.phase
+          : "";
+      if (statusText) {
+        task.updatedAt = now();
+        this.emitProgress(task, { type: "status", statusText });
+      }
+      return;
+    }
+
+    if (payload.stream === "tool") {
+      gatewayTask.sawToolEvent = true;
+      this.handleGatewayToolEvent(gatewayTask, data, payload.ts);
+      return;
+    }
+
+    if (payload.stream === "error") {
+      const errorText =
+        (typeof data.message === "string" && data.message)
+        || (typeof data.error === "string" && data.error)
+        || "OpenClaw agent stream failed.";
+      task.status = "error";
+      task.updatedAt = now();
+      task.error = errorText;
+      this.emitProgress(task, { type: "error", statusText: errorText });
+      if (this.chatDoneReject) {
+        const reject = this.chatDoneReject;
+        this.chatDoneResolve = null;
+        this.chatDoneReject = null;
+        reject(new Error(errorText));
+      }
+    }
+  }
+
+  private handleGatewayToolEvent(
+    gatewayTask: GatewayAgentTaskState,
+    data: Record<string, unknown>,
+    ts?: number,
+  ): void {
+    const phase = typeof data.phase === "string" ? data.phase : "";
+    const name = typeof data.name === "string" ? data.name : "tool";
+    const toolCallId = typeof data.toolCallId === "string" ? data.toolCallId : "";
+    if (!phase || !toolCallId) return;
+
+    const task = gatewayTask.task;
+    const stepTimestamp = typeof ts === "number" ? ts : now();
+    const args = isRecord(data.args) ? data.args : {};
+
+    if (phase === "start") {
+      if (gatewayTask.toolStepIndexByCallId.has(toolCallId)) return;
+      const step: TaskStep = {
+        index: task.steps.length,
+        tool: this.mapGatewayToolName(name),
+        description: this.describeGatewayToolStep(name, args),
+        status: "running",
+        params: args,
+        startedAt: stepTimestamp,
+      };
+      task.steps.push(step);
+      task.status = "running";
+      task.updatedAt = now();
+      gatewayTask.toolStepIndexByCallId.set(toolCallId, step.index);
+      this.emitProgress(task, { type: "step_start", statusText: step.description });
+      return;
+    }
+
+    const stepIndex = gatewayTask.toolStepIndexByCallId.get(toolCallId);
+    const step = typeof stepIndex === "number" ? task.steps[stepIndex] : undefined;
+
+    if (phase === "update") {
+      if (!step) return;
+      step.output = data.partialResult;
+      task.updatedAt = now();
+      this.emitProgress(task, {
+        type: "status",
+        statusText: this.describeGatewayToolUpdate(name, data.partialResult),
+        output: data.partialResult,
+      });
+      return;
+    }
+
+    if (phase === "result") {
+      const output = data.result ?? data.partialResult;
+      const isError = Boolean(data.isError);
+      const activeStep = step ?? this.createSyntheticGatewayToolStep(task, name, args, stepTimestamp);
+      activeStep.output = output;
+      activeStep.completedAt = stepTimestamp;
+      activeStep.status = isError ? "error" : "done";
+      task.updatedAt = now();
+      gatewayTask.toolStepIndexByCallId.delete(toolCallId);
+
+      if (isError) {
+        this.emitProgress(task, {
+          type: "status",
+          statusText: `${this.describeGatewayToolStep(name, args)} failed, OpenClaw is continuing.`,
+          output,
+        });
+      } else {
+        this.emitProgress(task, {
+          type: "step_done",
+          statusText: `${this.describeGatewayToolStep(name, args)} complete.`,
+          output,
+        });
+      }
+    }
+  }
+
+  private createSyntheticGatewayToolStep(
+    task: AuraTask,
+    name: string,
+    args: Record<string, unknown>,
+    startedAt: number,
+  ): TaskStep {
+    const step: TaskStep = {
+      index: task.steps.length,
+      tool: this.mapGatewayToolName(name),
+      description: this.describeGatewayToolStep(name, args),
+      status: "running",
+      params: args,
+      startedAt,
+    };
+    task.steps.push(step);
+    return step;
+  }
+
+  private createGatewayAgentTask(
+    taskId: string,
+    command: string,
+    preferredSurface?: "browser" | "desktop" | "mixed",
+    skillLabel?: string,
+  ): AuraTask {
+    return {
+      id: taskId,
+      command,
+      status: "planning",
+      createdAt: now(),
+      updatedAt: now(),
+      retries: 0,
+      runtime: "openclaw",
+      surface: preferredSurface,
+      executionMode: "gateway",
+      appContext: preferredSurface,
+      skillPack: skillLabel ? `openclaw:${skillLabel}` : "openclaw",
+      steps: [
+        {
+          index: 0,
+          tool: "read",
+          description: "Delegate the task to OpenClaw runtime",
+          status: "running",
+          params: preferredSurface ? { surface: preferredSurface } : {},
+          startedAt: now(),
+        },
+      ],
+    };
+  }
+
+  private markGatewayTaskAccepted(task: AuraTask, statusText: string): void {
+    const firstStep = task.steps[0];
+    if (!firstStep || firstStep.status !== "running") return;
+    firstStep.status = "done";
+    firstStep.completedAt = now();
+    task.status = "running";
+    task.updatedAt = now();
+    this.emitProgress(task, { type: "step_done", statusText });
+  }
+
+  private mapGatewayToolName(name: string): ToolName {
+    const normalized = name.trim().toLowerCase();
+    if (normalized.includes("double") && normalized.includes("click")) return "double_click";
+    if (normalized.includes("right") && normalized.includes("click")) return "right_click";
+    if (normalized.includes("click")) return "click";
+    if (normalized.includes("type") || normalized.includes("fill") || normalized.includes("input")) return "type";
+    if (normalized.includes("press") || normalized.includes("key")) return "press";
+    if (normalized.includes("scroll")) return "scroll";
+    if (normalized.includes("select")) return "select";
+    if (normalized.includes("hover")) return "hover";
+    if (normalized.includes("drag")) return "drag_drop";
+    if (normalized.includes("reload") || normalized.includes("refresh")) return "reload";
+    if (normalized.includes("forward")) return "forward";
+    if (normalized.includes("back")) return "back";
+    if (normalized.includes("navigate") || normalized.includes("goto") || normalized.includes("open")) return "navigate";
+    if (normalized.includes("wait")) return "wait";
+    if (normalized.includes("screenshot")) return "screenshot";
+    return "read";
+  }
+
+  private describeGatewayToolStep(name: string, args: Record<string, unknown>): string {
+    const label = name.trim().replace(/[_-]+/g, " ") || "tool";
+    const summary = Object.entries(args)
+      .filter(([, value]) => value !== undefined && value !== null && value !== "")
+      .slice(0, 3)
+      .map(([key, value]) => `${key}=${summarizeGatewayValue(value)}`)
+      .join(", ");
+    return summary ? `${label} (${summary})` : label;
+  }
+
+  private describeGatewayToolUpdate(name: string, value: unknown): string {
+    const summary = summarizeGatewayValue(value);
+    return summary ? `${name} update: ${summary}` : `${name} in progress...`;
+  }
+
+  private shouldFallbackFromGatewayAgent(responseText: string, gatewayTask: GatewayAgentTaskState): boolean {
+    // Aura's hard-forked OpenClaw runtime (vendor/openclaw/openclaw.mjs)
+    // services chat.send end-to-end by streaming Groq/Gemini responses; it
+    // does not emit tool-execution events. A non-empty textual reply from the
+    // gateway IS a valid task outcome in this build, regardless of wording.
+    // The legacy refusal-regex heuristic caused false positives (e.g. "Since
+    // I'm a text-based assistant…") and has been retired. Only treat the
+    // turn as failed when the gateway returned absolutely nothing.
+    void gatewayTask;
+    const normalizedText = normalizeTextContent(responseText).trim();
+    return normalizedText.length === 0;
   }
 
   private async request<T = unknown>(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<T> {
@@ -2330,102 +3142,408 @@ export class GatewayManager {
     return promise;
   }
 
-    // --- Private: Chat Helpers ---
+  // --- Private: Chat Helpers ---
 
   private handleChatSuccess(
     messageId: string,
     taskId: string,
+    task: AuraTask,
+    session: AuraSession,
     request: ChatSendRequest,
     responseText: string,
   ): void {
+    this.flushBufferedTokens();
+    const normalizedResponseText = normalizeTextContent(responseText);
+
+    task.status = "done";
+    task.updatedAt = now();
+    task.result = normalizedResponseText;
+    if (task.steps[1]) {
+      task.steps[1].status = "done";
+      task.steps[1].completedAt = now();
+    } else if (task.steps[0]) {
+      task.steps[0].status = "done";
+      task.steps[0].completedAt = now();
+    }
+
+    this.emitProgress(task, { type: "result", output: normalizedResponseText, statusText: "Task complete." });
+    this.finalizeConversationSuccess(messageId, taskId, session, request, normalizedResponseText, task);
+  }
+
+  private finalizeConversationSuccess(
+    messageId: string,
+    taskId: string,
+    session: AuraSession,
+    request: ChatSendRequest,
+    responseText: string,
+    taskMeta?: Pick<AuraTask, "runtime" | "surface" | "executionMode">,
+  ): void {
+    this.flushBufferedTokens();
+    const normalizedResponseText = normalizeTextContent(responseText);
+
+    const assistantMessage: AuraSessionMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: normalizedResponseText,
+      timestamp: now(),
+      source: request.source,
+    };
+    session.messages.push(assistantMessage);
+    session.endedAt = now();
+    this.persistSession(session, !request.background);
+
     this.store.set("history", [
-      { id: taskId, command: request.message, result: responseText, status: "done", createdAt: now() },
+      {
+        id: taskId,
+        command: request.message,
+        result: normalizedResponseText,
+        status: "done",
+        createdAt: now(),
+        runtime: taskMeta?.runtime,
+        surface: taskMeta?.surface,
+        executionMode: taskMeta?.executionMode,
+      },
       ...this.store.getState().history,
     ]);
 
-    this.emit({
-      type: "LLM_DONE",
-      payload: { messageId, fullText: responseText, cleanText: responseText },
-    });
-    this.patchActiveRun({
-      runId: this.activeRunId ?? undefined,
-      status: "done",
-      completedAt: now(),
-      summary: responseText,
-    });
+    if (!request.background) {
+      this.emit({
+        type: "LLM_DONE",
+        payload: { messageId, fullText: normalizedResponseText, cleanText: normalizedResponseText },
+      });
+    }
 
+    this.cleanupRequestTracking(messageId, taskId);
     this.setStatus({
       ...this.runtimeStatus,
       phase: "ready",
-      gatewayConnected: this.connected,
-      degraded: !this.connected,
-      lastCheckedAt: Date.now(),
-      message: "Managed OpenClaw runtime is online.",
+      message: this.getOperationalReadyMessage(),
+      error: undefined,
     });
   }
 
   private handleChatError(
     messageId: string,
-    taskId: string,
-    _request: ChatSendRequest,
+    _taskId: string,
+    task: AuraTask,
+    session: AuraSession,
     errorMessage: string,
   ): void {
-    const classified = classifyGatewayError(errorMessage);
+    task.status = "error";
+    task.updatedAt = now();
+    task.error = errorMessage;
+    if (task.steps[1]) {
+      task.steps[1].status = "error";
+      task.steps[1].completedAt = now();
+    }
+
+    this.emitProgress(task, { type: "error", statusText: errorMessage });
+    this.finalizeConversationError(messageId, task.id, task.command, session, errorMessage, task);
+  }
+
+  private finalizeConversationError(
+    messageId: string,
+    taskId: string,
+    command: string,
+    session: AuraSession,
+    errorMessage: string,
+    taskMeta?: Pick<AuraTask, "runtime" | "surface" | "executionMode">,
+  ): void {
+    this.flushBufferedTokens();
+    const normalizedErrorMessage = normalizeTextContent(errorMessage);
+
     this.store.set("history", [
-      { id: taskId, command: this.activeRun?.prompt ?? "request", result: classified.message, status: "error", createdAt: now() },
+      {
+        id: taskId,
+        command,
+        result: normalizedErrorMessage,
+        status: "error",
+        createdAt: now(),
+        runtime: taskMeta?.runtime,
+        surface: taskMeta?.surface,
+        executionMode: taskMeta?.executionMode,
+      },
       ...this.store.getState().history,
     ]);
 
-    this.emit({ type: "TASK_ERROR", payload: { taskId, code: classified.code, message: classified.message } });
+    session.endedAt = now();
+    this.persistSession(session, !this.isBackgroundMessage(messageId));
 
-    const errorDisplay = `${this.streamedText ? "\n\n" : ""}${classified.message}`;
-    this.streamedText += errorDisplay;
-    this.emit({ type: "LLM_TOKEN", payload: { messageId, token: errorDisplay } });
-    this.emit({ type: "LLM_DONE", payload: { messageId, fullText: this.streamedText, cleanText: this.streamedText } });
-    this.patchActiveRun({
-      runId: this.activeRunId ?? undefined,
-      status: "error",
-      completedAt: now(),
-      error: classified.message,
-    });
+    if (!this.isBackgroundTask(taskId)) {
+      this.emit({ type: "TASK_ERROR", payload: { taskId, code: "UNKNOWN", message: normalizedErrorMessage } });
+    }
+    if (!this.isBackgroundMessage(messageId)) {
+      this.emit({ type: "LLM_DONE", payload: { messageId, fullText: "", cleanText: "" } });
+    }
 
+    this.cleanupRequestTracking(messageId, taskId);
+    const availability = this.resolveRuntimeAvailability();
     this.setStatus({
       ...this.runtimeStatus,
-      phase: "error",
-      message: classified.statusMessage,
-      error: classified.message,
-      diagnostics: this.buildDiagnostics({
-        ...(this.runtimeStatus.diagnostics ?? {}),
-        bundleRootPath: this.openClawRootPath ?? this.runtimeStatus.diagnostics?.bundleRootPath,
-        processRunning: this.gatewayProcess !== null && this.gatewayProcess.exitCode === null,
-        blockedReason: classified.blockedReason,
-        supportNote: classified.supportNote,
-      }),
+      phase: availability.available ? "ready" : "error",
+      running: availability.available,
+      message: availability.available
+        ? this.getOperationalReadyMessage()
+        : "OpenClaw reported an error.",
+      error: availability.available ? undefined : normalizedErrorMessage,
     });
   }
+
+  private composePrompt(request: ChatSendRequest, pageContext: PageContext | null, skillLabel?: string): string {
+    const profile = this.store.getState().profile;
+    const sections = [request.message];
+
+    if (profile.fullName || profile.email) {
+      const profileInfo = [profile.fullName, profile.email, profile.city, profile.country].filter(Boolean).join(", ");
+      if (profileInfo) {
+        sections.push(`\n[User profile: ${profileInfo}]`);
+      }
+    }
+
+    if (pageContext?.title) {
+      sections.push(`\n[Current page: ${pageContext.title} — ${pageContext.url}]`);
+      if (pageContext.visibleText) {
+        sections.push(`[Page content preview: ${pageContext.visibleText.slice(0, 1600)}]`);
+      }
+    }
+
+    if (skillLabel) {
+      sections.push(`\n[Relevant OpenClaw skills: ${skillLabel}]`);
+    }
+
+    return sections.join("");
+  }
+
+  private shouldCollectPageContext(message: string, classification: Classification): boolean {
+    if (classification.directAction) {
+      return false;
+    }
+    if (
+      classification.intent === "task"
+      || classification.intent === "autofill"
+      || classification.intent === "monitor"
+      || classification.intent === "navigate"
+    ) {
+      return true;
+    }
+    return PAGE_CONTEXT_HINT_RE.test(message);
+  }
+
+  private queueToken(messageId: string | null, token: string): void {
+    if (!messageId || !token) return;
+    if (this.isBackgroundMessage(messageId)) return;
+    if (this.bufferedTokenMessageId && this.bufferedTokenMessageId !== messageId) {
+      this.flushBufferedTokens();
+    }
+    this.bufferedTokenMessageId = messageId;
+    this.bufferedTokenText += token;
+    if (this.bufferedTokenText.length >= 96 || token.includes("\n")) {
+      this.flushBufferedTokens();
+      return;
+    }
+    if (!this.bufferedTokenTimer) {
+      this.bufferedTokenTimer = setTimeout(() => this.flushBufferedTokens(), STREAM_TOKEN_FLUSH_MS);
+    }
+  }
+
+  private flushBufferedTokens(): void {
+    if (this.bufferedTokenTimer) {
+      clearTimeout(this.bufferedTokenTimer);
+      this.bufferedTokenTimer = null;
+    }
+    if (!this.bufferedTokenMessageId || !this.bufferedTokenText) {
+      this.bufferedTokenMessageId = null;
+      this.bufferedTokenText = "";
+      return;
+    }
+    if (this.isBackgroundMessage(this.bufferedTokenMessageId)) {
+      this.bufferedTokenMessageId = null;
+      this.bufferedTokenText = "";
+      return;
+    }
+    this.emit({
+      type: "LLM_TOKEN",
+      payload: { messageId: this.bufferedTokenMessageId, token: this.bufferedTokenText },
+    });
+    this.bufferedTokenMessageId = null;
+    this.bufferedTokenText = "";
+  }
+
+  private resetBufferedTokens(): void {
+    if (this.bufferedTokenTimer) {
+      clearTimeout(this.bufferedTokenTimer);
+      this.bufferedTokenTimer = null;
+    }
+    this.bufferedTokenMessageId = null;
+    this.bufferedTokenText = "";
+  }
+
+  private createLegacyTask(taskId: string, command: string): AuraTask {
+    return {
+      id: taskId,
+      command,
+      status: "planning",
+      createdAt: now(),
+      updatedAt: now(),
+      retries: 0,
+      executionMode: "auto",
+      steps: [
+        { index: 0, tool: "read", description: "Collect current browser context", status: "running", params: {}, startedAt: now() },
+        { index: 1, tool: "read", description: "Execute request with OpenClaw", status: "pending", params: {} },
+      ],
+    };
+  }
+
+  private createAutomationSummaryTask(taskId: string, command: string, summary: string): AuraTask {
+    return {
+      id: taskId,
+      command,
+      status: "running",
+      createdAt: now(),
+      updatedAt: now(),
+      retries: 0,
+      runtime: "aura-local",
+      surface: "desktop",
+      executionMode: "local_desktop",
+      steps: [
+        {
+          index: 0,
+          tool: "open",
+          description: summary,
+          status: "done",
+          params: {},
+          startedAt: now(),
+          completedAt: now(),
+          output: summary,
+        },
+      ],
+    };
+  }
+
+  private createSendResult(options: {
+    messageId: string;
+    taskId: string;
+    task?: Pick<AuraTask, "status" | "result" | "error" | "runtime" | "surface" | "executionMode">;
+    status?: ChatSendResult["status"];
+    resultText?: string;
+    errorText?: string;
+    runtime?: AutomationRuntime;
+    surface?: TaskSurface;
+    executionMode?: TaskExecutionMode;
+  }): ChatSendResult {
+    return {
+      messageId: options.messageId,
+      taskId: options.taskId,
+      status: options.status ?? options.task?.status ?? "done",
+      resultText: options.resultText ?? options.task?.result,
+      errorText: options.errorText ?? options.task?.error,
+      runtime: options.runtime ?? options.task?.runtime,
+      surface: options.surface ?? options.task?.surface,
+      executionMode: options.executionMode ?? options.task?.executionMode,
+    };
+  }
+
+  private getTaskEventEmitter(
+    request: Pick<ChatSendRequest, "background">,
+  ): (message: ExtensionMessage<unknown>) => void {
+    if (!request.background) {
+      return this.emit;
+    }
+
+    return (message) => {
+      if (
+        message.type === "TASK_PROGRESS"
+        || message.type === "TASK_ERROR"
+        || message.type === "CONFIRM_ACTION"
+        || message.type === "LLM_TOKEN"
+        || message.type === "LLM_DONE"
+      ) {
+        return;
+      }
+      this.emit(message);
+    };
+  }
+
+  private emitProgress(task: AuraTask, event: TaskProgressPayload["event"]): void {
+    if (this.isBackgroundTask(task.id)) {
+      return;
+    }
+    this.emit({ type: "TASK_PROGRESS", payload: { task, event } });
+  }
+
+  private ensureSession(command: string, setAsCurrent = true): AuraSession {
+    const existing = this.store.getState().currentSession;
+    if (setAsCurrent && existing && !existing.endedAt) return existing;
+
+    const title = command.split(/\s+/).slice(0, 6).join(" ") || "New session";
+    const session: AuraSession = {
+      id: crypto.randomUUID(),
+      startedAt: now(),
+      title,
+      messages: [],
+      pagesVisited: [],
+    };
+    if (setAsCurrent) {
+      this.store.set("currentSession", session);
+    }
+    return session;
+  }
+
+  private persistSession(session: AuraSession, setAsCurrent = true): void {
+    const tabs = this.browserController.getTabs();
+    const currentUrl = tabs.tabs.find((t) => t.id === tabs.activeTabId)?.url;
+    if (currentUrl && !session.pagesVisited.includes(currentUrl)) {
+      session.pagesVisited.push(currentUrl);
+    }
+    if (setAsCurrent) {
+      this.store.set("currentSession", session);
+    }
+    const history = this.store.getState().sessionHistory.filter((s) => s.id !== session.id);
+    this.store.set("sessionHistory", [session, ...history].slice(0, 50));
+  }
+
+  private isBackgroundMessage(messageId: string | null | undefined): boolean {
+    return Boolean(messageId) && this.backgroundMessageIds.has(messageId!);
+  }
+
+  private isBackgroundTask(taskId: string | null | undefined): boolean {
+    return Boolean(taskId) && this.backgroundTaskIds.has(taskId!);
+  }
+
+  private cleanupRequestTracking(messageId: string, taskId: string): void {
+    this.backgroundMessageIds.delete(messageId);
+    this.backgroundTaskIds.delete(taskId);
+  }
+
+  private async getOrCreateDeviceIdentity(): Promise<DeviceIdentity> {
+    const identityPath = path.join(this.configManager.getOpenClawHomePath(), ".device-identity.json");
+
+    try {
+      if (fs.existsSync(identityPath)) {
+        return JSON.parse(fs.readFileSync(identityPath, "utf8")) as DeviceIdentity;
+      }
+    } catch {
+      // Recreate the identity if the file is missing or corrupted.
+    }
+
+    const privateKey = crypto.randomBytes(32);
+    const publicKey = await ed25519.getPublicKey(privateKey);
+    const deviceId = crypto.createHash("sha256").update(publicKey).digest("hex");
+    const identity: DeviceIdentity = {
+      version: 1,
+      deviceId,
+      publicKey: b64url(publicKey),
+      privateKey: b64url(privateKey),
+      createdAtMs: Date.now(),
+    };
+
+    fs.writeFileSync(identityPath, JSON.stringify(identity, null, 2), "utf8");
+    return identity;
+  }
+
   private setStatus(next: RuntimeStatus): void {
     this.runtimeStatus = next;
     this.emit({ type: "RUNTIME_STATUS", payload: { status: this.runtimeStatus } });
-  }
-
-  private buildDiagnostics(overrides: Partial<RuntimeDiagnostics> = {}): RuntimeDiagnostics {
-    const base: RuntimeDiagnostics = {
-      managedMode: "openclaw-first",
-      gatewayTokenConfigured: Boolean(this.configManager.getGatewayToken()),
-      gatewayUrl: `ws://127.0.0.1:${this.configManager.getGatewayPort()}`,
-      sessionKey: this.activeSessionKey ?? "main",
-      startupState: this.runtimeStatus?.phase ?? "unknown",
-      bundleIntegrity: this.lastBundleIntegrityMissingFiles.length
-        ? "missing-files"
-        : this.openClawRootPath
-          ? "ok"
-          : "unknown",
-    };
-    const diagnostics: RuntimeDiagnostics = { ...base, ...overrides };
-    if (!diagnostics.missingBundleFiles && this.lastBundleIntegrityMissingFiles.length) {
-      diagnostics.missingBundleFiles = [...this.lastBundleIntegrityMissingFiles];
-    }
-    return diagnostics;
   }
 
   private setBootstrap(next: BootstrapState): void {

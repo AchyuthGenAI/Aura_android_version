@@ -9,6 +9,7 @@ declare global {
     readonly VITE_LLM_MODEL?: string;
     readonly VITE_LLM_BASE_URL?: string;
     readonly VITE_LLM_API_KEY?: string;
+    readonly VITE_GEMINI_API_KEY?: string;
     readonly VITE_FIREBASE_API_KEY?: string;
     readonly VITE_FIREBASE_AUTH_DOMAIN?: string;
     readonly VITE_FIREBASE_PROJECT_ID?: string;
@@ -17,6 +18,7 @@ declare global {
     readonly VITE_FIREBASE_APP_ID?: string;
     readonly VITE_FIREBASE_MEASUREMENT_ID?: string;
     readonly VITE_DEEPGRAM_API_KEY?: string;
+    readonly VITE_DEEPGRAM_TTS_MODEL?: string;
     readonly VITE_VOICE_PROVIDER?: string;
     readonly VITE_GOOGLE_CLIENT_ID?: string;
     readonly PLASMO_PUBLIC_OPENCLAW_URL?: string;

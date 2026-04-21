@@ -1,40 +1,38 @@
 import { create } from "zustand";
 
+import { normalizeTextContent } from "@shared/text-content";
 import type {
-  ApprovalDecision,
   AppRoute,
-  AutomationJob,
-  AutomationJobUpdatedPayload,
   AuraMacro,
   AuraSession,
   AuraSessionMessage,
   AuraSettings,
   AuraStorageShape,
+  AuraTask,
   BootstrapState,
   BrowserLayoutBounds,
   BrowserSelection,
   BrowserTabsUpdatedPayload,
   ChatSendRequest,
+  ChatSendResult,
   ChatThreadMessage,
   ConfirmActionPayload,
-  ConfirmActionResolvedPayload,
   ContextMenuActionPayload,
   ExtensionMessage,
+  GatewayStatus,
   HistoryEntry,
-  OpenClawRun,
-  OpenClawSessionDetail,
-  OpenClawSessionMessage,
-  OpenClawSessionSummary,
   OverlayTab,
   PageContext,
   PageMonitor,
   PermissionState,
   RuntimeStatus,
+  ScheduledTask,
   SkillSummary,
+  TaskStatus,
   TaskErrorPayload,
+  TaskProgressPayload,
   ToastNotice,
   ToolsSubTab,
-  ToolUsePayload,
   UserProfile
 } from "@shared/types";
 
@@ -53,161 +51,55 @@ const createInitialBootstrap = (): BootstrapState => ({
   message: "Waiting to bootstrap OpenClaw."
 });
 
+const normalizeComparableContent = (value: string): string =>
+  normalizeTextContent(value)
+    .replace(/\s+/g, " ")
+    .trim();
+
+const dedupeSessionMessages = (messages: AuraSessionMessage[]): AuraSessionMessage[] => {
+  const next: AuraSessionMessage[] = [];
+
+  for (const message of messages) {
+    const previous = next[next.length - 1];
+    const currentContent = normalizeComparableContent(message.content);
+    const previousContent = previous ? normalizeComparableContent(previous.content) : "";
+
+    if (
+      previous
+      && previous.role === message.role
+      && previous.source === message.source
+      && currentContent
+      && currentContent === previousContent
+      && Math.abs((message.timestamp ?? 0) - (previous.timestamp ?? 0)) <= 1_500
+    ) {
+      continue;
+    }
+
+    next.push(message);
+  }
+
+  return next;
+};
+
 const mapSessionMessages = (messages: AuraSessionMessage[]): ChatThreadMessage[] =>
-  messages.map((message) => ({
+  dedupeSessionMessages(messages).map((message) => ({
     id: message.id,
     role: message.role,
-    content: message.content,
+    content: normalizeTextContent(message.content),
     status: "done"
   }));
 
-const toTimestamp = (value: unknown, fallback: number): number => {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const parsed = Date.parse(value);
-    if (!Number.isNaN(parsed)) return parsed;
+const mergeSessions = (storage: AuraStorageShape): AuraSession[] => {
+  const seen = new Map<string, AuraSession>();
+  if (storage.currentSession) {
+    seen.set(storage.currentSession.id, storage.currentSession);
   }
-  return fallback;
-};
-
-const getOpenClawMessageText = (message: OpenClawSessionMessage): string => {
-  if (typeof message.text === "string" && message.text) return message.text;
-  if (typeof message.content === "string") return message.content;
-  if (Array.isArray(message.content)) {
-    return message.content
-      .filter((entry) => typeof entry?.text === "string")
-      .map((entry) => entry.text ?? "")
-      .join("");
-  }
-  return "";
-};
-
-const unwrapCodeFence = (content: string): string => {
-  const trimmed = content.trim();
-  const match = trimmed.match(/^```(?:json|text)?\s*([\s\S]*?)\s*```$/i);
-  return match ? match[1]!.trim() : trimmed;
-};
-
-const AURA_INTERNAL_CONTINUE_MARKER = "[AURA_INTERNAL_CONTINUE]";
-
-const stripLeadingTimestamp = (content: string): string =>
-  content.replace(/^\[[^\]]+\]\s*/m, "").trim();
-
-const stripSenderMetadataPrefix = (content: string): string => {
-  let cleaned = unwrapCodeFence(content).trim();
-  const metadataPattern =
-    /^Sender \(untrusted metadata\):\s*\{[\s\S]*?\}\s*(?:\[[^\]]+\]\s*)?/i;
-
-  if (!/^Sender \(untrusted metadata\):/i.test(cleaned)) {
-    const inlineMatch = cleaned.match(/Sender \(untrusted metadata\):[\s\S]*$/i);
-    if (inlineMatch) {
-      cleaned = inlineMatch[0]!;
-    } else {
-      return stripLeadingTimestamp(cleaned);
+  for (const session of storage.sessionHistory) {
+    if (!seen.has(session.id)) {
+      seen.set(session.id, session);
     }
   }
-
-  cleaned = cleaned.replace(metadataPattern, "");
-  cleaned = cleaned.replace(/^Sender \(untrusted metadata\):\s*/i, "");
-  cleaned = cleaned.replace(/^\{[\s\S]*?\}\s*/m, "");
-  cleaned = stripLeadingTimestamp(cleaned);
-  return cleaned.trim();
-};
-
-const sanitizeTranscriptText = (content: string, role: "user" | "assistant"): string => {
-  let cleaned = stripSenderMetadataPrefix(content);
-  cleaned = unwrapCodeFence(cleaned);
-
-  if (cleaned.includes(AURA_INTERNAL_CONTINUE_MARKER)) {
-    return "";
-  }
-
-  if (
-    role === "assistant"
-    && (
-      looksLikeRawToolResultJson(cleaned)
-      || looksLikeRawToolResultFragment(cleaned)
-      || looksLikeInternalOpenClawNoise(cleaned)
-    )
-  ) {
-    return "";
-  }
-
-  if (role === "assistant") {
-    cleaned = cleaned
-      .replace(/^I (?:opened|launched) the app\.\s*$/i, "")
-      .trim();
-  }
-
-  return cleaned;
-};
-
-const normalizeOpenClawMessage = (message: OpenClawSessionMessage, index: number): AuraSessionMessage => ({
-  id: typeof message.id === "string" ? message.id : `message-${index}`,
-  role: message.role === "assistant" ? "assistant" : "user",
-  content: sanitizeTranscriptText(
-    getOpenClawMessageText(message),
-    message.role === "assistant" ? "assistant" : "user",
-  ),
-  timestamp: toTimestamp(message.createdAt ?? message.timestamp, now()),
-  source: message.source === "voice" ? "voice" : "text",
-});
-
-const normalizeOpenClawSessionSummary = (session: OpenClawSessionSummary): AuraSession => ({
-  id: session.sessionKey,
-  startedAt: toTimestamp(session.createdAt ?? session.updatedAt ?? session.lastMessageAt, now()),
-  endedAt: session.updatedAt ? toTimestamp(session.updatedAt, now()) : undefined,
-  title: session.title,
-  messages: Array.isArray(session.messages)
-    ? session.messages.map(normalizeOpenClawMessage).filter((message) => message.content)
-    : [],
-  pagesVisited: [],
-});
-
-const normalizeOpenClawSessionDetail = (
-  detail: OpenClawSessionDetail,
-  fallback?: AuraSession | null,
-): AuraSession => {
-  const messages = Array.isArray(detail.messages)
-    ? detail.messages.map(normalizeOpenClawMessage).filter((message) => message.content)
-    : (fallback?.messages ?? []);
-  const title = detail.title ?? fallback?.title ?? messages.find((message) => message.role === "user")?.content.slice(0, 48) ?? "Session";
-  return {
-    id: detail.sessionKey,
-    startedAt: toTimestamp(detail.createdAt ?? fallback?.startedAt, now()),
-    endedAt: detail.updatedAt ? toTimestamp(detail.updatedAt, now()) : fallback?.endedAt,
-    title,
-    messages,
-    pagesVisited: fallback?.pagesVisited ?? [],
-  };
-};
-
-const upsertSession = (sessions: AuraSession[], session: AuraSession): AuraSession[] =>
-  [session, ...sessions.filter((entry) => entry.id !== session.id)]
-    .sort((left, right) => (right.endedAt ?? right.startedAt) - (left.endedAt ?? left.startedAt));
-
-const buildRemoteSessionState = async (
-  preferredSessionId: string | null,
-): Promise<Pick<AuraState, "sessions" | "currentSessionId" | "messages">> => {
-  const summaries = await window.auraDesktop.sessions.list();
-  let sessions = summaries.map(normalizeOpenClawSessionSummary);
-  const selectedId = preferredSessionId ?? sessions[0]?.id ?? null;
-  if (!selectedId) {
-    return { sessions, currentSessionId: null, messages: [] };
-  }
-
-  const detail = await window.auraDesktop.sessions.get(selectedId);
-  if (!detail) {
-    return { sessions, currentSessionId: selectedId, messages: [] };
-  }
-
-  const normalized = normalizeOpenClawSessionDetail(detail, sessions.find((session) => session.id === selectedId) ?? null);
-  sessions = upsertSession(sessions, normalized);
-  return {
-    sessions,
-    currentSessionId: normalized.id,
-    messages: mapSessionMessages(normalized.messages),
-  };
+  return [...seen.values()].sort((a, b) => b.startedAt - a.startedAt);
 };
 
 const createToast = (tone: ToastNotice["tone"], title: string, message?: string): ToastNotice => ({
@@ -218,149 +110,133 @@ const createToast = (tone: ToastNotice["tone"], title: string, message?: string)
   createdAt: now()
 });
 
-const looksLikeApprovalTranscript = (content: string): boolean => {
-  const normalized = content.toLowerCase();
-  return (
-    normalized.includes("approval required (id ")
-    || normalized.includes("reply with: /approve")
-    || (normalized.includes("i need your approval to") && normalized.includes("/approve"))
-  );
+const MAX_TOASTS = 4;
+
+const appendToast = (
+  toasts: ToastNotice[],
+  tone: ToastNotice["tone"],
+  title: string,
+  message?: string,
+): ToastNotice[] => {
+  const normalizedTitle = title.trim();
+  const normalizedMessage = normalizeTextContent(message || "");
+  const latest = toasts[toasts.length - 1];
+
+  if (
+    latest
+    && latest.tone === tone
+    && latest.title === normalizedTitle
+    && (latest.message || "") === normalizedMessage
+    && now() - latest.createdAt < 3_500
+  ) {
+    return toasts;
+  }
+
+  return [
+    ...toasts,
+    createToast(tone, normalizedTitle, normalizedMessage || undefined),
+  ].slice(-MAX_TOASTS);
 };
 
-const looksLikeRawToolResultJson = (content: string): boolean => {
-  const trimmed = unwrapCodeFence(content);
-  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+const shouldPromoteTaskCompletionToast = (task: AuraTask | null | undefined): boolean => {
+  if (!task) {
     return false;
   }
 
-  try {
-    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-    const looksLikeStructuredToolPayload =
-      "launched" in parsed
-      || "typed" in parsed
-      || "waitedMs" in parsed
-      || "windowReady" in parsed
-      || "windowTitle" in parsed
-      || "direction" in parsed
-      || "key" in parsed
-      || ("results" in parsed && ("provider" in parsed || "mode" in parsed))
-      || ("provider" in parsed && "mode" in parsed)
-      || ("model" in parsed && "stopReason" in parsed)
-      || ("truncated" in parsed && "contentTruncated" in parsed && "bytes" in parsed);
-
-    if (parsed.ok === true) {
-      return looksLikeStructuredToolPayload || "ok" in parsed;
-    }
-
-    return looksLikeStructuredToolPayload;
-  } catch {
-    return false;
+  if (task.surface === "browser" || task.surface === "desktop") {
+    return true;
   }
+
+  if (task.executionMode === "local_browser" || task.executionMode === "local_desktop") {
+    return true;
+  }
+
+  return task.steps.some((step) => step.tool !== "read");
 };
 
-const looksLikeRawToolResultFragment = (content: string): boolean => {
-  const trimmed = unwrapCodeFence(content).trim();
-  if (!trimmed) {
-    return false;
+const toUserFriendlyError = (message: string): string => {
+  const normalized = normalizeTextContent(message);
+  if (!normalized) {
+    return "Something went wrong. Please try again.";
   }
-  return (
-    (trimmed.includes('"continueRequired"') && trimmed.includes('"taskComplete"'))
-    || (trimmed.includes('"windowTitle"') && trimmed.includes('"activeWindow"'))
-    || (trimmed.includes('"launched"') && trimmed.includes('"target"'))
-    || (/^"windowTitle":/m.test(trimmed) && /"nextStepHint":/m.test(trimmed))
-    || (trimmed.includes('"provider"') && trimmed.includes('"model"') && trimmed.includes('"stopReason"'))
-    || (trimmed.includes('"truncated"') && trimmed.includes('"contentTruncated"') && trimmed.includes('"bytes"'))
-    || (trimmed.includes('"results"') && trimmed.includes('"citations"') && trimmed.includes('"mode"'))
-  );
+
+  if (/deepgram|transcription|speech recognition/i.test(normalized)) {
+    return "Voice services had trouble responding. Check your microphone and Deepgram setup, then try again.";
+  }
+
+  if (/api key|auth|unauthorized|forbidden/i.test(normalized)) {
+    return "Aura could not authenticate that request. Please check the configured keys or sign in again.";
+  }
+
+  if (/timeout|timed out/i.test(normalized)) {
+    return "Aura took too long to finish that request. Please try again.";
+  }
+
+  if (/gateway|runtime unavailable|not connected|local runtime/i.test(normalized)) {
+    return "Aura could not reach the local runtime. Give it a moment, then try again.";
+  }
+
+  if (/network|fetch|socket|websocket/i.test(normalized)) {
+    return "Aura lost connection while handling that request. Please retry in a moment.";
+  }
+
+  return normalized;
 };
 
-const looksLikeInternalOpenClawNoise = (content: string): boolean => {
-  const trimmed = unwrapCodeFence(content).trim();
-  if (!trimmed) {
-    return false;
+const toUserFriendlyTaskError = (payload: TaskErrorPayload): string => {
+  if (payload.code === "TASK_CANCELLED") {
+    return "The task was cancelled before it could finish.";
   }
-  return (
-    /HEARTBEAT\.md Template/i.test(trimmed)
-    || /Keep this file empty/i.test(trimmed)
-    || /Add tasks below when you want the agent to check something periodically/i.test(trimmed)
-    || /HEARTBEAT_OK/i.test(trimmed)
-    || /I've checked the recent session history and my memory/i.test(trimmed)
-  );
+
+  if (payload.code === "PERMISSION_DENIED") {
+    return "Aura was blocked by a permission or confirmation requirement.";
+  }
+
+  if (payload.code === "TIMEOUT") {
+    return "The task took too long to finish. Try again or simplify the request.";
+  }
+
+  if (payload.code === "AI_UNAVAILABLE") {
+    return "Aura's reasoning service was unavailable for that task. Please try again.";
+  }
+
+  return toUserFriendlyError(payload.message);
 };
 
-const getTaskErrorTitle = (code: TaskErrorPayload["code"]): string => {
-  switch (code) {
-    case "PAIRING_REQUIRED":
-      return "Pairing required";
-    case "RATE_LIMIT":
-      return "Rate limit reached";
-    case "BROWSER_UNAVAILABLE":
-      return "Browser unavailable";
-    case "TIMEOUT":
-      return "Request timed out";
-    case "AI_UNAVAILABLE":
-      return "Runtime unavailable";
-    case "PERMISSION_DENIED":
-      return "Permission needed";
-    case "TASK_CANCELLED":
-      return "Request cancelled";
-    default:
-      return "Task failed";
-  }
-};
-
-const isTerminalRunStatus = (status: OpenClawRun["status"]): boolean =>
+const isTerminalStatus = (status: TaskStatus | undefined): boolean =>
   status === "done" || status === "error" || status === "cancelled";
 
-const mergeRun = (current: OpenClawRun | null, incoming: OpenClawRun): OpenClawRun => {
-  if (!current) return incoming;
-  const sameRun =
-    current.id === incoming.id
-    || current.taskId === incoming.taskId
-    || (Boolean(current.runId) && current.runId === incoming.runId)
-    || current.messageId === incoming.messageId;
+const upsertAssistantMessage = (
+  messages: ChatThreadMessage[],
+  payload: { messageId: string; content: string; status: ChatThreadMessage["status"] },
+): ChatThreadMessage[] => {
+  const normalized = normalizeTextContent(payload.content);
+  if (!normalized) return messages;
 
-  if (!sameRun) {
-    return incoming;
-  }
-
-  return {
-    ...current,
-    ...incoming,
-    toolCount: Math.max(current.toolCount, incoming.toolCount),
-    lastTool: incoming.lastTool ?? current.lastTool,
-    summary: incoming.summary ?? current.summary,
-    error: incoming.error ?? current.error,
-  };
-};
-
-const runMatches = (left: OpenClawRun, right: OpenClawRun): boolean =>
-  left.id === right.id
-  || left.taskId === right.taskId
-  || left.messageId === right.messageId
-  || (Boolean(left.runId) && left.runId === right.runId);
-
-const upsertRecentRuns = (runs: OpenClawRun[], incoming: OpenClawRun): OpenClawRun[] => {
-  const filtered = runs.filter((entry) => !runMatches(entry, incoming));
-  return [incoming, ...filtered].slice(0, 30);
-};
-
-const getRunEventKey = (value: { runId?: string; taskId?: string; messageId?: string; id?: string }): string | null =>
-  value.runId ?? value.taskId ?? value.messageId ?? value.id ?? null;
-
-const upsertRunEvent = (events: ToolUsePayload[], incoming: ToolUsePayload): ToolUsePayload[] => {
-  const next = [...events];
-  const existingIndex = incoming.toolUseId ? next.findIndex((entry) => entry.toolUseId === incoming.toolUseId) : -1;
+  const next = [...messages];
+  const existingIndex = next.findIndex((entry) => entry.id === payload.messageId);
   if (existingIndex >= 0) {
     next[existingIndex] = {
-      ...next[existingIndex],
-      ...incoming,
-      output: incoming.output ?? next[existingIndex]?.output,
+      ...next[existingIndex]!,
+      role: "assistant",
+      content: normalized,
+      status: payload.status,
     };
-  } else {
-    next.push(incoming);
+    return next;
   }
-  return next.slice(-12);
+
+  const last = next[next.length - 1];
+  if (last?.role === "assistant" && last.content === normalized && last.status === payload.status) {
+    return next;
+  }
+
+  next.push({
+    id: payload.messageId,
+    role: "assistant",
+    content: normalized,
+    status: payload.status,
+  });
+  return next;
 };
 
 const mapContextActionToPrompt = (payload: ContextMenuActionPayload): string => {
@@ -376,6 +252,11 @@ const mapContextActionToPrompt = (payload: ContextMenuActionPayload): string => 
     default:
       return payload.text;
   }
+};
+
+const syncPersistedState = async (set: (partial: Partial<AuraState>) => void): Promise<void> => {
+  const nextState = (await window.auraDesktop.storage.get()) as AuraStorageShape;
+  applyStorageState(set, nextState);
 };
 
 type AuraState = {
@@ -407,31 +288,22 @@ type AuraState = {
   currentSessionId: string | null;
   messages: ChatThreadMessage[];
   history: HistoryEntry[];
-  activeRun: OpenClawRun | null;
-  recentRuns: OpenClawRun[];
-  recentRunEvents: Record<string, ToolUsePayload[]>;
+  activeTask: AuraTask | null;
   pendingConfirmation: ConfirmActionPayload | null;
   lastError: TaskErrorPayload | null;
   inputValue: string;
-  activeImage: string | null;
   isLoading: boolean;
-  automationJobs: AutomationJob[];
   monitors: PageMonitor[];
+  scheduledTasks: ScheduledTask[];
   macros: AuraMacro[];
   skills: SkillSummary[];
-  usedSkillIds: string[];
+  gatewayStatus: GatewayStatus;
   toasts: ToastNotice[];
-  actionFeed: ToolUsePayload[];
-  sendTimestamp: number | null;
-  lastTtft: number | null;
   hydrate: () => Promise<void>;
   handleAppEvent: (message: ExtensionMessage<unknown>) => void;
+  pushToast: (tone: ToastNotice["tone"], title: string, message?: string) => void;
   dismissToast: (id: string) => void;
-  clearLastError: () => void;
-  clearActionFeed: () => void;
-  refreshCronJobs: () => Promise<void>;
   setInputValue: (value: string) => void;
-  setActiveImage: (image: string | null) => void;
   setRoute: (route: AppRoute) => Promise<void>;
   setOverlayVisible: (value: boolean) => Promise<void>;
   setOverlayTab: (tab: OverlayTab) => void;
@@ -443,18 +315,19 @@ type AuraState = {
   saveSettings: (value: AuraSettings) => Promise<void>;
   savePermissions: (value: PermissionState[]) => Promise<void>;
   saveMonitors: (value: PageMonitor[]) => Promise<void>;
-  saveAutomationJobs: (value: AutomationJob[]) => Promise<void>;
-  startAutomationJob: (job: AutomationJob) => Promise<void>;
-  stopAutomationJob: (id: string) => Promise<void>;
-  deleteAutomationJob: (id: string) => Promise<void>;
-  runAutomationJobNow: (id: string) => Promise<void>;
   startMonitor: (monitor: PageMonitor) => Promise<void>;
   stopMonitor: (id: string) => Promise<void>;
+  runMonitorNow: (id: string) => Promise<void>;
+  createScheduledTask: (task: ScheduledTask) => Promise<void>;
+  deleteScheduledTask: (id: string) => Promise<void>;
+  runScheduledTaskNow: (id: string) => Promise<void>;
   deleteMonitor: (id: string) => Promise<void>;
   saveMacros: (value: AuraMacro[]) => Promise<void>;
-  sendMessage: (source: ChatSendRequest["source"], override?: string) => Promise<void>;
+  signOutUser: () => Promise<void>;
+  sendMessage: (source: ChatSendRequest["source"], override?: string) => Promise<ChatSendResult | null>;
   stopMessage: () => Promise<void>;
-  confirmChatAction: (requestId: string, decision: ApprovalDecision) => Promise<void>;
+  taskConfirmResponse: (requestId: string, confirmed: boolean) => Promise<void>;
+  cancelTask: (taskId: string) => Promise<void>;
   startNewSession: () => Promise<void>;
   loadSession: (sessionId: string) => Promise<void>;
   browserNewTab: (url?: string) => Promise<void>;
@@ -468,9 +341,12 @@ type AuraState = {
   refreshPageContext: () => Promise<void>;
   captureScreenshot: () => Promise<string | null>;
   loadSkills: () => Promise<void>;
+  loadGatewayStatus: () => Promise<void>;
 };
 
 const applyStorageState = (set: (partial: Partial<AuraState>) => void, storage: AuraStorageShape): void => {
+  const sessions = mergeSessions(storage);
+  const currentSession = storage.currentSession ?? sessions[0] ?? null;
   set({
     authState: storage.authState,
     onboarded: storage.onboarded,
@@ -485,8 +361,15 @@ const applyStorageState = (set: (partial: Partial<AuraState>) => void, storage: 
     overlaySize: storage.overlaySize,
     bubblePosition: storage.bubblePosition,
     bubbleTooltipSeen: storage.bubbleTooltipSeen,
-    currentSessionId: storage.currentSessionKey ?? null,
-    history: storage.history,
+    sessions,
+    currentSessionId: currentSession?.id ?? null,
+    messages: currentSession ? mapSessionMessages(currentSession.messages) : [],
+    history: storage.history.map((entry) => ({
+      ...entry,
+      result: normalizeTextContent(entry.result)
+    })),
+    monitors: storage.monitors,
+    scheduledTasks: storage.scheduledTasks,
     macros: storage.macros
   });
 };
@@ -495,11 +378,11 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   isHydrating: true,
   hydrated: false,
   authState: { authenticated: false },
-  onboarded: false,
-  consentAccepted: false,
-  profileComplete: false,
+  onboarded: true,
+  consentAccepted: true,
+  profileComplete: true,
   profile: {
-    fullName: "",
+    fullName: "Aura User",
     email: "",
     phone: "",
     addressLine1: "",
@@ -510,7 +393,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   },
   settings: {
     theme: "dark",
-    voiceEnabled: false,
+    voiceEnabled: true,
     modelPreset: "managed",
     advancedMode: false,
     privacyMode: "standard",
@@ -539,50 +422,30 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   currentSessionId: null,
   messages: [],
   history: [],
-  activeRun: null,
-  recentRuns: [],
-  recentRunEvents: {},
+  activeTask: null,
   pendingConfirmation: null,
   lastError: null,
   inputValue: "",
-  activeImage: null,
   isLoading: false,
-  automationJobs: [],
   monitors: [],
+  scheduledTasks: [],
   macros: [],
   skills: [],
-  usedSkillIds: [],
+  gatewayStatus: { connected: false, port: 0, processRunning: false },
   toasts: [],
-  actionFeed: [],
-  sendTimestamp: null,
-  lastTtft: null,
-  clearActionFeed: () => set({ actionFeed: [] }),
-  setActiveImage: (image) => set({ activeImage: image }),
-
-  refreshCronJobs: async () => {
-    try {
-      const automationJobs = await window.auraDesktop.automation.list();
-      set({ automationJobs, monitors: automationJobs });
-    } catch {
-      // Gateway may not be ready yet — ignore silently
-    }
-  },
 
   hydrate: async () => {
     set({ isHydrating: true });
-    const storage = await window.auraDesktop.storage.get() as AuraStorageShape;
-    const preferredSessionId = storage.currentSessionKey ?? null;
-    const [authState, runtimeStatus, browserTabs, skills, automationJobs, remoteSessions] = await Promise.all([
+    const [storage, authState, runtimeStatus, browserTabs, skills] = await Promise.all([
+      window.auraDesktop.storage.get(),
       window.auraDesktop.auth.getState(),
       window.auraDesktop.runtime.getStatus(),
       window.auraDesktop.browser.getTabs(),
-      window.auraDesktop.skills.list(),
-      window.auraDesktop.automation.list(),
-      buildRemoteSessionState(preferredSessionId),
+      window.auraDesktop.skills.list()
     ]);
 
     applyStorageState(set, {
-      ...storage,
+      ...(storage as AuraStorageShape),
       authState
     });
 
@@ -590,9 +453,14 @@ export const useAuraStore = create<AuraState>((set, get) => ({
     // BOOTSTRAP_STATUS events were emitted before the event listener was registered.
     const derivedBootstrap: BootstrapState =
       runtimeStatus.phase === "ready"
-        ? { stage: "ready", progress: 100, message: "Managed OpenClaw runtime is online." }
+        ? { stage: "ready", progress: 100, message: runtimeStatus.message }
         : runtimeStatus.phase === "error"
-          ? { stage: "error", progress: 100, message: runtimeStatus.error ?? "Gateway error." }
+          ? {
+              stage: "error",
+              progress: 100,
+              message: runtimeStatus.message,
+              detail: runtimeStatus.error
+            }
           : get().bootstrapState;
 
     set({
@@ -601,15 +469,15 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       browserTabs: browserTabs.tabs,
       activeBrowserTabId: browserTabs.activeTabId,
       omniboxValue: browserTabs.tabs.find((tab) => tab.id === browserTabs.activeTabId)?.url ?? "",
-      sessions: remoteSessions.sessions,
-      currentSessionId: remoteSessions.currentSessionId,
-      messages: remoteSessions.messages,
-      automationJobs,
-      monitors: automationJobs,
       skills,
       isHydrating: false,
       hydrated: true
     });
+
+    // Fetch gateway status non-blockingly since gateway may still be starting
+    window.auraDesktop.gateway.getStatus()
+      .then((gatewayStatus) => set({ gatewayStatus }))
+      .catch(() => { /* gateway not ready yet */ });
   },
 
   handleAppEvent: (message) => {
@@ -618,142 +486,114 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       const messages = [...get().messages];
       const existingIndex = messages.findIndex((entry) => entry.id === payload.messageId);
 
-      const ttftUpdate: Partial<AuraState> = {};
-      const nextTokenContent = sanitizeTranscriptText(payload.token, "assistant");
       if (existingIndex === -1) {
-        // First token for this message — measure TTFT
-        const sendTs = get().sendTimestamp;
-        if (sendTs) {
-          const ttft = now() - sendTs;
-          ttftUpdate.lastTtft = ttft;
-          ttftUpdate.sendTimestamp = null;
-          console.log(`[Aura] TTFT: ${ttft}ms`);
-        }
-        if (nextTokenContent) {
-          messages.push({
-            id: payload.messageId,
-            role: "assistant",
-            content: nextTokenContent,
-            status: "streaming"
-          });
-        }
+        messages.push({
+          id: payload.messageId,
+          role: "assistant",
+          content: payload.token,
+          status: "streaming"
+        });
       } else {
         const current = messages[existingIndex]!;
-        const nextContent = sanitizeTranscriptText(`${current.content}${payload.token}`, "assistant");
-        if (nextContent) {
-          messages[existingIndex] = {
-            ...current,
-            content: nextContent,
-            status: "streaming"
-          };
-        } else {
-          messages.splice(existingIndex, 1);
-        }
+        messages[existingIndex] = {
+          ...current,
+          content: `${current.content}${payload.token}`,
+          status: "streaming"
+        };
       }
 
-      set({ messages, ...ttftUpdate });
+      set({ messages });
       return;
     }
 
     if (message.type === "LLM_DONE") {
       const payload = message.payload as { messageId: string; cleanText?: string; fullText: string };
-      const finalText = payload.cleanText || payload.fullText || "";
-      const displayText = sanitizeTranscriptText(finalText, "assistant");
+      const finalText = normalizeTextContent(payload.cleanText || payload.fullText || "");
       const messages = [...get().messages];
       const existingIndex = messages.findIndex((entry) => entry.id === payload.messageId);
-      const sendTs = get().sendTimestamp;
-      const ttftUpdate: Partial<AuraState> = {};
-
-      if (sendTs) {
-        const ttft = now() - sendTs;
-        ttftUpdate.lastTtft = ttft;
-        ttftUpdate.sendTimestamp = null;
-        console.log(`[Aura] TTFT: ${ttft}ms`);
-      }
 
       if (existingIndex >= 0) {
-        const current = messages[existingIndex]!;
-        const sanitizedExisting = sanitizeTranscriptText(current.content, "assistant");
-        if (!displayText && !sanitizedExisting) {
-          messages.splice(existingIndex, 1);
-        } else {
-          messages[existingIndex] = {
-            ...current,
-            content: displayText || sanitizedExisting || current.content,
-            status: "done"
-          };
-        }
-      } else if (displayText) {
+        messages[existingIndex] = {
+          ...messages[existingIndex]!,
+          content: finalText || messages[existingIndex]!.content,
+          status: "done"
+        };
+      } else if (finalText) {
         messages.push({
           id: payload.messageId,
           role: "assistant",
-          content: displayText,
+          content: finalText,
           status: "done"
         });
       }
 
-      set({ messages, isLoading: false, ...ttftUpdate });
-      void buildRemoteSessionState(get().currentSessionId).then((remoteSessionState) => {
-        set(remoteSessionState);
-      });
-      return;
-    }
-
-    if (message.type === "RUN_STATUS") {
-      const payload = message.payload as { run: OpenClawRun };
-      const nextRun = mergeRun(get().activeRun, payload.run);
-      const runKey = getRunEventKey(nextRun);
-      set({
-        activeRun: isTerminalRunStatus(nextRun.status) ? null : nextRun,
-        recentRuns: isTerminalRunStatus(nextRun.status) ? upsertRecentRuns(get().recentRuns, nextRun) : get().recentRuns,
-        recentRunEvents: runKey && !get().recentRunEvents[runKey]
-          ? { ...get().recentRunEvents, [runKey]: [] }
-          : get().recentRunEvents,
-        isLoading: !isTerminalRunStatus(nextRun.status),
-      });
+      set((state) => ({
+        messages,
+        isLoading: false,
+        toasts: finalText && state.activeTask?.status === "done" && shouldPromoteTaskCompletionToast(state.activeTask)
+          ? appendToast(state.toasts, "success", "Task complete", finalText.slice(0, 140))
+          : state.toasts,
+      }));
+      void syncPersistedState(set);
       return;
     }
 
     if (message.type === "CONFIRM_ACTION") {
       const payload = message.payload as ConfirmActionPayload;
-      const nextMessages = [...get().messages];
-      const lastMessage = nextMessages[nextMessages.length - 1];
-      if (lastMessage?.role === "assistant" && looksLikeApprovalTranscript(lastMessage.content)) {
-        nextMessages.pop();
-      }
-      set({ pendingConfirmation: payload, messages: nextMessages });
+      set({ pendingConfirmation: payload });
       return;
     }
 
-    if (message.type === "CONFIRM_ACTION_RESOLVED") {
-      const payload = message.payload as ConfirmActionResolvedPayload;
-      if (get().pendingConfirmation?.requestId === payload.requestId) {
-        set({ pendingConfirmation: null });
+    if (message.type === "TASK_PROGRESS") {
+      const payload = message.payload as TaskProgressPayload;
+      const previousTask = get().activeTask;
+      const updates: Partial<AuraState> = {
+        activeTask: payload.task,
+        isLoading: !isTerminalStatus(payload.task.status),
+      };
+
+      // Clear pending confirmation when task completes/errors/cancels
+      const status = payload.task.status;
+      if (status === "done" || status === "error" || status === "cancelled") {
+        updates.pendingConfirmation = null;
       }
+
+      set((state) => ({
+        ...updates,
+        toasts:
+          payload.task.status === "done" && previousTask?.status !== "done" && shouldPromoteTaskCompletionToast(payload.task)
+            ? appendToast(state.toasts, "success", "Task complete", payload.event.statusText || "Aura finished the task.")
+            : payload.task.status === "cancelled" && previousTask?.status !== "cancelled"
+              ? appendToast(state.toasts, "warning", "Task cancelled", payload.task.error || "Aura stopped the task before it finished.")
+              : state.toasts,
+      }));
       return;
     }
 
     if (message.type === "TASK_ERROR") {
       const payload = message.payload as TaskErrorPayload;
+      const normalizedMessage = normalizeTextContent(payload.message);
+      const friendlyMessage = toUserFriendlyTaskError(payload);
       const nextMessages = [...get().messages];
       if (!nextMessages.length || nextMessages[nextMessages.length - 1]!.role !== "assistant") {
         nextMessages.push({
           id: crypto.randomUUID(),
           role: "assistant",
-          content: payload.message,
+          content: normalizedMessage,
           status: "error"
         });
       }
       set((state) => ({
         isLoading: false,
-        activeRun: null,
-        lastError: payload,
+        activeTask: null,
+        lastError: {
+          ...payload,
+          message: normalizedMessage
+        },
         messages: nextMessages,
-        toasts: [...state.toasts, createToast("error", getTaskErrorTitle(payload.code), payload.message)]
+        toasts: appendToast(state.toasts, "error", "Task failed", friendlyMessage)
       }));
-      void buildRemoteSessionState(get().currentSessionId).then((remoteSessionState) => {
-        set(remoteSessionState);
-      });
+      void syncPersistedState(set);
       return;
     }
 
@@ -773,6 +613,11 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       return;
     }
 
+    if (message.type === "STORAGE_SYNC") {
+      void get().hydrate();
+      return;
+    }
+
     if (message.type === "CONTEXT_MENU_ACTION") {
       const payload = message.payload as ContextMenuActionPayload;
       set((state) => ({
@@ -780,7 +625,7 @@ export const useAuraStore = create<AuraState>((set, get) => ({
         overlayVisible: true,
         overlayTab: "chat",
         inputValue: mapContextActionToPrompt(payload),
-        toasts: [...state.toasts, createToast("info", "Selection sent to Aura")]
+        toasts: state.toasts,
       }));
       void window.auraDesktop.storage.set({
         activeRoute: "browser",
@@ -790,12 +635,32 @@ export const useAuraStore = create<AuraState>((set, get) => ({
     }
 
     if (message.type === "RUNTIME_STATUS") {
-      set({ runtimeStatus: (message.payload as { status: RuntimeStatus }).status });
+      const status = (message.payload as { status: RuntimeStatus }).status;
+      const previousStatus = get().runtimeStatus;
+      set((state) => ({
+        runtimeStatus: status,
+        toasts:
+          status.phase === "error" && previousStatus.phase !== "error"
+            ? appendToast(state.toasts, "error", "Aura runtime issue", toUserFriendlyError(status.error || status.message))
+            : state.toasts,
+      }));
+      // Also refresh gateway status when runtime changes phase
+      if (status.phase === "ready" || status.phase === "error") {
+        window.auraDesktop.gateway.getStatus()
+          .then((gatewayStatus) => set({ gatewayStatus }))
+          .catch(() => { /* gateway not ready */ });
+      }
       return;
     }
 
     if (message.type === "BOOTSTRAP_STATUS") {
-      set({ bootstrapState: (message.payload as { bootstrap: BootstrapState }).bootstrap });
+      const bootstrap = (message.payload as { bootstrap: BootstrapState }).bootstrap;
+      set((state) => ({
+        bootstrapState: bootstrap,
+        toasts: bootstrap.stage === "error"
+          ? appendToast(state.toasts, "error", "Aura could not start", toUserFriendlyError(bootstrap.detail || bootstrap.message))
+          : state.toasts,
+      }));
       return;
     }
 
@@ -804,101 +669,45 @@ export const useAuraStore = create<AuraState>((set, get) => ({
       const monitors = get().monitors.map((m) =>
         m.id === payload.monitor.id ? payload.monitor : m
       );
-      const automationJobs = get().automationJobs.map((job) =>
-        job.id === payload.monitor.id ? payload.monitor : job
-      );
-      set({ monitors, automationJobs });
-      void window.auraDesktop.storage.set({ monitors, automationJobs });
+      set((state) => ({
+        monitors,
+        toasts: appendToast(
+          state.toasts,
+          "info",
+          "Monitor triggered",
+          `${payload.monitor.title} matched its condition.`
+        ),
+      }));
+      void window.auraDesktop.storage.set({ monitors });
       return;
     }
 
-    if (message.type === "AUTOMATION_JOB_UPDATED") {
-      const payload = message.payload as AutomationJobUpdatedPayload;
-      const automationJobs = get().automationJobs.map((job) =>
-        job.id === payload.job.id ? payload.job : job
-      );
-      const monitors = get().monitors.map((job) =>
-        job.id === payload.job.id ? payload.job : job
-      );
-      set({ automationJobs, monitors });
-      void window.auraDesktop.storage.set({ automationJobs, monitors });
+    if (message.type === "MONITORS_UPDATED") {
+      const payload = message.payload as { monitors: PageMonitor[] };
+      set({ monitors: payload.monitors });
       return;
     }
 
-    if (message.type === "TOOL_USE") {
-      const payload = message.payload as ToolUsePayload;
-      let feed = [...get().actionFeed];
-      
-      const existing = payload.toolUseId ? feed.findIndex((f) => f.toolUseId === payload.toolUseId) : -1;
-      if (existing !== -1) {
-        feed[existing] = { ...feed[existing], ...payload, status: payload.status, output: payload.output ?? feed[existing].output };
-      } else {
-        feed.push(payload);
-      }
-      
-      // Keep feed to max 50 entries
-      const trimmed = feed.length > 50 ? feed.slice(feed.length - 50) : feed;
-      const updates: Partial<AuraState> = { actionFeed: trimmed };
-
-      const activeRun = get().activeRun;
-      if (activeRun && (
-        (payload.runId && payload.runId === activeRun.runId)
-        || (payload.taskId && payload.taskId === activeRun.taskId)
-        || (payload.messageId && payload.messageId === activeRun.messageId)
-      )) {
-        updates.activeRun = {
-          ...activeRun,
-          runId: payload.runId ?? activeRun.runId,
-          surface: payload.surface ?? activeRun.surface,
-          updatedAt: now(),
-          toolCount: activeRun.toolCount + (payload.status === "running" ? 1 : 0),
-          lastTool: `${payload.tool}:${payload.action}`,
-        };
-      }
-
-      const runKey = getRunEventKey(payload);
-      if (runKey) {
-        updates.recentRunEvents = {
-          ...get().recentRunEvents,
-          [runKey]: upsertRunEvent(get().recentRunEvents[runKey] ?? [], payload),
-        };
-      }
-
-      // Track which skills were invoked: match the tool name against the skill catalog
-      const currentSkills = get().skills;
-      const matchedSkill = currentSkills.find(
-        (s) => s.id === payload.tool || s.name.toLowerCase() === payload.tool.toLowerCase()
-      );
-      if (matchedSkill) {
-        const current = get().usedSkillIds;
-        if (!current.includes(matchedSkill.id)) {
-          updates.usedSkillIds = [matchedSkill.id, ...current].slice(0, 20);
-        }
-      }
-
-      // Auto-navigate browser when OpenClaw uses the browser tool
-      if (payload.tool === "browser" && payload.action === "navigate" && typeof payload.params?.url === "string") {
-        void get().browserNavigate(payload.params.url as string);
-        updates.route = "browser";
-      }
-
-      set(updates);
-
-      // Refresh canonical cron data when a cron tool event completes
-      if (payload.tool === "cron" && payload.status === "done") {
-        void get().refreshCronJobs();
-      }
-
+    if (message.type === "GATEWAY_STATUS_CHANGED") {
+      const payload = message.payload as { gateway: GatewayStatus };
+      set({ gatewayStatus: payload.gateway });
       return;
     }
+
+    if (message.type === "SCHEDULED_TASKS_UPDATED") {
+      const payload = message.payload as { tasks: ScheduledTask[] };
+      set({ scheduledTasks: payload.tasks });
+    }
+  },
+
+  pushToast: (tone, title, message) => {
+    set((state) => ({
+      toasts: appendToast(state.toasts, tone, title, message),
+    }));
   },
 
   dismissToast: (id) => {
     set({ toasts: get().toasts.filter((toast) => toast.id !== id) });
-  },
-
-  clearLastError: () => {
-    set({ lastError: null });
   },
 
   setInputValue: (value) => set({ inputValue: value }),
@@ -950,47 +759,69 @@ export const useAuraStore = create<AuraState>((set, get) => ({
   },
 
   saveMonitors: async (value) => {
-    set({ monitors: value, automationJobs: value });
-  },
-
-  saveAutomationJobs: async (value) => {
-    set({ automationJobs: value, monitors: value });
-  },
-
-  startAutomationJob: async (job) => {
-    await window.auraDesktop.automation.start(job);
-    const automationJobs = await window.auraDesktop.automation.list();
-    set({ automationJobs, monitors: automationJobs });
-  },
-
-  stopAutomationJob: async (id) => {
-    await window.auraDesktop.automation.stop({ id });
-    const automationJobs = await window.auraDesktop.automation.list();
-    set({ automationJobs, monitors: automationJobs });
-  },
-
-  deleteAutomationJob: async (id) => {
-    await window.auraDesktop.automation.delete({ id });
-    const automationJobs = await window.auraDesktop.automation.list();
-    set({ automationJobs, monitors: automationJobs });
-  },
-
-  runAutomationJobNow: async (id) => {
-    await window.auraDesktop.automation.runNow({ id });
-    const automationJobs = await window.auraDesktop.automation.list();
-    set({ automationJobs, monitors: automationJobs });
+    const nextState = await window.auraDesktop.storage.set({ monitors: value });
+    applyStorageState(set, nextState);
   },
 
   startMonitor: async (monitor) => {
-    await get().startAutomationJob(monitor);
+    if (!get().authState.authenticated) {
+      set((state) => ({
+        toasts: appendToast(state.toasts, "warning", "Sign in required", "Sign in to continue using Aura automation.")
+      }));
+      await window.auraDesktop.app.showMainWindow().catch(() => null);
+      return;
+    }
+
+    // Persist active status first
+    const monitors = get().monitors.map((m) =>
+      m.id === monitor.id ? { ...m, status: "active" as const } : m
+    );
+    const nextState = await window.auraDesktop.storage.set({ monitors });
+    applyStorageState(set, nextState);
+    await window.auraDesktop.monitor.start(monitor);
   },
 
   stopMonitor: async (id) => {
-    await get().stopAutomationJob(id);
+    const monitors = get().monitors.map((m) =>
+      m.id === id ? { ...m, status: "paused" as const } : m
+    );
+    const nextState = await window.auraDesktop.storage.set({ monitors });
+    applyStorageState(set, nextState);
+    await window.auraDesktop.monitor.stop({ id });
+  },
+
+  runMonitorNow: async (id) => {
+    const monitors = await window.auraDesktop.monitor.runNow({ id });
+    set({ monitors });
+  },
+
+  createScheduledTask: async (task) => {
+    if (!get().authState.authenticated) {
+      set((state) => ({
+        toasts: appendToast(state.toasts, "warning", "Sign in required", "Sign in to continue using Aura automation.")
+      }));
+      await window.auraDesktop.app.showMainWindow().catch(() => null);
+      return;
+    }
+
+    const scheduledTasks = await window.auraDesktop.scheduler.create(task);
+    set({ scheduledTasks });
+  },
+
+  deleteScheduledTask: async (id) => {
+    const scheduledTasks = await window.auraDesktop.scheduler.delete({ id });
+    set({ scheduledTasks });
+  },
+
+  runScheduledTaskNow: async (id) => {
+    await window.auraDesktop.scheduler.runNow({ id });
   },
 
   deleteMonitor: async (id) => {
-    await get().deleteAutomationJob(id);
+    await window.auraDesktop.monitor.stop({ id });
+    const monitors = get().monitors.filter((m) => m.id !== id);
+    const nextState = await window.auraDesktop.storage.set({ monitors });
+    applyStorageState(set, nextState);
   },
 
   saveMacros: async (value) => {
@@ -998,11 +829,62 @@ export const useAuraStore = create<AuraState>((set, get) => ({
     applyStorageState(set, nextState);
   },
 
+  signOutUser: async () => {
+    const current = get();
+
+    if (current.isLoading) {
+      await window.auraDesktop.chat.stop().catch(() => null);
+    }
+
+    if (current.activeTask && (current.activeTask.status === "planning" || current.activeTask.status === "running")) {
+      await window.auraDesktop.task.cancel({ taskId: current.activeTask.id }).catch(() => null);
+    }
+
+    const authState = await window.auraDesktop.auth.signOut();
+    await window.auraDesktop.storage.set({
+      activeRoute: "home",
+      overlayVisible: false,
+      widgetExpanded: false,
+      currentSession: null,
+      sessionHistory: [],
+      history: []
+    });
+    await window.auraDesktop.app.hideWidgetWindow();
+
+    const nextStorage = (await window.auraDesktop.storage.get()) as AuraStorageShape;
+    applyStorageState(set, nextStorage);
+    set((state) => ({
+      authState,
+      route: "home",
+      overlayVisible: false,
+      currentSessionId: null,
+      messages: [],
+      activeTask: null,
+      pendingConfirmation: null,
+      lastError: null,
+      inputValue: "",
+      isLoading: false,
+      toasts: appendToast(state.toasts, "success", "Signed out", "Aura cleared the account session. Sign in again to continue.")
+    }));
+  },
+
   sendMessage: async (source, override) => {
     const state = get();
+    if (!state.authState.authenticated) {
+      set((current) => ({
+        toasts: appendToast(current.toasts, "warning", "Sign in required", "Sign in to continue using Aura automation.")
+      }));
+      await window.auraDesktop.app.showMainWindow().catch(() => null);
+      return null;
+    }
+
+    if (state.isLoading || (state.activeTask && !isTerminalStatus(state.activeTask.status))) {
+      return null;
+    }
+
     const text = (override ?? state.inputValue).trim();
     if (!text) {
-      return;
+      return null;
     }
 
     const sessionId = state.currentSessionId ?? crypto.randomUUID();
@@ -1036,27 +918,25 @@ export const useAuraStore = create<AuraState>((set, get) => ({
     };
 
     const nextSessions = [nextSession, ...state.sessions.filter((entry) => entry.id !== nextSession.id)];
-    const sentAt = now();
     set({
       currentSessionId: nextSession.id,
       sessions: nextSessions,
       messages: [...state.messages, userMessage],
       inputValue: override ? state.inputValue : "",
-      activeImage: null,
       isLoading: true,
-      sendTimestamp: sentAt,
       lastError: null,
       route: state.route
     });
-
-    await window.auraDesktop.storage.set({ currentSessionKey: nextSession.id });
+    void window.auraDesktop.storage.set({
+      currentSession: nextSession,
+      sessionHistory: nextSessions
+    }).catch(() => null);
 
     try {
-      await window.auraDesktop.chat.send({
+      const result = await window.auraDesktop.chat.send({
         message: text,
         source,
         sessionId: nextSession.id,
-        images: state.activeImage ? [state.activeImage] : undefined,
         history: state.messages
           .filter((entry) => entry.role !== "system")
           .slice(-10)
@@ -1065,11 +945,45 @@ export const useAuraStore = create<AuraState>((set, get) => ({
             content: entry.content
           }))
       });
+      const resultText = normalizeTextContent(result.resultText || "");
+      const errorText = normalizeTextContent(result.errorText || "");
+
+      if (result.status === "done" && resultText) {
+        set((current) => ({
+          isLoading: false,
+          messages: upsertAssistantMessage(current.messages, {
+            messageId: result.messageId,
+            content: resultText,
+            status: "done",
+          }),
+        }));
+        void syncPersistedState(set);
+      } else if ((result.status === "error" || result.status === "cancelled") && errorText) {
+        set((current) => ({
+          isLoading: false,
+          lastError: {
+            code: result.status === "cancelled" ? "TASK_CANCELLED" : "UNKNOWN",
+            message: errorText,
+          },
+          messages: upsertAssistantMessage(current.messages, {
+            messageId: result.messageId,
+            content: errorText,
+            status: "error",
+          }),
+          toasts: result.status === "error"
+            ? appendToast(current.toasts, "error", "Request failed", toUserFriendlyError(errorText))
+            : current.toasts,
+        }));
+        void syncPersistedState(set);
+      } else if (isTerminalStatus(result.status)) {
+        set({ isLoading: false });
+        void syncPersistedState(set);
+      }
+      return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not reach the local runtime.";
       set((current) => ({
         isLoading: false,
-        sendTimestamp: null,
         lastError: {
           code: "UNKNOWN",
           message
@@ -1083,49 +997,64 @@ export const useAuraStore = create<AuraState>((set, get) => ({
             status: "error"
           }
         ],
-        toasts: [...current.toasts, createToast("error", "Runtime unavailable", message)]
+        toasts: appendToast(current.toasts, "error", "Runtime unavailable", toUserFriendlyError(message))
       }));
+      return null;
     }
   },
 
   stopMessage: async () => {
     await window.auraDesktop.chat.stop();
-    set({ isLoading: false, sendTimestamp: null });
+    set((state) => ({
+      isLoading: false,
+      activeTask: state.activeTask && !isTerminalStatus(state.activeTask.status)
+        ? {
+            ...state.activeTask,
+            status: "cancelled",
+            updatedAt: now(),
+            error: "Stopped by user.",
+          }
+        : state.activeTask,
+    }));
   },
 
-  confirmChatAction: async (requestId, decision) => {
+  taskConfirmResponse: async (requestId, confirmed) => {
     set({ pendingConfirmation: null });
-    await window.auraDesktop.chat.confirmAction({ requestId, decision });
+    await window.auraDesktop.task.confirmResponse({ requestId, confirmed });
+  },
+
+  cancelTask: async (taskId) => {
+    set({ pendingConfirmation: null });
+    await window.auraDesktop.task.cancel({ taskId });
   },
 
   startNewSession: async () => {
     set({
       currentSessionId: null,
-      sessions: get().sessions,
       messages: [],
       inputValue: "",
-      activeRun: null,
-      actionFeed: [],
+      activeTask: null,
       lastError: null,
       isLoading: false
     });
-    await window.auraDesktop.storage.set({ currentSessionKey: null });
+    await window.auraDesktop.storage.set({ currentSession: null });
   },
 
   loadSession: async (sessionId) => {
-    const remoteSessionState = await buildRemoteSessionState(sessionId);
+    const session = get().sessions.find((entry) => entry.id === sessionId);
+    if (!session) {
+      return;
+    }
 
     set({
-      sessions: remoteSessionState.sessions,
-      currentSessionId: remoteSessionState.currentSessionId,
-      messages: remoteSessionState.messages,
+      currentSessionId: session.id,
+      messages: mapSessionMessages(session.messages),
       route: "home",
-      activeRun: null,
-      actionFeed: [],
+      activeTask: null,
       lastError: null
     });
 
-    await window.auraDesktop.storage.set({ currentSessionKey: sessionId, activeRoute: "home" });
+    await window.auraDesktop.storage.set({ currentSession: session, activeRoute: "home" });
   },
 
   browserNewTab: async (url = "https://www.google.com") => {
@@ -1203,5 +1132,14 @@ export const useAuraStore = create<AuraState>((set, get) => ({
 
   loadSkills: async () => {
     set({ skills: await window.auraDesktop.skills.list() });
+  },
+
+  loadGatewayStatus: async () => {
+    try {
+      const gatewayStatus = await window.auraDesktop.gateway.getStatus();
+      set({ gatewayStatus });
+    } catch {
+      // Gateway unavailable
+    }
   }
 }));

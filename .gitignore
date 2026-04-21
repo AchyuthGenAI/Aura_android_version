@@ -1,9 +1,39 @@
 node_modules/
 dist/
+build/
+
+# Environment / secrets
 .env
 .env.local
 .env.*.local
+.env.download
+env.download
+*.env.download
+
+# Runtime / cache / logs
+.aura/
+.runlogs/
+test-artifacts/
+.tmp-post-merge-smoke-*
+tmp-*
+*.log
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Electron / build artifacts
+out/
+release/
+*.exe
+*.dmg
+*.blockmap
+
+# inherited from previous .gitignore on remote
 pnpm-lock.yaml
 output.log
 test-home/.openclaw/workspace/
 build/icon2.png
+

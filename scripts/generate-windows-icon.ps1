@@ -16,6 +16,13 @@ $icoOutputPath = Join-Path $outputRoot "icon.ico"
 $sizes = @(16, 24, 32, 48, 64, 128, 256)
 
 if (-not (Test-Path $sourcePath)) {
+  if ((Test-Path $pngOutputPath) -and (Test-Path $icoOutputPath)) {
+    Write-Host "Source image not found; reusing existing icon assets:"
+    Write-Host " - $pngOutputPath"
+    Write-Host " - $icoOutputPath"
+    return
+  }
+
   throw "Source image not found: $sourcePath"
 }
 

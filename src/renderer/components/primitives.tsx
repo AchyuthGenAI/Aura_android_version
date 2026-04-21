@@ -2,12 +2,7 @@ import { useEffect, useMemo, useRef } from "react";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 
-
-const normalizeTextContent = (value: unknown): string => {
-  if (typeof value === "string") return value;
-  if (value && typeof value === "object" && "text" in value) return String((value as { text: unknown }).text);
-  return value ? String(value) : "";
-};
+import { normalizeTextContent } from "@shared/text-content";
 import type { ChatThreadMessage, ThemeMode, ToastNotice } from "@shared/types";
 
 const sizeMap = {
@@ -184,45 +179,47 @@ export const MessageBubble = ({
   const isStreaming = message.status === "streaming";
 
   const html = useMemo(() => {
-    const raw = marked.parse(content || "", { breaks: true }) as string;
-    const sanitized = DOMPurify.sanitize(raw);
     if (isStreaming) {
-      return sanitized + `<span class="ml-1 inline-block h-3.5 w-1 animate-pulse align-baseline bg-[#bca5ff]"></span>`;
+      return "";
     }
-    return sanitized;
+    const raw = marked.parse(content || "", { breaks: true }) as string;
+    return DOMPurify.sanitize(raw);
   }, [content, isStreaming]);
 
   const isUser = message.role === "user";
+  const isError = message.status === "error";
 
   return (
     <div className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={`flex max-w-[86%] gap-3 ${isUser ? "flex-row-reverse" : "flex-row"}`}>
         {!isUser && (
-          <div className="mt-1 flex-shrink-0">
+          <div className="mt-1">
             <AuraLogoBlob size="xs" isTaskRunning={message.status === "streaming"} />
-          </div>
-        )}
-        {isUser && (
-          <div className="mt-1 flex flex-shrink-0 h-[28px] w-[28px] items-center justify-center rounded-full bg-gradient-to-br from-[#7c3aed] to-[#06b6d4] text-white shadow-md ring-1 ring-white/10">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
           </div>
         )}
         <div
           className={[
-            "message-bubble flex flex-col gap-2 msg-enter prose prose-invert max-w-none px-4 py-[10px] text-[14.5px] leading-relaxed shadow-sm",
+            "message-bubble prose prose-invert max-w-none rounded-[22px] px-4 py-3 text-sm leading-6 shadow-sm",
             isUser
-              ? "rounded-[22px] rounded-br-[6px] bg-aura-gradient text-white shadow-[0_4px_16px_rgba(124,58,237,0.15)]"
+              ? "rounded-br-md bg-aura-gradient text-white"
+              : isError
+                ? theme === "light"
+                  ? "rounded-bl-md border border-red-300/60 bg-red-50 text-red-900"
+                  : "rounded-bl-md border border-red-400/25 bg-red-500/10 text-red-100"
               : theme === "light"
-                ? "rounded-[22px] rounded-bl-[6px] border border-black/10 bg-white text-slate-800"
-                : "rounded-[22px] rounded-bl-[6px] border border-white/10 bg-[#1e1c2e] text-aura-text shadow-[0_4px_24px_rgba(0,0,0,0.1)]",
+                ? "rounded-bl-md border border-black/10 bg-white text-slate-800"
+                : "rounded-bl-md border border-white/10 bg-white/6 text-aura-text",
             ""
           ].join(" ")}
         >
-          {message.attachments?.map((attachment, i) => (
-            <img key={i} src={attachment} alt="Attachment" className="max-w-[240px] rounded-xl object-contain shadow-md" />
-          ))}
-          {/* By standardizing dangerouslySetInnerHTML, we can safely style raw HTML regardless of streaming state. */}
-          {html && <div dangerouslySetInnerHTML={{ __html: html }} />}
+          {isStreaming ? (
+            <div className="whitespace-pre-wrap break-words">
+              {content}
+              <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse align-middle bg-aura-violet" />
+            </div>
+          ) : (
+            <div dangerouslySetInnerHTML={{ __html: html }} />
+          )}
         </div>
       </div>
     </div>
@@ -237,23 +234,23 @@ export const PendingMessageBubble = ({
   detail?: string;
 }): JSX.Element => {
   return (
-    <div className="flex w-full justify-start msg-enter">
+    <div className="flex w-full justify-start">
       <div className="flex max-w-[86%] gap-3">
-        <div className="mt-1 flex-shrink-0">
+        <div className="mt-1">
           <AuraLogoBlob size="xs" isTaskRunning />
         </div>
-        <div className="rounded-[22px] rounded-bl-[6px] border border-aura-violet/20 bg-[#1e1c2e] px-4 py-2.5 text-aura-text shadow-[0_4px_24px_rgba(124,58,237,0.08)]">
-          <div className="flex items-center gap-[6px]">
-            <p className="text-[11px] font-bold uppercase tracking-widest text-[#bca5ff]">
+        <div className="rounded-[22px] rounded-bl-md border border-aura-violet/20 bg-white/6 px-4 py-3 text-aura-text shadow-sm">
+          <div className="flex items-center gap-2">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-aura-violet/80">
               {title}
             </p>
-            <div className="flex items-center gap-[3px] mt-[1px]">
-              <span className="h-[4px] w-[4px] rounded-full bg-[#bca5ff] animate-bounce" style={{ animationDelay: "0ms" }} />
-              <span className="h-[4px] w-[4px] rounded-full bg-[#bca5ff] animate-bounce" style={{ animationDelay: "150ms" }} />
-              <span className="h-[4px] w-[4px] rounded-full bg-[#bca5ff] animate-bounce" style={{ animationDelay: "300ms" }} />
+            <div className="flex items-center gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-aura-violet/80 animate-bounce" style={{ animationDelay: "0ms" }} />
+              <span className="h-1.5 w-1.5 rounded-full bg-aura-violet/80 animate-bounce" style={{ animationDelay: "150ms" }} />
+              <span className="h-1.5 w-1.5 rounded-full bg-aura-violet/80 animate-bounce" style={{ animationDelay: "300ms" }} />
             </div>
           </div>
-          {detail && <p className="mt-1 text-[13px] text-aura-muted leading-snug truncate max-w-[200px]">{detail}</p>}
+          {detail && <p className="mt-2 text-xs leading-5 text-aura-muted">{detail}</p>}
           <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/8">
             <div
               className="animate-shimmer h-full rounded-full bg-[linear-gradient(90deg,rgba(124,58,237,0.14),rgba(168,85,247,0.95),rgba(6,182,212,0.2))] bg-[length:200%_100%]"
@@ -305,27 +302,31 @@ export const ToastViewport = ({
   }, [onDismiss, toasts]);
 
   return (
-    <div className="pointer-events-none fixed right-5 top-5 z-[200] flex w-[320px] max-w-[calc(100vw-32px)] flex-col gap-3">
+    <div className="pointer-events-none fixed left-1/2 top-4 z-[200] flex w-[min(420px,calc(100vw-24px))] -translate-x-1/2 flex-col items-center gap-3">
       {toasts.map((toast) => (
         <div
           key={toast.id}
           className={[
-            "pointer-events-auto rounded-2xl border px-4 py-3 shadow-aura-glow backdrop-blur-xl",
+            "pointer-events-auto relative w-full overflow-hidden rounded-[28px] border px-4 py-3 shadow-[0_24px_80px_rgba(0,0,0,0.45)] backdrop-blur-2xl",
             toast.tone === "success"
-              ? "border-emerald-400/20 bg-emerald-500/12"
+              ? "border-emerald-400/25 bg-[#08160f]/88"
               : toast.tone === "warning"
-                ? "border-amber-400/20 bg-amber-500/12"
+                ? "border-amber-400/25 bg-[#191208]/88"
                 : toast.tone === "error"
-                  ? "border-red-400/20 bg-red-500/12"
-                  : "border-white/10 bg-white/8"
+                  ? "border-red-400/25 bg-[#19090b]/88"
+                  : "border-white/10 bg-[#0f1018]/88"
           ].join(" ")}
         >
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-sm font-semibold text-aura-text">{toast.title}</p>
-              {toast.message && <p className="mt-1 text-xs leading-5 text-aura-muted">{toast.message}</p>}
+          <div className="absolute inset-x-0 top-0 h-[2px] bg-sky-300/70" />
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-sky-400/20 bg-sky-400/12 text-sky-100">
+              <span className="text-sm font-semibold">i</span>
             </div>
-            <button className="text-aura-muted transition hover:text-aura-text" onClick={() => onDismiss(toast.id)}>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[13px] font-semibold tracking-[0.01em] text-aura-text">{toast.title}</p>
+              {toast.message && <p className="mt-1 text-[12px] leading-5 text-aura-muted">{toast.message}</p>}
+            </div>
+            <button className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/[0.05] text-aura-muted transition hover:bg-white/[0.09] hover:text-aura-text" onClick={() => onDismiss(toast.id)}>
               ×
             </button>
           </div>

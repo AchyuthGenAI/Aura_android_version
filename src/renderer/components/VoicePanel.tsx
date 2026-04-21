@@ -6,7 +6,7 @@ import { WebSpeechClient } from "@renderer/services/web-speech";
 import { speakStreaming, stopSpeaking } from "@renderer/services/tts";
 import { AuraFace } from "./AuraFace";
 
-import type { TaskErrorPayload, ToolUsePayload } from "@shared/types";
+import type { ChatSendResult, TaskProgressPayload, TaskErrorPayload } from "@shared/types";
 
 type VoiceClient = DeepgramClient | WebSpeechClient;
 type Phase = "idle" | "listening" | "thinking" | "task" | "speaking";
@@ -27,7 +27,7 @@ function MicLevelBars({ stream }: { stream: MediaStream | null }): JSX.Element {
     try {
       const ctx = new AudioContext();
       ctxRef.current = ctx;
-     const analyser = ctx.createAnalyser();
+      const analyser = ctx.createAnalyser();
       analyser.fftSize = 64;
       analyser.smoothingTimeConstant = 0.7;
       const source = ctx.createMediaStreamSource(stream);
@@ -71,7 +71,7 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
   const sendMessage = useAuraStore((s) => s.sendMessage);
   const stopMessage = useAuraStore((s) => s.stopMessage);
   const settings = useAuraStore((s) => s.settings);
-  const handleAppEvent = useAuraStore((s) => s.handleAppEvent);
+  const pushToast = useAuraStore((s) => s.pushToast);
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [caption, setCaption] = useState("");
@@ -79,6 +79,7 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
   const [transcript, setTranscript] = useState("");
   const [taskStatus, setTaskStatus] = useState("");
   const [micStream, setMicStream] = useState<MediaStream | null>(null);
+  const [notice, setNotice] = useState("");
 
   // Refs for stable closures
   const phaseRef = useRef<Phase>("idle");
@@ -89,15 +90,25 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
   const playbackIdRef = useRef(0);
   const abortCtrlRef = useRef<AbortController | null>(null);
   const isActiveRef = useRef(active);
+  const sttErrorBurstRef = useRef({ count: 0, at: 0 });
 
   // Pre-bundled Deepgram key
-  const deepgramKey = (import.meta.env.VITE_DEEPGRAM_API_KEY as string | undefined)
+  const deepgramKey = settings.deepgramKey
+    || (import.meta.env.VITE_DEEPGRAM_API_KEY as string | undefined)
     || undefined;
   const dgKeyRef = useRef(deepgramKey);
   useEffect(() => { dgKeyRef.current = deepgramKey; }, [deepgramKey]);
 
   const transitionPhase = (p: Phase) => { phaseRef.current = p; setPhase(p); };
   useEffect(() => { isActiveRef.current = active; }, [active]);
+
+  const showVoiceToast = useCallback((
+    tone: "info" | "success" | "warning" | "error",
+    title: string,
+    message?: string,
+  ) => {
+    pushToast(tone, title, message);
+  }, [pushToast]);
 
   // ── Stop helpers ────────────────────────────────────────────────────────
 
@@ -116,12 +127,100 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
     return c.stop();
   }, []);
 
+  const scheduleResumeListening = useCallback((delayMs = 800) => {
+    window.setTimeout(() => {
+      if (inVoiceModeRef.current && isActiveRef.current) {
+        void startListeningCycleRef.current();
+      } else {
+        transitionPhase("idle");
+      }
+    }, delayMs);
+  }, []);
+
+  const speakAssistantText = useCallback(async (text: string) => {
+    const normalized = text.trim();
+    if (!normalized) {
+      scheduleResumeListening(500);
+      return;
+    }
+
+    waitingForRef.current = false;
+    const currentId = ++playbackIdRef.current;
+    transitionPhase("speaking");
+    setTaskStatus("");
+    setNotice("");
+
+    const ctrl = new AbortController();
+    abortCtrlRef.current = ctrl;
+
+    try {
+      await speakStreaming(
+        normalized,
+        dgKeyRef.current,
+        (chunk) => {
+          if (playbackIdRef.current === currentId) {
+            setCaption(chunk);
+            setCaptionKey((k) => k + 1);
+          }
+        },
+        ctrl.signal,
+      );
+    } catch {
+      // interrupted
+    }
+
+    abortCtrlRef.current = null;
+    if (playbackIdRef.current !== currentId) return;
+
+    setCaption("");
+    scheduleResumeListening(250);
+  }, [scheduleResumeListening]);
+
+  const handleSendOutcome = useCallback(async (result: ChatSendResult | null) => {
+    if (!result || !waitingForRef.current) return;
+
+    if (result.status === "done" && result.resultText) {
+      await speakAssistantText(result.resultText);
+      return;
+    }
+
+    if (result.status === "error" || result.status === "cancelled") {
+      waitingForRef.current = false;
+      setTaskStatus("");
+      const nextNotice = result.errorText || (result.status === "cancelled" ? "Request cancelled." : "Request failed.");
+      setNotice(nextNotice);
+      showVoiceToast(
+        result.status === "cancelled" ? "warning" : "error",
+        result.status === "cancelled" ? "Voice request cancelled" : "Voice request failed",
+        nextNotice,
+      );
+      scheduleResumeListening(1000);
+    }
+  }, [scheduleResumeListening, showVoiceToast, speakAssistantText]);
+
+  const recordSttError = useCallback((message: string): number => {
+    const timestamp = Date.now();
+    const burst = sttErrorBurstRef.current;
+    if (timestamp - burst.at <= 10_000) {
+      burst.count += 1;
+    } else {
+      burst.count = 1;
+    }
+    burst.at = timestamp;
+    if (/permission|microphone|denied|not found/i.test(message)) {
+      burst.count = 3;
+    }
+    return burst.count;
+  }, []);
+
   // ── Submit voice command ────────────────────────────────────────────────
 
   const submitCommand = useCallback(async (command: string) => {
     if (!command.trim()) {
-      if (inVoiceModeRef.current) void startListeningCycleRef.current();
-      else transitionPhase("idle");
+      const nextNotice = "I didn't catch that. Please try again.";
+      setNotice(nextNotice);
+      showVoiceToast("info", "Voice input needed", nextNotice);
+      scheduleResumeListening(450);
       return;
     }
 
@@ -132,16 +231,16 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
     waitingForRef.current = true;
 
     try {
-      await sendMessage("voice", command);
-    } catch {
+      const result = await sendMessage("voice", command);
+      await handleSendOutcome(result);
+    } catch (error) {
       waitingForRef.current = false;
-      if (inVoiceModeRef.current && isActiveRef.current) {
-        setTimeout(() => void startListeningCycleRef.current(), 800);
-      } else {
-        transitionPhase("idle");
-      }
+      const nextNotice = error instanceof Error ? error.message : "Voice request failed.";
+      setNotice(nextNotice);
+      showVoiceToast("error", "Voice request failed", nextNotice);
+      scheduleResumeListening(800);
     }
-  }, [sendMessage]);
+  }, [handleSendOutcome, scheduleResumeListening, sendMessage, showVoiceToast]);
 
   // ── Start listening cycle ───────────────────────────────────────────────
 
@@ -152,6 +251,7 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
     setCaption("");
     setTranscript("");
     setTaskStatus("");
+    setNotice("");
     lastTranscriptRef.current = "";
     transitionPhase("listening");
 
@@ -169,12 +269,19 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
       onSilenceDetected,
       onError: (e: Error) => {
         console.warn("[VoicePanel] Voice error:", e.message);
+        setNotice(e.message);
+        showVoiceToast("warning", "Voice input issue", e.message);
         setMicStream(null);
-        if (inVoiceModeRef.current && isActiveRef.current) {
-          setTimeout(() => void startListeningCycleRef.current(), 800);
-        } else {
+        const burstCount = recordSttError(e.message);
+        if (burstCount >= 3) {
+          inVoiceModeRef.current = false;
           transitionPhase("idle");
+          const pausedNotice = `${e.message} Voice mode paused.`;
+          setNotice(pausedNotice);
+          showVoiceToast("error", "Voice mode paused", pausedNotice);
+          return;
         }
+        scheduleResumeListening(1200);
       },
     };
 
@@ -189,12 +296,19 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
         return;
       }
     } catch (e) {
-      console.warn("[VoicePanel] Deepgram failed, using browser speech:", e instanceof Error ? e.message : e);
+      const reason = e instanceof Error ? e.message : String(e);
+      console.warn("[VoicePanel] Deepgram failed, using browser speech:", reason);
+      const nextNotice = `Deepgram failed: ${reason}. Trying browser speech recognition.`;
+      setNotice(nextNotice);
+      showVoiceToast("warning", "Deepgram unavailable", "Aura switched to browser speech recognition for now.");
     }
 
     // WebSpeech fallback
     const client = new WebSpeechClient(callbacks);
     if (!client.isSupported()) {
+      const nextNotice = "Voice transcription is unavailable. Check microphone access and Deepgram configuration.";
+      setNotice(nextNotice);
+      showVoiceToast("error", "Voice unavailable", nextNotice);
       transitionPhase("idle");
       inVoiceModeRef.current = false;
       return;
@@ -202,7 +316,7 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
     await client.start();
     clientRef.current = client;
     setMicStream(null);
-  }, [stopClient, submitCommand]);
+  }, [recordSttError, scheduleResumeListening, showVoiceToast, stopClient, submitCommand]);
 
   const startListeningCycleRef = useRef(startListeningCycle);
   useEffect(() => { startListeningCycleRef.current = startListeningCycle; }, [startListeningCycle]);
@@ -211,15 +325,12 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
 
   useEffect(() => {
     const listener = (msg: { type?: string; payload?: unknown }) => {
-      // Also forward to store so chat thread updates
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      handleAppEvent(msg as any);
-
-      if (msg.type === "TOOL_USE") {
-        const p = msg.payload as ToolUsePayload;
+      if (msg.type === "TASK_PROGRESS") {
+        const p = msg.payload as TaskProgressPayload;
         if (phaseRef.current === "thinking" || phaseRef.current === "task") {
           transitionPhase("task");
-          setTaskStatus(p.tool ? `${p.tool.replace(/_/g, " ")}${p.action ? `:${p.action}` : ""}...` : "Working...");
+          const runningStep = p.task?.steps?.find((s) => s.status === "running");
+          setTaskStatus(runningStep?.tool ? `${runningStep.tool.replace(/_/g, " ")}...` : "Working...");
         }
         return;
       }
@@ -230,10 +341,9 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
         const p = msg.payload as TaskErrorPayload;
         setTaskStatus("");
         console.warn("[VoicePanel] Task error:", p.message);
-        setTimeout(() => {
-          if (inVoiceModeRef.current && isActiveRef.current) void startListeningCycleRef.current();
-          else transitionPhase("idle");
-        }, 600);
+        setNotice(p.message);
+        showVoiceToast("error", "Voice task failed", p.message);
+        scheduleResumeListening(900);
         return;
       }
 
@@ -242,50 +352,18 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
         const text = (p.cleanText || p.fullText || "").trim();
 
         if (text && waitingForRef.current) {
-          waitingForRef.current = false;
-          const currentId = ++playbackIdRef.current;
-          transitionPhase("speaking");
-          setTaskStatus("");
-
-          void (async () => {
-            const ctrl = new AbortController();
-            abortCtrlRef.current = ctrl;
-
-            try {
-              await speakStreaming(
-                text,
-                dgKeyRef.current,
-                (chunk) => {
-                  if (playbackIdRef.current === currentId) {
-                    setCaption(chunk);
-                    setCaptionKey((k) => k + 1);
-                  }
-                },
-                ctrl.signal,
-              );
-            } catch { /* interrupted */ }
-
-            abortCtrlRef.current = null;
-            if (playbackIdRef.current !== currentId) return;
-
-            setCaption("");
-            if (inVoiceModeRef.current && isActiveRef.current) void startListeningCycleRef.current();
-            else transitionPhase("idle");
-          })();
+          void speakAssistantText(text);
         } else if (waitingForRef.current) {
           waitingForRef.current = false;
           setTaskStatus("");
-          setTimeout(() => {
-            if (inVoiceModeRef.current && isActiveRef.current) void startListeningCycleRef.current();
-            else transitionPhase("idle");
-          }, 500);
+          scheduleResumeListening(500);
         }
       }
     };
 
     const unsubscribe = window.auraDesktop.onAppEvent(listener);
     return unsubscribe;
-  }, [handleAppEvent]);
+  }, [scheduleResumeListening, showVoiceToast, speakAssistantText]);
 
   // ── Pause/resume on tab visibility ──────────────────────────────────────
 
@@ -332,6 +410,7 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
     setCaption("");
     setTranscript("");
     setTaskStatus("");
+    setNotice("");
     setMicStream(null);
   }, [stopSpeakingNow, stopClient]);
 
@@ -383,6 +462,11 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
                   Listening...
                 </p>
               )}
+              {notice && (
+                <p className="max-w-[260px] text-center text-[10px] font-medium text-amber-200/80">
+                  {notice}
+                </p>
+              )}
             </div>
           )}
 
@@ -427,6 +511,11 @@ export const VoicePanel = ({ active }: { active: boolean }): JSX.Element => {
               <p className="text-center text-[11px] text-aura-muted/60">
                 Tap the mic to talk to Aura hands-free
               </p>
+              {notice && (
+                <p className="max-w-[280px] text-center text-[10px] font-medium text-amber-200/80">
+                  {notice}
+                </p>
+              )}
             </div>
           )}
         </div>

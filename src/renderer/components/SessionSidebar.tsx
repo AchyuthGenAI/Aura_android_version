@@ -50,9 +50,9 @@ export const SessionSidebar = (): JSX.Element => {
       </div>
 
       <div className="mt-5 rounded-[22px] border border-white/10 bg-white/4 p-4">
-        <p className="text-[10px] uppercase tracking-[0.22em] text-aura-muted">Signed in</p>
-        <p className="mt-2 text-sm font-semibold text-aura-text">{profile.fullName || "Aura user"}</p>
-        <p className="mt-0.5 text-xs text-aura-muted">{profile.email || "No email saved yet"}</p>
+        <p className="text-[10px] uppercase tracking-[0.22em] text-aura-muted">Workspace</p>
+        <p className="mt-2 text-sm font-semibold text-aura-text">{profile.fullName || "Aura User"}</p>
+        <p className="mt-0.5 text-xs text-aura-muted">{profile.email || "Signed-in workspace"}</p>
       </div>
     </div>
   );

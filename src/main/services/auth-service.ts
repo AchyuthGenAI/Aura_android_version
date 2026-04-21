@@ -30,6 +30,10 @@ const readUsers = (filePath: string): StoredUser[] => {
   }
 };
 
+const createGuestAuthState = (): AuthState => ({
+  authenticated: false
+});
+
 export class AuthService {
   private readonly filePath: string;
 
@@ -45,28 +49,28 @@ export class AuthService {
   }
 
   getState(): AuthState {
-    return this.store.getState().authState;
+    const current = this.store.getState().authState;
+    if (current.authenticated) {
+      return current;
+    }
+    return createGuestAuthState();
   }
 
-  signUp(email: string, password: string): AuthState {
+  signUp(email: string): AuthState {
     const normalizedEmail = normalizeEmail(email);
     if (!normalizedEmail) {
       throw new Error("Please enter your email address.");
     }
-    if (password.trim().length < 6) {
-      throw new Error("Password must be at least 6 characters.");
-    }
 
     const users = readUsers(this.filePath);
     if (users.some((user) => user.email === normalizedEmail)) {
-      throw new Error("An account with this email already exists.");
+      throw new Error("An account with this email already exists locally.");
     }
 
     const user: StoredUser = {
       id: crypto.randomUUID(),
       email: normalizedEmail,
       provider: "email",
-      passwordHash: hashPassword(password),
       createdAt: Date.now()
     };
 
@@ -75,13 +79,21 @@ export class AuthService {
     return this.persistState(user);
   }
 
-  signIn(email: string, password: string): AuthState {
+  signIn(email: string): AuthState {
     const normalizedEmail = normalizeEmail(email);
     const users = readUsers(this.filePath);
-    const user = users.find((candidate) => candidate.email === normalizedEmail && candidate.provider === "email");
+    let user = users.find((candidate) => candidate.email === normalizedEmail && candidate.provider === "email");
 
-    if (!user || user.passwordHash !== hashPassword(password)) {
-      throw new Error("Invalid email or password.");
+    if (!user) {
+      // If Firebase authenticated them but we don't have them locally yet, auto-create the local session link.
+      user = {
+        id: crypto.randomUUID(),
+        email: normalizedEmail,
+        provider: "email",
+        createdAt: Date.now()
+      };
+      users.push(user);
+      this.writeUsers(users);
     }
 
     return this.persistState(user);
@@ -90,7 +102,7 @@ export class AuthService {
   signInWithGoogle(email: string): AuthState {
     const normalizedEmail = normalizeEmail(email);
     if (!normalizedEmail) {
-      throw new Error("Enter your Google email first so Aura can create your desktop account.");
+      throw new Error("Google authentication failed to provide a valid email address.");
     }
 
     const users = readUsers(this.filePath);
@@ -114,8 +126,7 @@ export class AuthService {
   }
 
   signOut(): AuthState {
-    this.store.set("authState", { authenticated: false });
-    return this.getState();
+    return this.enableGuestMode();
   }
 
   private persistState(user: StoredUser): AuthState {
@@ -128,12 +139,37 @@ export class AuthService {
 
     this.store.patch({
       authState: nextState,
+      onboarded: true,
+      consentAccepted: true,
+      profileComplete: true,
       profile: {
         ...this.store.getState().profile,
+        fullName: this.store.getState().profile.fullName || "Aura User",
         email: user.email
       }
     });
 
+    return nextState;
+  }
+
+  private enableGuestMode(): AuthState {
+    const nextState = createGuestAuthState();
+    this.store.patch({
+      authState: nextState,
+      onboarded: true,
+      consentAccepted: true,
+      profileComplete: true,
+      profile: {
+        fullName: "Aura User",
+        email: "",
+        phone: "",
+        addressLine1: "",
+        city: "",
+        state: "",
+        postalCode: "",
+        country: ""
+      }
+    });
     return nextState;
   }
 

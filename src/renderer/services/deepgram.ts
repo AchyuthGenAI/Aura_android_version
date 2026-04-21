@@ -2,16 +2,15 @@
  * Deepgram STT client for Aura Desktop renderer.
  * Ported from aura-extension's deepgram.ts.
  *
- * Tries two auth methods in order:
- *   1. Query-param auth (`?token=<key>`) — works in most Electron versions
- *   2. Subprotocol auth (`Sec-WebSocket-Protocol: token, <key>`) — browser standard
- *
- * Includes comprehensive logging to diagnose connection/mic issues.
+ * Uses URL query-param auth (`token=<key>`) instead of subprotocol auth
+ * because Electron's WebSocket implementation doesn't reliably forward
+ * subprotocol headers to Deepgram's servers.
  */
 
 const UTTERANCE_END_MS = 1_500;
 const SAFETY_SILENCE_MS = 4_000;
-const CONNECT_TIMEOUT_MS = 8_000;
+const CONNECT_TIMEOUT_MS = 6_000;
+const FINALIZE_WAIT_MS = 500;
 
 export class DeepgramClient {
   private socket: WebSocket | null = null;
@@ -20,6 +19,7 @@ export class DeepgramClient {
   private accumulatedTranscript = "";
   private safetyTimer: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
+  private closing = false;
   private silenceFired = false;
 
   constructor(
@@ -33,7 +33,7 @@ export class DeepgramClient {
   ) {}
 
   get isRunning(): boolean {
-    return !this.stopped && this.socket?.readyState === WebSocket.OPEN;
+    return !this.stopped && !this.closing && this.socket?.readyState === WebSocket.OPEN;
   }
 
   get micStream(): MediaStream | null {
@@ -45,7 +45,7 @@ export class DeepgramClient {
   }
 
   private fireSilence(): void {
-    if (this.silenceFired || this.stopped) return;
+    if (this.silenceFired || this.stopped || this.closing) return;
     if (!this.accumulatedTranscript.trim()) return;
     this.silenceFired = true;
     this.clearSafetyTimer();
@@ -66,10 +66,74 @@ export class DeepgramClient {
     }, SAFETY_SILENCE_MS);
   }
 
+  private async connectWebSocketWithFallbacks(baseUrl: string): Promise<WebSocket> {
+    const attempts: Array<{ label: string; url: string; protocols?: string[] }> = [];
+    attempts.push({
+      label: "query-api-key",
+      url: `${baseUrl}&token=${encodeURIComponent(this.apiKey)}`,
+    });
+    attempts.push({
+      label: "protocol-api-key",
+      url: baseUrl,
+      protocols: ["token", this.apiKey],
+    });
+
+    let lastError: Error | null = null;
+    for (const attempt of attempts) {
+      try {
+        return await this.openWebSocket(attempt.url, attempt.protocols);
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        console.warn(`[Deepgram] WebSocket auth attempt failed (${attempt.label}):`, lastError.message);
+      }
+    }
+
+    throw lastError ?? new Error("Could not connect to Deepgram.");
+  }
+
+  private openWebSocket(url: string, protocols?: string[]): Promise<WebSocket> {
+    return new Promise<WebSocket>((resolve, reject) => {
+      let settled = false;
+      const socket = protocols?.length ? new WebSocket(url, protocols) : new WebSocket(url);
+      const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { socket.close(); } catch { /* ignore */ }
+        reject(new Error("Deepgram connection timed out"));
+      }, CONNECT_TIMEOUT_MS);
+
+      const fail = (message: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        try { socket.close(); } catch { /* ignore */ }
+        reject(new Error(message));
+      };
+
+      socket.onopen = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(socket);
+      };
+
+      socket.onerror = () => {
+        fail("Deepgram WebSocket auth failed");
+      };
+
+      socket.onclose = (event) => {
+        if (settled) return;
+        const code = event.code;
+        const reason = event.reason?.trim();
+        fail(reason || `Deepgram connection closed (code ${code})`);
+      };
+    });
+  }
   async start(): Promise<void> {
     if (this.stopped) throw new Error("DeepgramClient already stopped — create a new instance");
-
-    console.log("[Deepgram] Requesting microphone access...");
+    this.closing = false;
+    this.silenceFired = false;
+    this.accumulatedTranscript = "";
 
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
@@ -80,85 +144,58 @@ export class DeepgramClient {
           channelCount: 1,
         },
       });
-      const tracks = this.stream.getAudioTracks();
-      console.log("[Deepgram] Microphone access granted:", tracks.length, "tracks");
-      for (const track of tracks) {
-        console.log("[Deepgram]   Track:", track.label, "enabled:", track.enabled, "readyState:", track.readyState);
+    } catch (error) {
+      const name = error instanceof DOMException ? error.name : "";
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        throw new Error("Microphone permission was denied.");
       }
-    } catch (micErr) {
-      const msg = micErr instanceof Error ? micErr.message : String(micErr);
-      console.error("[Deepgram] Microphone access DENIED:", msg);
-      throw new Error(`Microphone access denied: ${msg}`);
+      if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+        throw new Error("No microphone was found.");
+      }
+      throw error instanceof Error ? error : new Error("Unable to access the microphone.");
     }
-
-    return new Promise<void>((resolve, reject) => {
-      let settled = false;
-
-      // Build Deepgram URL (no auth in URL — auth via subprotocol header)
-      const baseParams =
-        `model=nova-2&language=en-US` +
+    try {
+      const url =
+        `wss://api.deepgram.com/v1/listen` +
+        `?model=nova-2&language=en-US` +
         `&interim_results=true` +
         `&endpointing=400` +
         `&utterance_end_ms=${UTTERANCE_END_MS}` +
         `&vad_events=true` +
         `&smart_format=true`;
 
-      const url = `wss://api.deepgram.com/v1/listen?${baseParams}`;
+      this.socket = await this.connectWebSocketWithFallbacks(url);
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      this.callbacks.onError(err);
+      await this.stop();
+      throw err;
+    }
 
-      console.log("[Deepgram] Connecting to WebSocket (subprotocol auth)...");
-      console.log("[Deepgram] API key starts with:", this.apiKey.substring(0, 8) + "...");
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const socket = this.socket!;
 
-      // Deepgram accepts auth via WebSocket subprotocol: ["token", "<api-key>"]
-      this.socket = new WebSocket(url, ["token", this.apiKey]);
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/webm";
 
-      const connectTimeout = setTimeout(() => {
-        if (!settled && this.socket?.readyState !== WebSocket.OPEN) {
-          settled = true;
-          console.error("[Deepgram] Connection timed out after", CONNECT_TIMEOUT_MS, "ms");
-          const err = new Error("Deepgram connection timed out");
-          this.callbacks.onError(err);
-          void this.stop();
-          reject(err);
-        }
-      }, CONNECT_TIMEOUT_MS);
+      this.mediaRecorder = new MediaRecorder(this.stream!, { mimeType });
 
-      this.socket.onopen = () => {
-        clearTimeout(connectTimeout);
-        console.log("[Deepgram] WebSocket CONNECTED!");
-
-        const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-          ? "audio/webm;codecs=opus"
-          : "audio/webm";
-
-        console.log("[Deepgram] Using MediaRecorder mimeType:", mimeType);
-
-        this.mediaRecorder = new MediaRecorder(this.stream!, { mimeType });
-
-        let chunkCount = 0;
-        this.mediaRecorder.ondataavailable = (e) => {
-          if (e.data.size === 0 || this.stopped) return;
-          chunkCount++;
-          if (chunkCount <= 5 || chunkCount % 20 === 0) {
-            console.log("[Deepgram] Audio chunk #" + chunkCount + ", size:", e.data.size, "bytes");
-          }
-          if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(e.data);
-        };
-
-        this.mediaRecorder.onerror = () => {
-          console.error("[Deepgram] MediaRecorder error!");
-          this.callbacks.onError(new Error("Microphone recording failed"));
-        };
-
-        this.mediaRecorder.start(150);
-        console.log("[Deepgram] MediaRecorder started (150ms timeslice)");
-
-        if (!settled) {
-          settled = true;
-          resolve();
-        }
+      this.mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size === 0 || this.stopped) return;
+        if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(e.data);
       };
 
-      this.socket.onmessage = (event) => {
+      this.mediaRecorder.onerror = () => {
+        this.callbacks.onError(new Error("Microphone recording failed"));
+      };
+
+      this.mediaRecorder.start(150);
+      settled = true;
+      resolve();
+
+      socket.onmessage = (event) => {
         if (this.stopped) return;
         let payload: {
           type?: string;
@@ -169,18 +206,15 @@ export class DeepgramClient {
         try {
           payload = JSON.parse(event.data as string);
         } catch {
-          console.warn("[Deepgram] Non-JSON message:", (event.data as string).substring(0, 100));
           return;
         }
 
         if (payload.type === "UtteranceEnd") {
-          console.log("[Deepgram] UtteranceEnd detected");
           this.fireSilence();
           return;
         }
 
         if (payload.type === "SpeechStarted") {
-          console.log("[Deepgram] SpeechStarted detected");
           this.silenceFired = false;
           this.clearSafetyTimer();
           return;
@@ -195,7 +229,6 @@ export class DeepgramClient {
 
         if (payload.is_final) {
           this.accumulatedTranscript = `${this.accumulatedTranscript} ${text}`.trim();
-          console.log("[Deepgram] Final transcript:", this.accumulatedTranscript);
           this.callbacks.onFinalTranscript(this.accumulatedTranscript);
 
           if (payload.speech_final) {
@@ -206,23 +239,19 @@ export class DeepgramClient {
         }
       };
 
-      this.socket.onerror = (ev) => {
-        clearTimeout(connectTimeout);
-        console.error("[Deepgram] WebSocket ERROR:", ev);
+      socket.onerror = () => {
         if (!settled) {
           settled = true;
           const err = new Error("Deepgram connection failed — check API key");
           this.callbacks.onError(err);
           void this.stop();
           reject(err);
-        } else if (!this.stopped) {
+        } else if (!this.stopped && !this.closing) {
           this.callbacks.onError(new Error("Deepgram WebSocket error"));
         }
       };
 
-      this.socket.onclose = (ev) => {
-        clearTimeout(connectTimeout);
-        console.warn("[Deepgram] WebSocket CLOSED — code:", ev.code, "reason:", ev.reason || "(none)");
+      socket.onclose = (ev) => {
         if (!settled) {
           settled = true;
           const code = ev.code;
@@ -232,23 +261,80 @@ export class DeepgramClient {
           const err = new Error(reason);
           this.callbacks.onError(err);
           reject(err);
-        } else if (!this.stopped && !this.silenceFired) {
+        } else if (!this.stopped && !this.closing && !this.silenceFired) {
           this.fireSilence();
         }
       };
     });
   }
 
+  private async stopRecorder(): Promise<void> {
+    const recorder = this.mediaRecorder;
+    this.mediaRecorder = null;
+    if (!recorder) return;
+    if (recorder.state === "inactive") return;
+
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        recorder.removeEventListener("stop", finish);
+        recorder.removeEventListener("error", finish);
+        resolve();
+      };
+
+      recorder.addEventListener("stop", finish, { once: true });
+      recorder.addEventListener("error", finish, { once: true });
+
+      try {
+        recorder.requestData();
+      } catch {
+        // Ignore recorders that do not support requestData in the current state.
+      }
+
+      try {
+        recorder.stop();
+      } catch {
+        finish();
+      }
+    });
+  }
+
+  private async finalizeSocket(): Promise<void> {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        socket.removeEventListener("close", finish);
+        clearTimeout(timeout);
+        resolve();
+      };
+
+      const timeout = setTimeout(finish, FINALIZE_WAIT_MS);
+      socket.addEventListener("close", finish, { once: true });
+
+      try {
+        socket.send(JSON.stringify({ type: "Finalize" }));
+      } catch {
+        finish();
+      }
+    });
+  }
+
   async stop(): Promise<string> {
     if (this.stopped) return this.accumulatedTranscript;
-    this.stopped = true;
+    this.closing = true;
     this.clearSafetyTimer();
-    console.log("[Deepgram] Stopping client...");
 
-    try {
-      this.mediaRecorder?.stop();
-    } catch { /* ignore */ }
-    this.mediaRecorder = null;
+    await this.stopRecorder();
+    await this.finalizeSocket();
 
     try {
       this.stream?.getTracks().forEach((t) => t.stop());
@@ -259,6 +345,8 @@ export class DeepgramClient {
       if (this.socket?.readyState === WebSocket.OPEN) this.socket.close(1000, "Normal closure");
     } catch { /* ignore */ }
     this.socket = null;
+    this.stopped = true;
+    this.closing = false;
 
     return this.accumulatedTranscript;
   }

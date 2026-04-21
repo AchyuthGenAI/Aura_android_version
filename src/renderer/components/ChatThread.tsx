@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { AuraLogoBlob, MessageBubble, PendingMessageBubble } from "./primitives";
+import { AuraLogoBlob, MessageBubble } from "./primitives";
 import { Button, Card, SectionHeading, TextArea } from "./shared";
 import { useAuraStore } from "@renderer/store/useAuraStore";
-import { ChatActivityCards, ChatPromptChips, getChatComposerPlaceholder, getChatPendingState } from "./ChatAssistCards";
-import { RunTimelineBubble } from "./RunTimelineBubble";
+
+const EXAMPLE_COMMANDS = [
+  "Summarize this page and tell me what matters most.",
+  "Research this topic and extract the key takeaways.",
+  "Draft a polished reply from the context on this page.",
+  "Use my profile to help me complete this form.",
+];
 
 export const TaskBanner = (): JSX.Element | null => {
-  const activeRun = useAuraStore((state) => state.activeRun);
-  if (!activeRun) {
+  const activeTask = useAuraStore((state) => state.activeTask);
+  if (!activeTask) {
     return null;
   }
 
@@ -17,17 +22,18 @@ export const TaskBanner = (): JSX.Element | null => {
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.24em] text-aura-violet">Active Task</p>
-          <p className="mt-1 text-sm font-semibold text-aura-text">{activeRun.prompt ?? activeRun.lastTool ?? "Running..."}</p>
-          <p className="mt-1 text-xs text-aura-muted">Status: {activeRun.status}</p>
+          <p className="mt-1 text-sm font-semibold text-aura-text">{activeTask.command}</p>
+          <p className="mt-1 text-xs text-aura-muted">Status: {activeTask.status}</p>
         </div>
         <div className="flex flex-col items-end gap-2">
-          {activeRun.lastTool && (
+          {activeTask.steps.slice(0, 3).map((step) => (
             <span
+              key={step.index}
               className="rounded-full border border-white/10 bg-white/6 px-3 py-1 text-[11px] text-aura-text"
             >
-              {activeRun.lastTool}
+              {step.description}
             </span>
-          )}
+          ))}
         </div>
       </div>
     </Card>
@@ -46,7 +52,6 @@ export const ChatComposer = ({
   const sendMessage = useAuraStore((state) => state.sendMessage);
   const stopMessage = useAuraStore((state) => state.stopMessage);
   const captureScreenshot = useAuraStore((state) => state.captureScreenshot);
-  const activeRun = useAuraStore((state) => state.activeRun);
   const [screenshotLabel, setScreenshotLabel] = useState<string | null>(null);
 
   const suggestions = useMemo(() => {
@@ -89,7 +94,7 @@ export const ChatComposer = ({
         <TextArea
           value={inputValue}
           onChange={setInputValue}
-          placeholder={getChatComposerPlaceholder(activeRun, isLoading)}
+          placeholder="Message Aura..."
           rows={compact ? 2 : 3}
         />
         <div className="flex shrink-0 flex-col gap-2">
@@ -128,24 +133,15 @@ export const ChatThread = ({
   emptyContext: "home" | "overlay";
 }): JSX.Element => {
   const messages = useAuraStore((state) => state.messages);
-  const isLoading = useAuraStore((state) => state.isLoading);
-  const activeRun = useAuraStore((state) => state.activeRun);
-  const currentSessionId = useAuraStore((state) => state.currentSessionId);
-  const actionFeed = useAuraStore((state) => state.actionFeed);
-  const settings = useAuraStore((state) => state.settings);
   const sendMessage = useAuraStore((state) => state.sendMessage);
   const containerRef = useRef<HTMLDivElement | null>(null);
-
-  const lastMessage = messages[messages.length - 1];
-  const hasStreamingAssistant = lastMessage?.role === "assistant" && lastMessage.status === "streaming";
-  const pendingState = getChatPendingState(activeRun, isLoading, actionFeed);
 
   useEffect(() => {
     const node = containerRef.current;
     if (node) {
       node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
     }
-  }, [messages, isLoading, activeRun?.updatedAt]);
+  }, [messages]);
 
   if (messages.length === 0) {
     return (
@@ -159,8 +155,17 @@ export const ChatThread = ({
             Aura wraps local OpenClaw so users can chat, browse, automate, summarize, and monitor pages without manual setup.
           </p>
         </div>
-        <div className="w-full max-w-[760px]">
-          <ChatPromptChips onSelect={(prompt) => void sendMessage("text", prompt)} />
+        <div className="grid w-full max-w-[760px] gap-3 md:grid-cols-2">
+          {EXAMPLE_COMMANDS.map((command) => (
+            <button
+              key={command}
+              className="fade-up rounded-[22px] border border-white/10 bg-white/6 p-4 text-left transition hover:-translate-y-0.5 hover:bg-white/9"
+              onClick={() => void sendMessage("text", command)}
+            >
+              <p className="text-sm font-medium text-aura-text">{command}</p>
+              <p className="mt-1 text-xs text-aura-muted">Start with a guided Aura workflow.</p>
+            </button>
+          ))}
         </div>
       </div>
     );
@@ -169,13 +174,8 @@ export const ChatThread = ({
   return (
     <div ref={containerRef} className="flex h-full flex-col gap-4 overflow-y-auto px-2 py-2">
       {messages.map((message) => (
-        <MessageBubble key={message.id} message={message} theme={settings.theme} />
+        <MessageBubble key={message.id} message={message} theme={useAuraStore.getState().settings.theme} />
       ))}
-      {activeRun && <RunTimelineBubble run={activeRun} />}
-      <ChatActivityCards currentSessionId={currentSessionId} />
-      {pendingState && !hasStreamingAssistant && (
-        <PendingMessageBubble title={pendingState.title} detail={pendingState.detail} />
-      )}
     </div>
   );
 };

@@ -1,60 +1,93 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { app, BrowserWindow, ipcMain, screen } from "electron";
 
 import { IPC_CHANNELS } from "@shared/ipc";
-import type {
-  ApprovalDecision,
-  AuraStorageShape,
-  AutomationJob,
-  AutomationJobRun,
-  ExtensionMessage,
-  OpenClawRun,
-  OpenClawCronJob,
-  OpenClawCronRun,
-  OpenClawSessionCreateParams,
-  OpenClawSkillEntry,
-  OpenClawToolEntry,
-  RunStatusPayload,
-  SkillSummary,
-  SupportBundleExport,
-  ToolUsePayload,
-  WidgetBounds,
-} from "@shared/types";
+import type { AuraStorageShape, ExtensionMessage, WidgetBounds } from "@shared/types";
 
+import { AuthBroker } from "./services/auth-broker";
 import { AuthService } from "./services/auth-service";
 import { BrowserController } from "./services/browser-controller";
 import { ConfigManager } from "./services/config-manager";
-import { DesktopController } from "./services/desktop-controller";
 import { GatewayManager } from "./services/gateway-manager";
+import { MonitorManager } from "./services/monitor-manager";
+import { OpenClawAutomationWsServer } from "./services/openclaw-automation-ws-server.ts";
+import { OpenClawSkillService } from "./services/openclaw-skill-service";
 import { AuraStore } from "./services/store";
+import { TaskSchedulerManager } from "./services/task-scheduler-manager";
 
 const COLLAPSED_WIDGET_SIZE = 84;
 const isDev = !app.isPackaged;
-const DEV_SERVER_URL = "http://127.0.0.1:5173/";
+const DEV_SERVER_URL = process.env.AURA_DEV_SERVER_URL
+  || `http://127.0.0.1:${process.env.AURA_DEV_PORT || "5173"}/`;
 const shouldOpenDevTools = process.env.AURA_OPEN_DEVTOOLS === "1";
 const WIDGET_STARTUP_ARG = "--background-widget";
 const launchedAsWidgetOnly = process.argv.includes(WIDGET_STARTUP_ARG);
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
-// Allow getUserMedia (mic/camera) without OS permission prompt in Electron renderer.
-// This switch bypasses Chromium's permission dialog and lets our
-// setPermissionRequestHandler / setPermissionCheckHandler control access.
-app.commandLine.appendSwitch("use-fake-ui-for-media-stream");
-
 let mainWindow: BrowserWindow | null = null;
 let widgetWindow: BrowserWindow | null = null;
 let activeGatewayManager: GatewayManager | null = null;
-let activeDesktopController: DesktopController | null = null;
+let activeMonitorManager: MonitorManager | null = null;
+let activeTaskSchedulerManager: TaskSchedulerManager | null = null;
+let activeAutomationWsServer: OpenClawAutomationWsServer | null = null;
+let activeStore: AuraStore | null = null;
 let isQuitting = false;
 let isCreatingWindows = false;
-let widgetAutoHiddenForDesktopRun = false;
-let auraWindowsFocusSuppressedForDesktopRun = false;
+
+const startupLogPath = path.join(os.tmpdir(), "aura-desktop-startup.log");
+
+const logStartupNote = (label: string, message: string): void => {
+  const timestamp = new Date().toISOString();
+  fs.appendFileSync(startupLogPath, `[${timestamp}] ${label}\n${message}\n---\n`, "utf8");
+};
+
+const logStartupError = (label: string, error: unknown): void => {
+  const message = error instanceof Error
+    ? `${error.name}: ${error.message}\n${error.stack ?? ""}`
+    : String(error);
+  logStartupNote(label, message);
+};
 
 if (!hasSingleInstanceLock) {
   app.quit();
 }
+
+process.on("uncaughtException", (error) => {
+  logStartupError("uncaughtException", error);
+  // Don't crash on gateway/network errors — these are recoverable
+  const msg = error?.message ?? "";
+  if (
+    msg.includes("ECONNREFUSED")
+    || msg.includes("ECONNRESET")
+    || msg.includes("EPIPE")
+    || msg.includes("Gateway")
+    || msg.includes("WebSocket")
+    || msg.includes("socket hang up")
+  ) {
+    console.warn("[Aura] Recovered from non-fatal error:", msg);
+    return; // Don't crash the process
+  }
+});
+
+process.on("unhandledRejection", (reason) => {
+  logStartupError("unhandledRejection", reason);
+  // Prevent unhandled promise rejections from crashing the process
+  const msg = reason instanceof Error ? reason.message : String(reason ?? "");
+  if (
+    msg.includes("ECONNREFUSED")
+    || msg.includes("ECONNRESET")
+    || msg.includes("EPIPE")
+    || msg.includes("Gateway")
+    || msg.includes("WebSocket")
+    || msg.includes("socket hang up")
+  ) {
+    console.warn("[Aura] Recovered from non-fatal rejection:", msg);
+    return;
+  }
+});
 
 const loadEnvFiles = (): void => {
   const loadEnvFile = process.loadEnvFile;
@@ -86,96 +119,16 @@ const resolveOpenClawRootCandidates = (): string[] => {
 
   return Array.from(
     new Set([
-      path.join(appPath, "vendor", "openclaw"),
-      path.join(appPath, "..", "vendor", "openclaw"),
-      path.join(appPath, "..", "..", "vendor", "openclaw"),
+      // Production: electron-builder copies vendor/openclaw → resources/openclaw-src
       path.join(process.resourcesPath, "openclaw-src"),
       path.join(appPath, "openclaw-src"),
       path.join(appPath, "..", "openclaw-src"),
-      path.join(appPath, "..", "..", "openclaw-src")
+      path.join(appPath, "..", "..", "openclaw-src"),
+      // Development: skills live under vendor/openclaw in the project root
+      path.join(appPath, "vendor", "openclaw"),
+      path.join(appPath, "..", "vendor", "openclaw"),
     ])
   );
-};
-
-const findOpenClawRoot = (): string | null =>
-  resolveOpenClawRootCandidates().find((candidate) =>
-    fs.existsSync(path.join(candidate, "openclaw.mjs"))
-  ) ?? null;
-
-const toTimestamp = (value: unknown, fallback: number): number => {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const parsed = Date.parse(value);
-    if (!Number.isNaN(parsed)) return parsed;
-  }
-  return fallback;
-};
-
-const mapCronRunToAutomationRun = (run: OpenClawCronRun): AutomationJobRun => ({
-  runId: run.id,
-  status:
-    run.status === "done" || run.status === "running" || run.status === "error" || run.status === "cancelled"
-      ? run.status
-      : "idle",
-  startedAt: toTimestamp(run.startedAt, Date.now()),
-  finishedAt: run.finishedAt ? toTimestamp(run.finishedAt, Date.now()) : undefined,
-  summary: run.summary,
-  error: run.error,
-});
-
-const mapCronJobToAutomation = (job: OpenClawCronJob, runs: OpenClawCronRun[] = []): AutomationJob => {
-  const createdAt = toTimestamp(job.createdAt, Date.now());
-  const updatedAt = toTimestamp(job.updatedAt, createdAt);
-  const runHistory = runs.map(mapCronRunToAutomationRun);
-  const lastRun = runHistory.length ? runHistory[runHistory.length - 1] : undefined;
-
-  return {
-    id: job.id,
-    title: job.name || job.prompt?.slice(0, 60) || "Automation",
-    kind: "cron",
-    sourcePrompt: job.prompt,
-    url: typeof job.delivery?.url === "string" ? job.delivery.url : undefined,
-    schedule: {
-      mode: "cron",
-      cron: job.schedule,
-    },
-    createdAt,
-    updatedAt,
-    lastCheckedAt: job.lastRunAt ? toTimestamp(job.lastRunAt, 0) : 0,
-    nextRunAt: job.nextRunAt ? toTimestamp(job.nextRunAt, updatedAt) : undefined,
-    status: job.enabled ? "active" : "paused",
-    triggerCount: runHistory.length,
-    lastRun,
-    runHistory,
-  };
-};
-
-const mapToolsAndSkillsToSkillSummaries = (
-  tools: OpenClawToolEntry[],
-  skills: OpenClawSkillEntry[],
-): SkillSummary[] => {
-  const skillByName = new Map<string, OpenClawSkillEntry>();
-  const skillById = new Map<string, OpenClawSkillEntry>();
-
-  for (const skill of skills) {
-    skillByName.set(skill.name.toLowerCase(), skill);
-    skillById.set(skill.id.toLowerCase(), skill);
-  }
-
-  return tools
-    .map((tool) => {
-      const matched = skillByName.get(tool.name.toLowerCase()) ?? skillById.get(tool.name.toLowerCase());
-      const pathValue = matched?.path ?? (typeof tool.source === "string" ? tool.source : "");
-      return {
-        id: matched?.id ?? tool.name,
-        name: matched?.name ?? tool.name,
-        description: matched?.description ?? tool.description ?? "OpenClaw capability",
-        path: pathValue,
-        bundled: pathValue.toLowerCase().includes("skill"),
-        enabled: matched?.enabled ?? tool.enabled ?? true,
-      };
-    })
-    .sort((a, b) => a.name.localeCompare(b.name));
 };
 
 const getRendererQuery = (mode: "app" | "widget"): string => (mode === "widget" ? "?mode=widget" : "");
@@ -194,19 +147,11 @@ const loadRendererWindow = async (window: BrowserWindow, mode: "app" | "widget")
   });
 };
 
-const DEFAULT_WIDGET_W = 460;
-const DEFAULT_WIDGET_H = 640;
-
 const getWidgetBounds = (store: AuraStore): WidgetBounds => {
   const state = store.getState();
   const workArea = screen.getPrimaryDisplay().workArea;
-
-  // Recover from corrupted widgetSize (e.g. saved as collapsed 84x84)
-  const overlayW = state.widgetSize.w >= 200 ? state.widgetSize.w : DEFAULT_WIDGET_W;
-  const overlayH = state.widgetSize.h >= 200 ? state.widgetSize.h : DEFAULT_WIDGET_H;
-
-  const width = state.widgetExpanded ? overlayW : COLLAPSED_WIDGET_SIZE;
-  const height = state.widgetExpanded ? overlayH : COLLAPSED_WIDGET_SIZE;
+  const width = state.widgetExpanded ? Math.max(state.widgetSize.w, 300) : COLLAPSED_WIDGET_SIZE;
+  const height = state.widgetExpanded ? Math.max(state.widgetSize.h, 400) : COLLAPSED_WIDGET_SIZE;
   const hasSavedPosition = state.widgetPosition.x !== 0 || state.widgetPosition.y !== 0;
   const position = hasSavedPosition
     ? state.widgetPosition
@@ -250,144 +195,70 @@ const showMainWindow = (): void => {
   mainWindow.focus();
 };
 
-const ensureWidgetWindowVisible = (): void => {
+const hasAuthenticatedSession = (): boolean =>
+  Boolean(activeStore?.getState().authState.authenticated);
+
+const reinforceWidgetOverlay = (): void => {
   if (!widgetWindow || widgetWindow.isDestroyed()) {
     return;
   }
+
+  widgetWindow.setContentProtection(false);
+  widgetWindow.setAlwaysOnTop(true, "screen-saver", 1);
+  widgetWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  widgetWindow.moveTop();
+};
+
+const ensureWidgetWindowVisible = (shouldFocus = false): void => {
+  if (!hasAuthenticatedSession()) {
+    showMainWindow();
+    return;
+  }
+  if (!widgetWindow || widgetWindow.isDestroyed()) {
+    return;
+  }
+  reinforceWidgetOverlay();
   if (widgetWindow.isMinimized()) {
     widgetWindow.restore();
   }
-  widgetWindow.showInactive();
+  if (shouldFocus) {
+    widgetWindow.show();
+    widgetWindow.focus();
+  } else {
+    widgetWindow.showInactive();
+  }
+  reinforceWidgetOverlay();
 };
 
-const hideWidgetWindowTemporarily = (): void => {
-  if (!widgetWindow || widgetWindow.isDestroyed()) {
+const showWidgetWindow = (store: AuraStore, expand = true, shouldFocus = false): void => {
+  if (!store.getState().authState.authenticated) {
+    showMainWindow();
     return;
   }
-  if (!widgetWindow.isVisible()) {
-    return;
-  }
-  widgetWindow.hide();
-};
-
-const suppressAuraWindowFocusForDesktopRun = (): void => {
-  if (auraWindowsFocusSuppressedForDesktopRun) {
-    return;
-  }
-  auraWindowsFocusSuppressedForDesktopRun = true;
-
-  if (widgetWindow && !widgetWindow.isDestroyed()) {
-    try {
-      widgetWindow.blur();
-      widgetWindow.setFocusable(false);
-    } catch {
-      // ignore focus suppression failures
-    }
-  }
-
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      mainWindow.blur();
-      mainWindow.setFocusable(false);
-    } catch {
-      // ignore focus suppression failures
-    }
-  }
-};
-
-const restoreAuraWindowFocusAfterDesktopRun = (): void => {
-  if (!auraWindowsFocusSuppressedForDesktopRun) {
-    return;
-  }
-  auraWindowsFocusSuppressedForDesktopRun = false;
-
-  if (widgetWindow && !widgetWindow.isDestroyed()) {
-    try {
-      widgetWindow.setFocusable(true);
-    } catch {
-      // ignore focus restore failures
-    }
-  }
-
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      mainWindow.setFocusable(true);
-    } catch {
-      // ignore focus restore failures
-    }
-  }
-};
-
-const restoreWidgetWindowIfNeeded = (): void => {
-  restoreAuraWindowFocusAfterDesktopRun();
-  if (!widgetAutoHiddenForDesktopRun) {
-    return;
-  }
-  widgetAutoHiddenForDesktopRun = false;
-  ensureWidgetWindowVisible();
-};
-
-const isTerminalRunStatus = (status: OpenClawRun["status"]): boolean =>
-  status === "done" || status === "error" || status === "cancelled";
-
-const looksLikeDesktopAutomationRequest = (message: string): boolean => {
-  const normalized = message.toLowerCase();
-  if (/https?:\/\/|\.com\b|\.org\b|\.net\b/.test(normalized)) {
-    return false;
-  }
-  if (/(youtube|google|gmail|github|reddit|twitter|x\.com|linkedin|amazon|flipkart|wikipedia)\b/.test(normalized)) {
-    return false;
-  }
-  return (
-    /\b(desktop|window|app|notepad|calculator|paint|vscode|visual studio code|excel|word|powerpoint|cmd|command prompt|terminal|powershell|file explorer|explorer|settings)\b/.test(normalized)
-    || (/\b(open|launch|start|focus|switch to|write|type|click|paste|save)\b/.test(normalized)
-      && /\b(file|program|document|desktop|window|app)\b/.test(normalized))
-  );
-};
-
-const showWidgetWindow = (store: AuraStore, expand = true, forceCenter = false): void => {
   if (!widgetWindow || widgetWindow.isDestroyed()) {
     return;
   }
 
   store.patch({ widgetExpanded: expand });
-  
-  const bounds = getWidgetBounds(store);
-  if (forceCenter) {
-    const workArea = screen.getPrimaryDisplay().workArea;
-    const centeredX = Math.max(0, workArea.x + Math.floor((workArea.width - bounds.width) / 2));
-    const centeredY = Math.max(0, workArea.y + Math.floor((workArea.height - bounds.height) / 2));
-    bounds.x = centeredX;
-    bounds.y = centeredY;
-    store.patch({ widgetPosition: { x: centeredX, y: centeredY } });
-  }
-
-  widgetWindow.setBounds(bounds, true);
-  ensureWidgetWindowVisible();
+  widgetWindow.setBounds(getWidgetBounds(store), true);
+  ensureWidgetWindowVisible(shouldFocus);
   widgetWindow.webContents.send(IPC_CHANNELS.appEvent, {
     type: "WIDGET_VISIBILITY",
     payload: { expanded: expand }
   });
 };
 
-const SECRET_KEY_PATTERN = /(api[_-]?key|token|password|secret|auth)/i;
+const hideWidgetWindow = (store: AuraStore): void => {
+  if (!widgetWindow || widgetWindow.isDestroyed()) {
+    return;
+  }
 
-const redactSecrets = (value: unknown): unknown => {
-  if (Array.isArray(value)) {
-    return value.map((entry) => redactSecrets(entry));
-  }
-  if (value && typeof value === "object") {
-    const result: Record<string, unknown> = {};
-    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-      if (SECRET_KEY_PATTERN.test(key)) {
-        result[key] = "<redacted>";
-      } else {
-        result[key] = redactSecrets(nested);
-      }
-    }
-    return result;
-  }
-  return value;
+  store.patch({ widgetExpanded: false, overlayVisible: false });
+  widgetWindow.webContents.send(IPC_CHANNELS.appEvent, {
+    type: "WIDGET_VISIBILITY",
+    payload: { expanded: false }
+  });
+  widgetWindow.hide();
 };
 
 const createAppWindows = async (): Promise<void> => {
@@ -398,6 +269,7 @@ const createAppWindows = async (): Promise<void> => {
   const preloadPath = path.join(__dirname, "preload.cjs");
   const browserViewPreloadPath = path.join(__dirname, "browser-view-preload.cjs");
   const store = new AuraStore(app.getPath("userData"));
+  activeStore = store;
   applyLoginItemSettings(store);
 
   try {
@@ -448,224 +320,122 @@ const createAppWindows = async (): Promise<void> => {
       }
     });
 
+    reinforceWidgetOverlay();
+
     const emit = (message: ExtensionMessage<unknown>): void => {
-      if (message.type === "TOOL_USE") {
-        const payload = message.payload as ToolUsePayload;
-        if (payload.surface === "desktop" && payload.status === "running") {
-          widgetAutoHiddenForDesktopRun = true;
-          suppressAuraWindowFocusForDesktopRun();
-          hideWidgetWindowTemporarily();
-        }
-      }
-
-      if (message.type === "CONFIRM_ACTION") {
-        restoreWidgetWindowIfNeeded();
-      }
-
-      if (message.type === "RUN_STATUS") {
-        const payload = message.payload as RunStatusPayload;
-        if (isTerminalRunStatus(payload.run.status)) {
-          restoreWidgetWindowIfNeeded();
-        }
-      }
-
-      if (message.type === "TASK_ERROR" || message.type === "LLM_DONE") {
-        restoreWidgetWindowIfNeeded();
-      }
-
       for (const window of [mainWindow, widgetWindow]) {
         if (window && !window.isDestroyed()) {
           window.webContents.send(IPC_CHANNELS.appEvent, message);
         }
       }
+      activeAutomationWsServer?.handleExtensionMessage(message);
     };
 
     // Grant microphone (and camera) permission for the app windows so
     // navigator.mediaDevices.getUserMedia({ audio: true }) works in the renderer.
-    // Note: setPermissionRequestHandler uses Electron names ("media", "microphone")
-    //       setPermissionCheckHandler uses Chromium names ("audioCapture", "videoCapture")
-    const ALLOWED_REQUEST_PERMISSIONS = new Set(["media", "microphone", "camera", "mediaKeySystem"]);
-    const ALLOWED_CHECK_PERMISSIONS = new Set(["media", "microphone", "camera", "audioCapture", "videoCapture", "mediaKeySystem"]);
-    // Both windows share the same defaultSession â€” set handlers once on the session
-    mainWindow.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
-      callback(ALLOWED_REQUEST_PERMISSIONS.has(permission));
-    });
-    mainWindow.webContents.session.setPermissionCheckHandler((_wc, permission) => {
-      return ALLOWED_CHECK_PERMISSIONS.has(permission);
-    });
+    const ALLOWED_PERMISSIONS = new Set(["media", "microphone", "camera", "mediaKeySystem"]);
+    for (const win of [mainWindow, widgetWindow]) {
+      win.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
+        callback(ALLOWED_PERMISSIONS.has(permission));
+      });
+      win.webContents.session.setPermissionCheckHandler((_wc, permission) => {
+        return ALLOWED_PERMISSIONS.has(permission);
+      });
+    }
 
     const browserController = new BrowserController(mainWindow, browserViewPreloadPath, emit);
     const authService = new AuthService(app.getPath("userData"), store);
+    const authBroker = new AuthBroker(authService);
     const configManager = new ConfigManager(app.getPath("userData"));
-    
+    const skillService = new OpenClawSkillService(resolveOpenClawRootCandidates(), () => configManager.readConfig());
     activeGatewayManager = new GatewayManager(
       resolveOpenClawRootCandidates(),
       configManager,
       store,
       browserController,
+      emit
+    );
+    const restartAutomationWsServer = (): void => {
+      activeAutomationWsServer?.stop();
+      activeAutomationWsServer = new OpenClawAutomationWsServer({
+        gatewayManager: activeGatewayManager!,
+        configManager,
+        onLog: (message: string) => logStartupNote("automation-ws", message),
+      });
+      activeAutomationWsServer.start();
+    };
+    restartAutomationWsServer();
+    activeMonitorManager = new MonitorManager(
+      browserController,
+      store,
       emit,
-      app.isPackaged,
+      (request) => activeGatewayManager!.sendChat(request),
+      () => configManager.readConfig(),
     );
+    activeTaskSchedulerManager = new TaskSchedulerManager(
+      store,
+      emit,
+      (request) => activeGatewayManager!.sendChat(request),
+    );
+    activeGatewayManager.setScheduledTaskHandler((task) => activeTaskSchedulerManager!.createTask(task));
+    activeGatewayManager.setMonitorHandler((monitor) => activeMonitorManager!.createMonitor(monitor));
 
-    activeDesktopController = new DesktopController();
-
-    const exportSupportBundle = async (): Promise<SupportBundleExport> => {
-      const createdAt = Date.now();
-      const createdIso = new Date(createdAt).toISOString();
-      const userDataPath = app.getPath("userData");
-      const supportDir = path.join(userDataPath, "support");
-      fs.mkdirSync(supportDir, { recursive: true });
-
-      const runtimeStatus = activeGatewayManager?.getStatus() ?? null;
-      const bootstrapState = activeGatewayManager?.getBootstrap() ?? null;
-      const gatewayStatus = activeGatewayManager?.getGatewayStatus() ?? null;
-      const storageState = store.getState();
-      const openClawRootCandidates = resolveOpenClawRootCandidates().map((candidate) => ({
-        path: candidate,
-        rootExists: fs.existsSync(candidate),
-        entryExists: fs.existsSync(path.join(candidate, "openclaw.mjs")),
-      }));
-
-      const bundle = {
-        meta: {
-          exportedAt: createdIso,
-          platform: process.platform,
-          arch: process.arch,
-          nodeVersion: process.version,
-          electronVersion: process.versions.electron,
-          appVersion: app.getVersion(),
-          isPackaged: app.isPackaged,
-        },
-        runtime: {
-          status: runtimeStatus,
-          bootstrap: bootstrapState,
-          gateway: gatewayStatus,
-          openClawRootCandidates,
-          selectedOpenClawRoot: findOpenClawRoot(),
-        },
-        storage: {
-          authState: storageState.authState,
-          settings: storageState.settings,
-          permissions: storageState.permissions,
-          activeRoute: storageState.activeRoute,
-          currentSessionKey: storageState.currentSessionKey,
-          history: storageState.history.slice(0, 50),
-          automationJobs: storageState.automationJobs.slice(0, 50),
-        },
-        config: redactSecrets(configManager.readConfig()),
-        paths: {
-          userDataPath,
-          storePath: path.join(userDataPath, "aura-desktop.storage.json"),
-          usersPath: path.join(userDataPath, "aura-desktop.users.json"),
-          openClawHomePath: configManager.getOpenClawHomePath(),
-          openClawConfigPath: path.join(configManager.getOpenClawHomePath(), ".openclaw", "openclaw.json"),
-          supportDir,
-        },
-      };
-
-      const fileName = `aura-support-${createdIso.replace(/[:.]/g, "-")}.json`;
-      const filePath = path.join(supportDir, fileName);
-      const text = JSON.stringify(bundle, null, 2);
-      fs.writeFileSync(filePath, text, "utf8");
-
-      return {
-        path: filePath,
-        createdAt,
-        bytes: Buffer.byteLength(text, "utf8"),
-      };
+    const requireAuthenticatedSession = (): void => {
+      if (!store.getState().authState.authenticated) {
+        showMainWindow();
+        throw new Error("Sign in to continue.");
+      }
     };
 
-    // â”€â”€ Desktop IPC handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const listAutomationJobs = async (): Promise<AutomationJob[]> => {
-      if (!activeGatewayManager) return [];
-      const jobs = await activeGatewayManager.cronList();
-      const runs = await Promise.all(
-        jobs.map(async (job) => ({
-          id: job.id,
-          runs: await activeGatewayManager!.cronRuns(job.id).catch(() => [] as OpenClawCronRun[]),
-        })),
-      );
-      const runMap = new Map(runs.map((entry) => [entry.id, entry.runs]));
-      return jobs.map((job) => mapCronJobToAutomation(job, runMap.get(job.id) ?? []));
+    const syncSignedInShell = (): void => {
+      configManager.ensureDefaults();
+      activeMonitorManager?.start();
+      activeTaskSchedulerManager?.start();
+      
+      const evt = { type: "STORAGE_SYNC", payload: {} };
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC_CHANNELS.appEvent, evt);
+      if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.webContents.send(IPC_CHANNELS.appEvent, evt);
+
+      ensureWidgetWindowVisible();
     };
 
-    const listSkillSummaries = async (): Promise<SkillSummary[]> => {
-      if (!activeGatewayManager) return [];
-      const [tools, skills] = await Promise.all([
-        activeGatewayManager.toolsCatalog().catch(() => [] as OpenClawToolEntry[]),
-        activeGatewayManager.skillsStatus().catch(() => [] as OpenClawSkillEntry[]),
-      ]);
-      return mapToolsAndSkillsToSkillSummaries(tools, skills);
-    };
+    const syncSignedOutShell = (): void => {
+      activeMonitorManager?.stop();
+      activeTaskSchedulerManager?.stop();
+      hideWidgetWindow(store);
+      showMainWindow();
 
-    ipcMain.handle(IPC_CHANNELS.desktopScreenshot, async () =>
-      activeDesktopController!.captureScreenshot()
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopClick, async (_e, p: { x: number; y: number; button?: string }) =>
-      activeDesktopController!.click(p.x, p.y, (p.button ?? "left") as "left" | "right" | "middle")
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopMove, async (_e, p: { x: number; y: number }) =>
-      activeDesktopController!.moveMouse(p.x, p.y)
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopType, async (_e, p: { text: string }) =>
-      activeDesktopController!.typeText(p.text)
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopKey, async (_e, p: { key: string }) =>
-      activeDesktopController!.pressKey(p.key)
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopOpenApp, async (_e, p: { target: string }) =>
-      p.target.startsWith("http")
-        ? activeDesktopController!.openUrl(p.target)
-        : activeDesktopController!.openApp(p.target)
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopGetScreenSize, async () =>
-      activeDesktopController!.getScreenSize()
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopRightClick, async (_e, p: { x: number; y: number }) =>
-      activeDesktopController!.rightClick(p.x, p.y)
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopDoubleClick, async (_e, p: { x: number; y: number }) =>
-      activeDesktopController!.doubleClick(p.x, p.y)
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopScroll, async (_e, p: { direction: "up" | "down" | "left" | "right"; amount?: number }) =>
-      activeDesktopController!.scroll(p.direction, p.amount)
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopDrag, async (_e, p: { fromX: number; fromY: number; toX: number; toY: number }) =>
-      activeDesktopController!.drag(p.fromX, p.fromY, p.toX, p.toY)
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopClipboardRead, async () =>
-      activeDesktopController!.clipboardRead()
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopClipboardWrite, async (_e, p: { text: string }) =>
-      activeDesktopController!.clipboardWrite(p.text)
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopRunCommand, async (_e, p: { command: string; timeoutMs?: number }) =>
-      activeDesktopController!.runCommand(p.command, p.timeoutMs)
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopGetActiveWindow, async () =>
-      activeDesktopController!.getActiveWindow()
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopListWindows, async () =>
-      activeDesktopController!.listWindows()
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopFocusWindow, async (_e, p: { title: string }) =>
-      activeDesktopController!.focusWindowByTitle(p.title)
-    );
-    ipcMain.handle(IPC_CHANNELS.desktopGetCursor, async () =>
-      activeDesktopController!.getCursorPosition()
-    );
+      const evt = { type: "STORAGE_SYNC", payload: {} };
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC_CHANNELS.appEvent, evt);
+      if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.webContents.send(IPC_CHANNELS.appEvent, evt);
+    };
 
     ipcMain.handle(IPC_CHANNELS.authGetState, async () => authService.getState());
-    ipcMain.handle(IPC_CHANNELS.authSignIn, async (_event, payload: { email: string; password: string }) =>
-      authService.signIn(payload.email, payload.password)
-    );
-    ipcMain.handle(IPC_CHANNELS.authSignUp, async (_event, payload: { email: string; password: string }) =>
-      authService.signUp(payload.email, payload.password)
-    );
-    ipcMain.handle(IPC_CHANNELS.authGoogle, async (_event, payload: { email: string }) =>
-      authService.signInWithGoogle(payload.email)
-    );
-    ipcMain.handle(IPC_CHANNELS.authSignOut, async () => authService.signOut());
+    ipcMain.handle(IPC_CHANNELS.authSignIn, async (_event, payload: { email: string; password: string }) => {
+      const authState = authService.signIn(payload.email);
+      syncSignedInShell();
+      return authState;
+    });
+    ipcMain.handle(IPC_CHANNELS.authSignUp, async (_event, payload: { email: string; password: string }) => {
+      const authState = authService.signUp(payload.email);
+      syncSignedInShell();
+      return authState;
+    });
+    ipcMain.handle(IPC_CHANNELS.authGoogle, async (_event, payload: { email: string }) => {
+      const authState = authService.signInWithGoogle(payload.email);
+      syncSignedInShell();
+      return authState;
+    });
+    ipcMain.handle(IPC_CHANNELS.authGoogleExternal, async (_event, config) => {
+      const result = await authBroker.authenticateExternal(config);
+      syncSignedInShell();
+      return result;
+    });
+    ipcMain.handle(IPC_CHANNELS.authSignOut, async () => {
+      const authState = authService.signOut();
+      syncSignedOutShell();
+      return authState;
+    });
     ipcMain.handle(IPC_CHANNELS.storageGet, async (_event, payload?: { keys?: Array<keyof AuraStorageShape> | null }) => store.get(payload?.keys));
     ipcMain.handle(IPC_CHANNELS.storageSet, async (_event, payload: Partial<AuraStorageShape>) => {
       const nextState = store.patch(payload);
@@ -676,13 +446,19 @@ const createAppWindows = async (): Promise<void> => {
     });
     ipcMain.handle(IPC_CHANNELS.runtimeGetStatus, async () => activeGatewayManager!.getStatus());
     ipcMain.handle(IPC_CHANNELS.runtimeBootstrap, async () => activeGatewayManager!.bootstrap());
-    ipcMain.handle(IPC_CHANNELS.runtimeRestart, async () => activeGatewayManager!.restart());
-    ipcMain.handle(IPC_CHANNELS.runtimeExportSupport, async () => exportSupportBundle());
+    ipcMain.handle(IPC_CHANNELS.runtimeRestart, async () => {
+      const status = await activeGatewayManager!.restart();
+      restartAutomationWsServer();
+      return status;
+    });
     ipcMain.handle(IPC_CHANNELS.appShowMainWindow, async () => {
       showMainWindow();
     });
     ipcMain.handle(IPC_CHANNELS.appShowWidgetWindow, async () => {
       showWidgetWindow(store, true, true);
+    });
+    ipcMain.handle(IPC_CHANNELS.appHideWidgetWindow, async () => {
+      hideWidgetWindow(store);
     });
     ipcMain.handle(IPC_CHANNELS.appQuit, async () => {
       isQuitting = true;
@@ -696,96 +472,71 @@ const createAppWindows = async (): Promise<void> => {
       return true;
     });
     ipcMain.handle(IPC_CHANNELS.chatSend, async (_event, payload) => {
-      if (widgetWindow && !widgetWindow.isDestroyed() && widgetWindow.isFocused() && looksLikeDesktopAutomationRequest(payload.message)) {
-        widgetAutoHiddenForDesktopRun = true;
-        suppressAuraWindowFocusForDesktopRun();
-        hideWidgetWindowTemporarily();
-      }
-
-      try {
-        return await activeGatewayManager!.sendChat(payload);
-      } catch (error) {
-        restoreWidgetWindowIfNeeded();
-        throw error;
-      }
+      requireAuthenticatedSession();
+      return activeGatewayManager!.sendChat(payload);
     });
     ipcMain.handle(IPC_CHANNELS.chatStop, async () => activeGatewayManager!.stopResponse());
-    ipcMain.handle(IPC_CHANNELS.chatConfirmAction, async (_event, payload: {
-      requestId: string;
-      decision?: ApprovalDecision;
-      confirmed?: boolean;
-    }) => {
-      const decision = payload.decision ?? (payload.confirmed ? "allow-once" : "deny");
-      await activeGatewayManager!.resolveChatConfirmation(payload.requestId, decision);
+    ipcMain.handle(IPC_CHANNELS.taskConfirmResponse, async (_event, payload: { requestId: string; confirmed: boolean }) => {
+      activeGatewayManager!.resolveConfirmation(payload.requestId, payload.confirmed);
     });
-    ipcMain.handle(IPC_CHANNELS.sessionsCreate, async (_event, payload?: OpenClawSessionCreateParams) => {
-      if (!activeGatewayManager) throw new Error("Gateway not ready");
-      return activeGatewayManager.sessionsCreate(payload);
+    ipcMain.handle(IPC_CHANNELS.taskCancel, async (_event, payload: { taskId: string }) => {
+      activeGatewayManager!.cancelTask(payload.taskId);
     });
-    ipcMain.handle(IPC_CHANNELS.sessionsList, async () => {
-      if (!activeGatewayManager) return [];
-      return activeGatewayManager.sessionsList().catch(() => []);
-    });
-    ipcMain.handle(IPC_CHANNELS.sessionsGet, async (_event, sessionKey: string) => {
-      if (!activeGatewayManager) return null;
-      return activeGatewayManager.sessionsGet(sessionKey).catch(() => null);
-    });
-    ipcMain.handle(IPC_CHANNELS.automationStart, async (_event, job: AutomationJob) => {
-      if (!activeGatewayManager) throw new Error("Gateway not ready");
-      const existing = (await activeGatewayManager.cronList()).find((entry) => entry.id === job.id);
-      if (existing) {
-        await activeGatewayManager.cronUpdate(job.id, {
-          name: job.title,
-          prompt: job.sourcePrompt,
-          schedule: job.schedule.cron ?? existing.schedule,
-          enabled: true,
-        });
-        return;
-      }
-      await activeGatewayManager.cronAdd({
-        name: job.title,
-        prompt: job.sourcePrompt,
-        schedule: job.schedule.cron ?? `*/${job.schedule.intervalMinutes ?? job.intervalMinutes ?? 60} * * * *`,
-        sessionKey: store.getState().currentSessionKey ?? undefined,
-        delivery: job.url ? { url: job.url } : undefined,
-      });
-    });
-    ipcMain.handle(IPC_CHANNELS.automationStop, async (_event, payload: { id: string }) => {
-      if (!activeGatewayManager) throw new Error("Gateway not ready");
-      await activeGatewayManager.cronUpdate(payload.id, { enabled: false });
-    });
-    ipcMain.handle(IPC_CHANNELS.automationDelete, async (_event, payload: { id: string }) => {
-      if (!activeGatewayManager) throw new Error("Gateway not ready");
-      await activeGatewayManager.cronRemove(payload.id);
-    });
-    ipcMain.handle(IPC_CHANNELS.automationList, async () => listAutomationJobs().catch(() => []));
-    ipcMain.handle(IPC_CHANNELS.automationRunNow, async (_event, payload: { id: string }) => {
-      if (!activeGatewayManager) throw new Error("Gateway not ready");
-      await activeGatewayManager.cronRun(payload.id);
-    });
-    ipcMain.handle(IPC_CHANNELS.monitorStart, async (_event, monitor: AutomationJob) => {
-      if (!activeGatewayManager) throw new Error("Gateway not ready");
-      const schedule = monitor.schedule.cron ?? `*/${monitor.schedule.intervalMinutes ?? monitor.intervalMinutes ?? 60} * * * *`;
-      await activeGatewayManager.cronAdd({
-        name: monitor.title,
-        prompt: monitor.sourcePrompt,
-        schedule,
-        sessionKey: store.getState().currentSessionKey ?? undefined,
-        delivery: monitor.url ? { url: monitor.url } : undefined,
-      });
+    ipcMain.handle(IPC_CHANNELS.monitorStart, async (_event, monitor) => {
+      requireAuthenticatedSession();
+      activeMonitorManager!.scheduleMonitor(monitor as import("@shared/types").PageMonitor);
     });
     ipcMain.handle(IPC_CHANNELS.monitorStop, async (_event, payload: { id: string }) => {
-      if (!activeGatewayManager) throw new Error("Gateway not ready");
-      await activeGatewayManager.cronUpdate(payload.id, { enabled: false });
+      requireAuthenticatedSession();
+      activeMonitorManager!.unscheduleMonitor(payload.id);
     });
-    ipcMain.handle(IPC_CHANNELS.monitorList, async () => listAutomationJobs().catch(() => []));
+    ipcMain.handle(IPC_CHANNELS.monitorRunNow, async (_event, payload: { id: string }) => {
+      requireAuthenticatedSession();
+      return activeMonitorManager!.runMonitorNow(payload.id);
+    });
+    ipcMain.handle(IPC_CHANNELS.monitorList, async () => store.getState().monitors);
+    ipcMain.handle(IPC_CHANNELS.scheduledTaskCreate, async (_event, task) => {
+      requireAuthenticatedSession();
+      return activeTaskSchedulerManager!.createTask(task as import("@shared/types").ScheduledTask);
+    });
+    ipcMain.handle(IPC_CHANNELS.scheduledTaskDelete, async (_event, payload: { id: string }) => {
+      requireAuthenticatedSession();
+      return activeTaskSchedulerManager!.deleteTask(payload.id);
+    });
+    ipcMain.handle(IPC_CHANNELS.scheduledTaskRunNow, async (_event, payload: { id: string }) => {
+      requireAuthenticatedSession();
+      await activeTaskSchedulerManager!.runTaskNow(payload.id);
+    });
+    ipcMain.handle(IPC_CHANNELS.scheduledTaskList, async () => store.getState().scheduledTasks);
     ipcMain.handle(IPC_CHANNELS.configGet, async () => configManager.readConfig());
     ipcMain.handle(IPC_CHANNELS.configSetApiKey, async (_event, payload: { provider: string; apiKey: string }) => {
       configManager.setApiKey(payload.provider, payload.apiKey);
     });
+    ipcMain.handle(IPC_CHANNELS.configUpdateAgent, async (_event, payload: { provider?: string; model?: string }) => {
+      configManager.updateAgent(payload);
+    });
+    ipcMain.handle(IPC_CHANNELS.configSetGateway, async (_event, payload: { url?: string; token?: string; sessionKey?: string }) => {
+      configManager.setGatewaySettings(payload);
+    });
     ipcMain.handle(IPC_CHANNELS.configSetModel, async (_event, payload: { model: string; provider?: string }) => {
       configManager.setModel(payload.model, payload.provider);
     });
+    ipcMain.handle(
+      IPC_CHANNELS.configUpdateAutomation,
+      async (
+        _event,
+        payload: {
+          primaryStrict?: boolean;
+          disableLocalFallback?: boolean;
+          policyTier?: "safe_auto" | "confirm" | "locked";
+          maxStepRetries?: number;
+          wsProtocolVersion?: string;
+          eventReplayLimit?: number;
+        },
+      ) => {
+        configManager.updateAutomation(payload);
+      },
+    );
     ipcMain.handle(IPC_CHANNELS.configGetProviders, async () => configManager.getProviders());
     ipcMain.handle(IPC_CHANNELS.gatewayGetStatus, async () => activeGatewayManager!.getGatewayStatus());
     ipcMain.handle(IPC_CHANNELS.gatewayRestart, async () => activeGatewayManager!.restart());
@@ -811,11 +562,17 @@ const createAppWindows = async (): Promise<void> => {
       store.set("permissions", nextPermissions);
       return nextPermissions;
     });
-    ipcMain.handle(IPC_CHANNELS.skillsList, async () => listSkillSummaries().catch(() => []));
-    ipcMain.handle(IPC_CHANNELS.skillsGet, async (_event, id: string) => {
-      const skills = await listSkillSummaries().catch(() => []);
-      return skills.find((skill) => skill.id === id || skill.name === id) ?? null;
-    });
+    ipcMain.handle(IPC_CHANNELS.skillsList, async () => skillService.listSkillSummaries());
+    ipcMain.handle(
+      IPC_CHANNELS.skillRun,
+      async (
+        _event,
+        payload: { skillId: string; message?: string; source?: "text" | "voice"; background?: boolean; sessionId?: string },
+      ) => {
+        requireAuthenticatedSession();
+        return activeGatewayManager!.runSkill(payload);
+      },
+    );
 
     ipcMain.on(IPC_CHANNELS.internalBrowserSelection, (event, payload) => {
       browserController.handleSelectionEvent(event.sender.id, payload as { text: string; x: number; y: number } | null);
@@ -839,6 +596,20 @@ const createAppWindows = async (): Promise<void> => {
       }
     });
 
+    widgetWindow.on("show", () => {
+      reinforceWidgetOverlay();
+    });
+
+    widgetWindow.on("focus", () => {
+      reinforceWidgetOverlay();
+    });
+
+    widgetWindow.on("blur", () => {
+      setTimeout(() => {
+        reinforceWidgetOverlay();
+      }, 40);
+    });
+
     widgetWindow.on("closed", () => {
       widgetWindow = null;
     });
@@ -849,20 +620,34 @@ const createAppWindows = async (): Promise<void> => {
     ]);
 
     await browserController.initialize();
-    await activeGatewayManager!.bootstrap();
-
-    if (!launchedAsWidgetOnly && !mainWindow.isVisible()) {
-      mainWindow.show();
+    const bootstrapState = await activeGatewayManager!.bootstrap();
+    logStartupNote(
+      "bootstrap",
+      `${bootstrapState.stage}: ${bootstrapState.message}${bootstrapState.detail ? ` (${bootstrapState.detail})` : ""}`
+    );
+    if (store.getState().authState.authenticated) {
+      activeMonitorManager!.start();
+      activeTaskSchedulerManager!.start();
+      if (!launchedAsWidgetOnly && !mainWindow.isVisible()) {
+        mainWindow.show();
+      }
+      ensureWidgetWindowVisible();
+    } else {
+      hideWidgetWindow(store);
+      showMainWindow();
     }
-    ensureWidgetWindowVisible();
   } finally {
     isCreatingWindows = false;
   }
 };
 
 app.on("second-instance", (_event, commandLine) => {
-  ensureWidgetWindowVisible();
-  if (!commandLine.includes(WIDGET_STARTUP_ARG)) {
+  if (hasAuthenticatedSession()) {
+    ensureWidgetWindowVisible();
+    if (!commandLine.includes(WIDGET_STARTUP_ARG)) {
+      showMainWindow();
+    }
+  } else {
     showMainWindow();
   }
 });
@@ -873,10 +658,17 @@ void app.whenReady().then(() => {
   }
   loadEnvFiles();
   return createAppWindows();
+}).catch((error) => {
+  logStartupError("app.whenReady", error);
+  throw error;
 });
 
 app.on("before-quit", () => {
   isQuitting = true;
+  activeAutomationWsServer?.stop();
+  activeAutomationWsServer = null;
+  activeMonitorManager?.stop();
+  activeTaskSchedulerManager?.stop();
   void activeGatewayManager?.shutdown();
 });
 
@@ -885,7 +677,9 @@ app.on("activate", () => {
     void createAppWindows();
     return;
   }
-  ensureWidgetWindowVisible();
+  if (hasAuthenticatedSession()) {
+    ensureWidgetWindowVisible();
+  }
   showMainWindow();
 });
 

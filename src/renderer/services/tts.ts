@@ -34,6 +34,65 @@ function chunkCaptions(text: string, maxWords = 6): string[] {
   return chunks.length > 0 ? chunks : [text];
 }
 
+const DEFAULT_DEEPGRAM_TTS_MODEL = "aura-2-athena-en";
+const FALLBACK_DEEPGRAM_TTS_MODELS = ["aura-2-helena-en", "aura-asteria-en"];
+
+function stripSpeechArtifacts(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/\bwww\.\S+\b/gi, " ")
+    .replace(/\b\S+@\S+\.\S+\b/gi, " ")
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, " ")
+    .replace(/[:;=8xX]-?[)(DPp/\\|]/g, " ")
+    .replace(/\s+-\s+/g, ". ")
+    .replace(/\s+\/\s+/g, " or ")
+    .replace(/\s*&\s*/g, " and ")
+    .replace(/\s*([,;:.!?])\s*/g, "$1 ")
+    .replace(/([!?.,]){2,}/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function prepareSpeechText(text: string): string {
+  const cleaned = stripSpeechArtifacts(stripMarkdown(text)).trim();
+  if (!cleaned) {
+    return "";
+  }
+
+  const normalized = cleaned.length > 900
+    ? `${cleaned.slice(0, 900).trimEnd()}...`
+    : cleaned;
+
+  return /[.!?…]$/.test(normalized) ? normalized : `${normalized}.`;
+}
+
+function chunkSpeechCaptions(text: string, maxWords = 7): string[] {
+  const clauses = text.split(/(?<=[.!?…])\s+|(?<=[,;:—–-])\s+/).filter(Boolean);
+  const chunks: string[] = [];
+
+  for (const clause of clauses) {
+    const words = clause.split(/\s+/).filter(Boolean);
+    if (words.length <= maxWords) {
+      chunks.push(words.join(" "));
+      continue;
+    }
+
+    for (let i = 0; i < words.length; i += maxWords) {
+      chunks.push(words.slice(i, i + maxWords).join(" "));
+    }
+  }
+
+  return chunks.length > 0 ? chunks : [text];
+}
+
+function getPreferredDeepgramModels(): string[] {
+  const configuredModel = (import.meta.env.VITE_DEEPGRAM_TTS_MODEL as string | undefined)?.trim();
+  return [configuredModel, DEFAULT_DEEPGRAM_TTS_MODEL, ...FALLBACK_DEEPGRAM_TTS_MODELS]
+    .filter((value): value is string => Boolean(value))
+    .filter((value, index, values) => values.indexOf(value) === index);
+}
+
 let currentAudio: HTMLAudioElement | null = null;
 
 /** Stop all speech immediately */
@@ -60,9 +119,10 @@ export async function speakStreaming(
 ): Promise<void> {
   if (!text.trim()) return;
 
-  const clean = stripMarkdown(text);
-  const safe = clean.length > 700 ? clean.slice(0, 700).trimEnd() + "..." : clean;
-  const chunks = chunkCaptions(safe, 6);
+  const safe = prepareSpeechText(text);
+  if (!safe) return;
+
+  const chunks = chunkSpeechCaptions(safe, 7);
 
   if (signal?.aborted) return;
 
@@ -97,6 +157,39 @@ export async function speak(text: string, deepgramKey?: string): Promise<void> {
 
 // --- Deepgram TTS ---
 
+async function fetchDeepgramAudio(
+  text: string,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  let lastError: Error | null = null;
+
+  for (const model of getPreferredDeepgramModels()) {
+    const response = await fetch(
+      `https://api.deepgram.com/v1/speak?model=${encodeURIComponent(model)}&encoding=mp3`,
+      {
+        method: "POST",
+        headers: { Authorization: `Token ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+        signal,
+      },
+    );
+
+    if (response.ok) {
+      return response.blob();
+    }
+
+    const body = await response.text().catch(() => "");
+    lastError = new Error(`Deepgram TTS ${response.status}: ${body.slice(0, 160)}`);
+
+    if (response.status === 401 || response.status === 403 || response.status === 429) {
+      throw lastError;
+    }
+  }
+
+  throw lastError ?? new Error("Deepgram TTS failed.");
+}
+
 async function speakDeepgram(
   text: string,
   apiKey: string,
@@ -104,29 +197,15 @@ async function speakDeepgram(
   onChunk: (c: string) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(
-    "https://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mp3",
-    {
-      method: "POST",
-      headers: { Authorization: `Token ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-      signal,
-    },
-  );
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`Deepgram TTS ${response.status}: ${body.slice(0, 120)}`);
-  }
-
-  const blob = await response.blob();
+  const blob = await fetchDeepgramAudio(text, apiKey, signal);
   const url = URL.createObjectURL(blob);
 
   return new Promise<void>((resolve, reject) => {
     const audio = new Audio(url);
-    audio.playbackRate = 0.92;
+    audio.playbackRate = 1;
     currentAudio = audio;
 
+    let settled = false;
     let lastChunkIdx = -1;
     const advanceCaption = () => {
       if (!audio.duration || chunks.length === 0) return;
@@ -138,6 +217,8 @@ async function speakDeepgram(
     audio.ontimeupdate = advanceCaption;
 
     const cleanup = (err?: Error) => {
+      if (settled) return;
+      settled = true;
       try { audio.pause(); audio.src = ""; } catch { /* ignore */ }
       URL.revokeObjectURL(url);
       currentAudio = null;
@@ -172,18 +253,15 @@ function speakWithWebSpeech(
       if (signal?.aborted) { resolve(); return; }
 
       const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 0.95;
-      utterance.pitch = 1.0;
+      utterance.rate = 0.98;
+      utterance.pitch = 1.02;
       utterance.volume = 1.0;
       utterance.lang = "en-US";
 
       const voices = window.speechSynthesis.getVoices();
       const preferred = voices.find(
-        (v) => v.lang.startsWith("en") && (
-          v.name.includes("Google") || v.name.includes("Natural") ||
-          v.name.includes("Samantha") || v.name.includes("Microsoft")
-        ),
-      );
+        (v) => v.lang.startsWith("en") && /Aria|Jenny|Neural|Natural|Samantha|Google|Microsoft/i.test(v.name),
+      ) ?? voices.find((v) => v.lang.startsWith("en"));
       if (preferred) utterance.voice = preferred;
 
       if (chunks && chunks.length > 0 && onChunk) {

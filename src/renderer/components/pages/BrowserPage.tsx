@@ -60,21 +60,21 @@ const BrowserToolbar = (): JSX.Element => {
   }, [omniboxValue]);
 
   return (
-    <div className="flex flex-col border-b border-white/5 bg-[#1a1926]/95 px-6 pt-4 pb-2 backdrop-blur-2xl">
+    <div className="flex flex-col border-b border-white/[0.06] bg-gradient-to-b from-[#1e1d30]/95 to-[#17162a]/95 px-6 pt-4 pb-2 backdrop-blur-2xl">
       <div className="flex items-center gap-3">
         <div className="flex items-center gap-1">
-          <button className="flex h-8 w-8 items-center justify-center rounded-full text-aura-text transition hover:bg-white/10" onClick={() => void browserBack()}>
+          <button className="flex h-8 w-8 items-center justify-center rounded-full text-aura-muted transition-colors hover:bg-white/[0.08] hover:text-aura-text" onClick={() => void browserBack()}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
           </button>
-          <button className="flex h-8 w-8 items-center justify-center rounded-full text-aura-text transition hover:bg-white/10" onClick={() => void browserForward()}>
+          <button className="flex h-8 w-8 items-center justify-center rounded-full text-aura-muted transition-colors hover:bg-white/[0.08] hover:text-aura-text" onClick={() => void browserForward()}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6"/></svg>
           </button>
-          <button className="flex h-8 w-8 items-center justify-center rounded-full text-aura-text transition hover:bg-white/10" onClick={() => void browserReload()}>
+          <button className="flex h-8 w-8 items-center justify-center rounded-full text-aura-muted transition-colors hover:bg-white/[0.08] hover:text-aura-text" onClick={() => void browserReload()}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
           </button>
         </div>
         
-        <div className="group relative flex-1 max-w-[800px] flex items-center rounded-[20px] bg-black/20 border border-white/10 px-4 py-1.5 transition focus-within:border-white/20 focus-within:bg-black/30">
+        <div className="group relative flex-1 max-w-[800px] flex items-center rounded-[16px] bg-black/25 border border-white/[0.08] px-4 py-1.5 transition-all focus-within:border-aura-violet/30 focus-within:bg-black/35 focus-within:shadow-[0_0_16px_rgba(124,58,237,0.1)]">
           <svg className="text-aura-muted group-focus-within:text-aura-text" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
           <input
             value={localUrl}
@@ -90,7 +90,7 @@ const BrowserToolbar = (): JSX.Element => {
         </div>
         
         <div className="flex items-center">
-           <Button className="bg-aura-gradient text-white shadow-aura-glow transition hover:scale-105" onClick={() => void window.auraDesktop.app.showWidgetWindow()}>
+           <Button className="bg-aura-gradient text-white shadow-[0_4px_16px_rgba(124,58,237,0.3)] transition-all hover:shadow-[0_6px_24px_rgba(124,58,237,0.4)]" onClick={() => void window.auraDesktop.app.showWidgetWindow()}>
              Send to Aura
            </Button>
         </div>
@@ -100,10 +100,10 @@ const BrowserToolbar = (): JSX.Element => {
         {browserTabs.map((tab) => (
           <div
             key={tab.id}
-            className={`group relative flex h-9 min-w-[140px] max-w-[220px] cursor-pointer items-center justify-between gap-3 rounded-t-[14px] border border-b-0 px-3 transition-colors ${
+            className={`group relative flex h-9 min-w-[140px] max-w-[220px] cursor-pointer items-center justify-between gap-3 rounded-t-[14px] border border-b-0 px-3 transition-all duration-200 ${
               tab.id === activeBrowserTabId
-                ? "border-white/10 bg-[#252436] text-aura-text"
-                : "border-transparent bg-transparent text-aura-muted hover:bg-white/5 hover:text-aura-text"
+                ? "border-white/[0.1] bg-[#252436] text-aura-text shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+                : "border-transparent bg-transparent text-aura-muted hover:bg-white/[0.04] hover:text-aura-text"
             }`}
             onClick={() => void browserSwitchTab(tab.id)}
           >
@@ -176,7 +176,7 @@ export const BrowserPage = (): JSX.Element => {
   }, [activeBrowserTabId, browserSyncBounds, refreshPageContext, route]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[32px] border border-white/5 bg-[#0c0b14] shadow-2xl">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[28px] border border-white/[0.06] bg-[#0c0b14] shadow-[0_20px_60px_rgba(0,0,0,0.4)]">
       <BrowserToolbar />
       <div className="relative flex-1 bg-white">
         <div ref={hostRef} className="absolute inset-0" />

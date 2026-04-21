@@ -1,25 +1,26 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 import { useAuraStore } from "@renderer/store/useAuraStore";
+import type { SkillSummary } from "@shared/types";
 
-import { Card, SectionHeading, TextInput } from "../shared";
 import { StatusPill } from "../primitives";
+import { SectionHeading, InfoTile } from "../shared";
 
-const categorizeSkill = (id: string, name: string): string => {
-  const haystack = `${id} ${name}`.toLowerCase();
-  if (/(gmail|mail|outlook|slack|whatsapp|telegram|discord|message|calendar|meet|drive)/.test(haystack)) {
-    return "Communication";
-  }
-  if (/(github|code|dev|terminal|shell|build|deploy)/.test(haystack)) {
-    return "Development";
-  }
-  if (/(browser|web|search|scrape|research)/.test(haystack)) {
-    return "Web";
-  }
-  if (/(image|video|audio|voice|design|caption)/.test(haystack)) {
-    return "Media";
-  }
-  return "General";
+const getReadinessTone = (readiness?: string): "default" | "success" | "warning" | "error" => {
+  if (readiness === "ready") return "success";
+  if (readiness === "needs_setup") return "warning";
+  if (readiness === "unsupported" || readiness === "disabled") return "error";
+  return "default";
+};
+
+const getReadinessLabel = (readiness?: string, browserBacked?: boolean, auraBacked?: boolean): string => {
+  if (readiness === "ready" && browserBacked) return "Browser Ready";
+  if (readiness === "ready" && auraBacked) return "Aura Ready";
+  if (readiness === "needs_setup") return "Setup Needed";
+  if (readiness === "unsupported") return "Unsupported";
+  if (readiness === "disabled") return "Disabled";
+  if (readiness === "ready") return "Ready";
+  return "Available";
 };
 
 export const SkillsPage = (): JSX.Element => {
@@ -27,118 +28,176 @@ export const SkillsPage = (): JSX.Element => {
   const loadSkills = useAuraStore((state) => state.loadSkills);
   const setRoute = useAuraStore((state) => state.setRoute);
   const setInputValue = useAuraStore((state) => state.setInputValue);
-  const usedSkillIds = useAuraStore((state) => state.usedSkillIds);
-  const [query, setQuery] = useState("");
 
   useEffect(() => {
     void loadSkills();
   }, [loadSkills]);
 
-  const filtered = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return skills;
-    return skills.filter((skill) =>
-      `${skill.id} ${skill.name} ${skill.description}`.toLowerCase().includes(normalized)
-    );
-  }, [query, skills]);
+  const readyCount = skills.filter((s) => s.readiness === "ready").length;
+  const browserReadyCount = skills.filter((s) => s.readiness === "ready" && s.browserBacked).length;
+  const setupCount = skills.filter((s) => s.readiness === "needs_setup").length;
 
-  const groups = useMemo(() => {
-    const mapped = new Map<string, typeof filtered>();
-    for (const skill of filtered) {
-      const category = categorizeSkill(skill.id, skill.name);
-      const existing = mapped.get(category) ?? [];
-      mapped.set(category, [...existing, skill]);
+  const groupedSkills = useMemo(() => {
+    const groups: Record<string, SkillSummary[]> = {};
+    for (const skill of skills) {
+      const cat = skill.category || "Uncategorized";
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push(skill);
     }
-    return [...mapped.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [filtered]);
+    // Sort categories alphabetically
+    return Object.keys(groups)
+      .sort()
+      .map((category) => ({
+        category,
+        items: groups[category].sort((a, b) => a.name.localeCompare(b.name)),
+      }));
+  }, [skills]);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const scrollToCategory = (category: string) => {
+    const element = document.getElementById(`category-${category}`);
+    if (element && scrollRef.current) {
+      const topPos = element.offsetTop - 180; // Offset for sticky nav
+      scrollRef.current.scrollTo({ top: topPos, behavior: "smooth" });
+    }
+  };
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-[1400px] flex-col overflow-y-auto pr-2 pb-8 mt-2">
-      <Card className="bg-[radial-gradient(circle_at_top_left,rgba(124,58,237,0.16),transparent_40%),rgba(26,25,38,0.66)]">
-        <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <p className="text-[11px] uppercase tracking-[0.24em] text-aura-muted">Skill Catalog</p>
-            <h1 className="mt-3 text-[30px] font-bold tracking-tight text-aura-text">Bundled OpenClaw capabilities</h1>
-            <p className="mt-2 max-w-[760px] text-[14px] leading-7 text-aura-muted">
-              Browse packaged OpenClaw skills by category, then launch straight into chat with a ready-made prompt seed
-              instead of exposing raw skill files or setup complexity.
-            </p>
-          </div>
-
-          <div className="w-full max-w-[360px]">
-            <TextInput value={query} onChange={setQuery} placeholder="Search skills, apps, or categories" />
-          </div>
-        </div>
-      </Card>
-
-      <div className="mt-8 space-y-8">
+    <div ref={scrollRef} className="mx-auto mt-2 flex h-full w-full max-w-[1400px] flex-col overflow-y-auto pr-2 pb-8">
+      <div className="flex flex-col">
         <SectionHeading
           title="Available Skills"
-          detail={`${filtered.length} visible skills across ${groups.length} categories.`}
+          detail="Bundled OpenClaw skills that Aura can auto-apply across chat, navigation, and task execution."
         />
 
-        {groups.length === 0 ? (
-          <Card>
-            <div className="flex flex-col items-center justify-center py-12 text-center">
-              <div className="flex h-14 w-14 items-center justify-center rounded-full bg-aura-violet/10 text-aura-violet">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
-              </div>
-              <p className="mt-4 text-[15px] font-semibold text-aura-text">No matching skills</p>
-              <p className="mt-2 text-[13px] leading-7 text-aura-muted">Try a broader query like “mail”, “browser”, or “calendar”.</p>
-            </div>
-          </Card>
-        ) : (
-          groups.map(([category, categorySkills]) => (
-            <div key={category}>
-              <div className="mb-4 flex items-center justify-between">
-                <p className="text-[13px] font-semibold uppercase tracking-[0.18em] text-aura-muted">{category}</p>
-                <p className="text-xs text-aura-muted">{categorySkills.length} skills</p>
-              </div>
-              <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
-                {categorySkills.map((skill) => (
-                  <Card key={skill.id} className={`rounded-[28px] p-6 transition ${usedSkillIds.includes(skill.id) ? "ring-1 ring-aura-violet/40" : ""}`}>
+        {/* Stats Row */}
+        <div className="mt-4 grid gap-4 grid-cols-1 md:grid-cols-3">
+          <InfoTile
+            label="Total Ready"
+            value={readyCount.toString()}
+            detail={`Out of ${skills.length} available skills`}
+          />
+          <InfoTile
+            label="Browser Backed"
+            value={browserReadyCount.toString()}
+            detail="Native web automation workflows"
+          />
+          <InfoTile
+            label="Action Required"
+            value={setupCount.toString()}
+            detail="Require CLI, API key, or config setup"
+          />
+        </div>
+
+        {/* Sticky Category Nav */}
+        {groupedSkills.length > 0 && (
+          <div className="sticky top-0 z-20 -mx-4 mt-8 mb-6 flex flex-wrap gap-2 bg-aura-bg/85 px-4 pb-4 pt-4 backdrop-blur-xl border-b border-white/[0.04]">
+            {groupedSkills.map(({ category }) => (
+              <button
+                key={category}
+                onClick={() => scrollToCategory(category)}
+                className="rounded-full border border-white/5 bg-white/[0.03] px-4 py-1.5 text-[12px] font-semibold text-aura-muted transition-colors hover:bg-aura-violet/10 hover:text-aura-violet"
+              >
+                {category}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Skills List Grouped by Category */}
+        <div className="flex flex-col gap-10">
+          {groupedSkills.map(({ category, items }) => (
+            <div key={category} id={`category-${category}`} className="flex flex-col">
+              <h3 className="mb-4 text-[13px] font-bold uppercase tracking-[0.15em] text-aura-muted">
+                {category} <span className="opacity-60">({items.length})</span>
+              </h3>
+              
+              <div className="grid flex-1 gap-4 md:grid-cols-2 2xl:grid-cols-3">
+                {items.map((skill) => (
+                  <div
+                    key={skill.id}
+                    className="group relative flex h-full flex-col overflow-hidden rounded-[24px] border border-white/[0.05] bg-gradient-to-b from-white/[0.02] to-transparent p-6 transition-all duration-300 hover:-translate-y-1 hover:border-aura-violet/25 hover:shadow-[0_8px_30px_rgba(124,58,237,0.12)]"
+                  >
+                    <div className="absolute inset-x-0 -top-px h-px bg-gradient-to-r from-transparent via-aura-violet/40 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
+                    
                     <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-start gap-3">
-                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[16px] bg-white/5 text-aura-violet">
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] border border-white/5 bg-white/5 text-aura-muted transition-colors group-hover:bg-aura-gradient group-hover:text-white group-hover:border-transparent">
+                          <svg
+                            width="18"
+                            height="18"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                          </svg>
                         </div>
                         <div>
-                          <p className="text-[16px] font-bold tracking-tight text-aura-text">{skill.name}</p>
-                          <p className="mt-1 text-[11px] uppercase tracking-[0.18em] text-aura-violet">{skill.id}</p>
+                          <p className="text-[16px] font-bold tracking-tight text-aura-text transition-colors group-hover:text-white">
+                            {skill.name}
+                          </p>
+                          <p className="mt-0.5 text-[11px] uppercase tracking-[0.15em] text-aura-violet/80">
+                            {skill.id}
+                          </p>
                         </div>
                       </div>
-                      <div className="flex flex-col items-end gap-1">
-                        <StatusPill label={skill.enabled ? "Ready" : "Disabled"} tone={skill.enabled ? "success" : "default"} />
-                        {usedSkillIds.includes(skill.id) && (
-                          <span className="rounded-full bg-aura-violet/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-aura-violet">
-                            Used
-                          </span>
-                        )}
-                      </div>
+                      <StatusPill
+                        label={getReadinessLabel(skill.readiness, skill.browserBacked, skill.auraBacked)}
+                        tone={getReadinessTone(skill.readiness)}
+                      />
                     </div>
-
-                    <p className="mt-5 min-h-[72px] text-[14px] leading-7 text-aura-muted">{skill.description}</p>
-
-                    <div className="mt-5 flex items-center justify-between gap-3">
-                      <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.16em] text-aura-muted">
-                        {category}
-                      </span>
+                    
+                    <p className="mt-5 flex-1 text-[13px] leading-[1.6] text-aura-muted opacity-90 line-clamp-3">
+                      {skill.description}
+                    </p>
+                    
+                    {skill.setupHint ? (
+                      <div className="mt-4 rounded-[14px] border border-white/5 bg-black/20 p-3">
+                        <p className="text-[11.5px] leading-relaxed text-aura-muted/90">
+                          <span className="font-semibold text-aura-text/80">Hint:</span> {skill.setupHint}
+                        </p>
+                      </div>
+                    ) : null}
+                    
+                    {skill.keywords && skill.keywords.length > 0 ? (
+                      <div className="mt-4 flex flex-wrap gap-1.5">
+                        {skill.keywords.slice(0, 4).map((keyword) => (
+                          <span
+                            key={`${skill.id}-${keyword}`}
+                            className="rounded-lg bg-white/[0.04] px-2.5 py-1 text-[10px] font-medium text-aura-muted"
+                          >
+                            {keyword}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    
+                    <div className="mt-5 pt-4 border-t border-white/[0.04]">
                       <button
-                        className="rounded-[14px] border border-aura-violet/30 bg-aura-violet/10 px-4 py-2 text-xs font-semibold text-aura-violet transition hover:bg-aura-violet/20"
+                        className="flex w-full items-center justify-center gap-2 rounded-[14px] bg-aura-violet/10 px-4 py-2.5 text-[13px] font-semibold text-aura-violet transition-all duration-200 hover:bg-aura-violet hover:text-white"
                         onClick={() => {
-                          setInputValue(`Use the ${skill.name} skill to `);
+                          setInputValue(`Use the ${skill.name} skill to help me `);
                           void setRoute("home");
                         }}
                       >
-                        Launch In Chat
+                        Use this skill
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                          <line x1="5" y1="12" x2="19" y2="12"></line>
+                          <polyline points="12 5 19 12 12 19"></polyline>
+                        </svg>
                       </button>
                     </div>
-                  </Card>
+                  </div>
                 ))}
               </div>
             </div>
-          ))
-        )}
+          ))}
+        </div>
       </div>
     </div>
   );

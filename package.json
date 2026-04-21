@@ -7,20 +7,29 @@
   "main": "dist/main.cjs",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:main\" \"npm:dev:electron\"",
+    "dev": "concurrently --kill-others-on-fail \"npm:dev:renderer\" \"npm:dev:main\" \"npm:dev:electron\"",
     "dev:renderer": "vite",
     "dev:main": "tsup --watch",
-    "dev:electron": "wait-on http-get://127.0.0.1:5173 file:dist/main.cjs && node scripts/dev-electron.cjs",
-    "dev:electron:debug": "wait-on http-get://127.0.0.1:5173 file:dist/main.cjs && AURA_OPEN_DEVTOOLS=1 node scripts/dev-electron.cjs",
-    "build:openclaw": "cd vendor/openclaw && pnpm install && pnpm build",
-    "build": "npm run build:openclaw && npm run build:main && npm run build:renderer",
+    "dev:electron": "node scripts/dev-electron.cjs",
+    "dev:electron:debug": "AURA_OPEN_DEVTOOLS=1 node scripts/dev-electron.cjs",
+    "build": "npm run build:main && npm run build:renderer",
     "build:main": "tsup",
     "build:renderer": "vite build",
+    "stage:openclaw-runtime": "node --experimental-strip-types scripts/stage-openclaw-runtime.ts",
+    "validate:openclaw-bundle": "node --experimental-strip-types scripts/validate-openclaw-bundle.ts",
     "generate:icons": "powershell -ExecutionPolicy Bypass -File .\\scripts\\generate-windows-icon.ps1",
-    "prepackage": "cd vendor/openclaw && pnpm prune --prod || npm prune --production",
-    "package:win": "npm run prepackage && npm run generate:icons && electron-builder --win nsis",
-    "package:win:dir": "npm run prepackage && npm run generate:icons && electron-builder --win dir",
+    "generate:icons:mac": "node scripts/generate-macos-icon.mjs",
+    "bootstrap:skills:win": "powershell -ExecutionPolicy Bypass -File .\\scripts\\bootstrap-openclaw-skills.ps1",
+    "smoke:packaged-runtime": "node --experimental-strip-types scripts/smoke-packaged-runtime.ts",
+    "package:win": "npm run build && npm run generate:icons && npm run stage:openclaw-runtime && npm run validate:openclaw-bundle && electron-builder --win nsis --publish never",
+    "package:win:dir": "npm run build && npm run generate:icons && npm run stage:openclaw-runtime && npm run validate:openclaw-bundle && electron-builder --win dir --publish never && npm run smoke:packaged-runtime",
+    "package:win:portable": "npm run build && npm run generate:icons && npm run stage:openclaw-runtime && npm run validate:openclaw-bundle && electron-builder --win portable --publish never",
+    "package:mac": "npm run build && npm run generate:icons:mac && npm run stage:openclaw-runtime && npm run validate:openclaw-bundle && electron-builder --mac dmg --universal --publish never",
+    "package:mac:dir": "npm run build && npm run generate:icons:mac && npm run stage:openclaw-runtime && npm run validate:openclaw-bundle && electron-builder --mac dir --universal --publish never",
     "typecheck": "tsc --noEmit",
+    "smoke:post-merge": "node --experimental-strip-types scripts/post-merge-smoke.ts",
+    "test:automation:ws": "node scripts/test-automation-ws.cjs",
+    "eval:automation:ws": "node scripts/evaluate-automation-ws.cjs",
     "preview": "vite preview"
   },
   "build": {
@@ -28,88 +37,78 @@
     "productName": "Aura Desktop",
     "icon": "icon.png",
     "files": [
-      "dist/**",
+      "dist/*.cjs",
+      "dist/*.cjs.map",
+      "dist/renderer/**",
       "package.json"
     ],
     "directories": {
       "buildResources": "build",
-      "output": "release"
+      "output": "dist/installer-v6"
     },
     "extraResources": [
       {
-        "from": "vendor/openclaw/openclaw.mjs",
-        "to": "openclaw-src/openclaw.mjs"
-      },
-      {
-        "from": "vendor/openclaw/package.json",
-        "to": "openclaw-src/package.json"
-      },
-      {
-        "from": "vendor/openclaw/dist",
-        "to": "openclaw-src/dist",
+        "from": "native-automation",
+        "to": "native-automation",
         "filter": [
           "**/*"
         ]
       },
       {
-        "from": "vendor/openclaw/assets",
-        "to": "openclaw-src/assets",
+        "from": "build/openclaw-runtime",
+        "to": "openclaw-src",
         "filter": [
           "**/*"
-        ]
-      },
-      {
-        "from": "vendor/openclaw/skills",
-        "to": "openclaw-src/skills",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "vendor/openclaw/node_modules",
-        "to": "openclaw-src/node_modules",
-        "filter": [
-          "**/*",
-          "!.cache/**",
-          "!.package-lock.json"
         ]
       }
     ],
-    "asarUnpack": [
-      "node_modules/@nut-tree-fork/**",
-      "node_modules/koffi/**"
-    ],
     "win": {
       "target": "nsis",
-      "icon": "icon.ico"
+      "icon": "icon.ico",
+      "signAndEditExecutable": false
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "icon": "build/icon.icns",
+      "category": "public.app-category.productivity",
+      "artifactName": "Aura Desktop-${version}-mac.${ext}",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "x64ArchFiles": "Contents/Resources/openclaw-src/node_modules/**/*"
+    },
+    "dmg": {
+      "artifactName": "Aura Desktop-${version}-mac.${ext}",
+      "title": "Aura Desktop ${version}",
+      "internetEnabled": false
     },
     "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
       "installerIcon": "icon.ico",
       "uninstallerIcon": "icon.ico",
-      "installerHeaderIcon": "icon.ico",
-      "deleteAppDataOnUninstall": false,
-      "shortcutName": "Aura Desktop"
-    },
-    "copyright": "Copyright (c) 2025 Persist Ventures",
-    "publish": null
+      "installerHeaderIcon": "icon.ico"
+    }
   },
   "dependencies": {
-    "@nut-tree-fork/nut-js": "^4.2.6",
+    "@noble/ed25519": "^3.0.1",
+    "cron": "^4.4.0",
     "dompurify": "^3.3.3",
+    "firebase": "^12.12.0",
     "marked": "^17.0.4",
-    "node-cron": "^4.2.1",
+    "playwright-core": "^1.58.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "ws": "^8.20.0",
     "zustand": "^5.0.8"
   },
   "devDependencies": {
-    "@tailwindcss/typography": "^0.5.19",
     "@types/node": "^24.5.2",
-    "@types/node-cron": "^3.0.11",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/ws": "^8.18.1",

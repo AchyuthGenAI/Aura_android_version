@@ -1,12 +1,11 @@
 import { useMemo, useRef, useState, type KeyboardEvent } from "react";
 
 import { useAuraStore } from "@renderer/store/useAuraStore";
-import { getChatComposerPlaceholder } from "./ChatAssistCards";
 
 export const InputBar = ({ compact = false }: { compact?: boolean }): JSX.Element => {
   const inputValue = useAuraStore((s) => s.inputValue);
   const isLoading = useAuraStore((s) => s.isLoading);
-  const activeRun = useAuraStore((s) => s.activeRun);
+  const activeTask = useAuraStore((s) => s.activeTask);
   const macros = useAuraStore((s) => s.macros);
   const setInputValue = useAuraStore((s) => s.setInputValue);
   const sendMessage = useAuraStore((s) => s.sendMessage);
@@ -65,7 +64,15 @@ export const InputBar = ({ compact = false }: { compact?: boolean }): JSX.Elemen
             ta.style.height = Math.min(ta.scrollHeight, 140) + 'px';
           }}
           onKeyDown={handleKeyDown}
-          placeholder={getChatComposerPlaceholder(activeRun, isLoading)}
+          placeholder={
+            activeTask?.status === "planning"
+              ? "Aura is thinking through the task..."
+              : activeTask?.status === "running"
+                ? "Aura is working on it..."
+                : isLoading
+                  ? "Aura is generating a response..."
+                  : "Ask me anything, or tell me what to do..."
+          }
           rows={1}
           className="w-full resize-none rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm text-aura-text outline-none transition placeholder:text-aura-muted focus:border-aura-violet/50 focus:bg-white/8"
           style={{ minHeight: compact ? 36 : 44, maxHeight: 140 }}

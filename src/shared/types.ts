@@ -1,5 +1,5 @@
 export type ThemeMode = "dark" | "light";
-export type AppRoute = "home" | "browser" | "monitors" | "skills" | "profile" | "settings" | "history" | "desktop";
+export type AppRoute = "home" | "browser" | "monitors" | "scheduler" | "skills" | "profile" | "settings" | "history";
 export type OverlayTab = "voice" | "chat" | "history" | "tools" | "settings";
 export type ToolsSubTab = "monitors" | "macros" | "quick";
 
@@ -23,6 +23,7 @@ export interface UserProfile {
 export interface AuraSettings {
   theme: ThemeMode;
   voiceEnabled: boolean;
+  deepgramKey?: string;
   modelPreset: "managed" | "balanced" | "fast" | "quality";
   advancedMode: boolean;
   privacyMode: "standard" | "strict";
@@ -54,48 +55,23 @@ export interface ManagedProviderState {
   message: string;
 }
 
-export interface RuntimeDiagnostics {
-  bundleRootPath?: string;
-  bundleIntegrity?: "ok" | "missing-files" | "unknown";
-  missingBundleFiles?: string[];
-  gatewayUrl?: string;
-  gatewayTokenConfigured?: boolean;
-  sessionKey?: string;
-  processRunning?: boolean;
-  startupState?: string;
-  blockedReason?: string;
-  managedMode: "openclaw-first";
-  supportNote?: string;
-}
-
 export interface RuntimeStatus {
   phase:
-    | "idle"
-    | "checking"
-    | "install-required"
-    | "bootstrapping"
-    | "starting"
-    | "ready"
-    | "running"
-    | "error";
-  bundleDetected?: boolean;
+  | "idle"
+  | "checking"
+  | "install-required"
+  | "bootstrapping"
+  | "starting"
+  | "ready"
+  | "running"
+  | "error";
   version?: string;
   port?: number;
   running: boolean;
   openClawDetected: boolean;
-  gatewayConnected?: boolean;
-  degraded?: boolean;
-  lastCheckedAt?: number;
   workspacePath?: string;
   message: string;
   error?: string;
-  diagnostics?: RuntimeDiagnostics;
-}
-
-export interface SupportBundleExport {
-  path: string;
-  createdAt: number;
-  bytes: number;
 }
 
 export interface BootstrapState {
@@ -128,7 +104,6 @@ export interface AuraSessionMessage {
   content: string;
   timestamp: number;
   source?: "text" | "voice";
-  attachments?: string[];
 }
 
 export interface AuraSession {
@@ -140,97 +115,15 @@ export interface AuraSession {
   pagesVisited: string[];
 }
 
-export interface OpenClawCronJob {
-  id: string;
-  name?: string;
-  prompt: string;
-  schedule: string;
-  enabled: boolean;
-  createdAt?: string;
-  updatedAt?: string;
-  lastRunAt?: string;
-  nextRunAt?: string;
-  sessionKey?: string;
-  delivery?: Record<string, unknown>;
-  [key: string]: unknown;
-}
-
-export interface OpenClawCronRun {
-  id: string;
-  jobId: string;
-  status: string;
-  startedAt: string;
-  finishedAt?: string;
-  error?: string;
-  summary?: string;
-  [key: string]: unknown;
-}
-
-export interface OpenClawToolEntry {
-  name: string;
-  description?: string;
-  category?: string;
-  source?: string;
-  enabled?: boolean;
-  [key: string]: unknown;
-}
-
-export interface OpenClawSkillEntry {
-  id: string;
-  name: string;
-  description?: string;
-  path?: string;
-  enabled?: boolean;
-  [key: string]: unknown;
-}
-
-export interface OpenClawSessionMessage {
-  id?: string;
-  role?: string;
-  text?: string;
-  content?: string | Array<{ type?: string; text?: string; [key: string]: unknown }>;
-  createdAt?: string;
-  timestamp?: string;
-  source?: string;
-  [key: string]: unknown;
-}
-
-export interface OpenClawSessionSummary {
-  sessionKey: string;
-  title?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  lastMessageAt?: string;
-  messageCount?: number;
-  messages?: OpenClawSessionMessage[];
-  [key: string]: unknown;
-}
-
-export interface OpenClawSessionDetail {
-  sessionKey: string;
-  title?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  messages?: OpenClawSessionMessage[];
-  [key: string]: unknown;
-}
-
-export interface OpenClawSessionCreateParams {
-  key?: string;
-  agentId?: string;
-  label?: string;
-  model?: string;
-  parentSessionKey?: string;
-  task?: string;
-  message?: string;
-}
-
 export interface HistoryEntry {
   id: string;
   command: string;
   result: string;
   status: "done" | "error" | "cancelled";
   createdAt: number;
+  runtime?: AutomationRuntime;
+  surface?: TaskSurface;
+  executionMode?: TaskExecutionMode;
 }
 
 export interface ChatThreadMessage {
@@ -238,14 +131,32 @@ export interface ChatThreadMessage {
   role: "user" | "assistant" | "system";
   content: string;
   status?: "streaming" | "done" | "error" | "status";
-  attachments?: string[];
 }
 
+export type AutomationRuntime = "openclaw" | "aura-local";
+export type TaskSurface = "browser" | "desktop" | "mixed";
+export type TaskExecutionMode = "auto" | "gateway" | "local_browser" | "local_desktop";
+
 export type ToolName =
+  | "open"
   | "click"
+  | "double_click"
+  | "right_click"
   | "type"
+  | "edit"
+  | "clear"
+  | "focus"
+  | "press"
+  | "search"
+  | "find"
   | "scroll"
   | "navigate"
+  | "back"
+  | "forward"
+  | "reload"
+  | "confirm"
+  | "continue"
+  | "next"
   | "extract"
   | "wait"
   | "submit"
@@ -257,40 +168,33 @@ export type ToolName =
   | "select"
   | "hover"
   | "drag_drop"
-  | "ask_user"
-  | "desktop_screenshot"
-  | "desktop_click"
-  | "desktop_right_click"
-  | "desktop_double_click"
-  | "desktop_type"
-  | "desktop_key"
-  | "desktop_open_app"
-  | "desktop_move"
-  | "desktop_scroll"
-  | "desktop_drag"
-  | "desktop_clipboard_read"
-  | "desktop_clipboard_write"
-  | "desktop_run_command";
+  | "ask_user";
 
-export interface DesktopScreenshotResult {
-  dataUrl: string;
-  width: number;
-  height: number;
-  scaleFactor: number;
-  capturedAt: number;
-  cursorX: number;
-  cursorY: number;
-}
-
-export interface DesktopWindowInfo {
-  title: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
+export type TaskStatus = "pending" | "planning" | "running" | "done" | "error" | "cancelled";
 export type TaskStepStatus = "pending" | "running" | "done" | "error";
+export type TaskVerificationStatus = "pending" | "verified" | "weak" | "failed";
+
+export interface TaskArtifact {
+  type: "screenshot" | "telemetry" | "snapshot" | "trace" | "memory";
+  label: string;
+  path?: string;
+  createdAt: number;
+  note?: string;
+}
+
+export interface TaskStepAttempt {
+  command: string;
+  startedAt: number;
+  completedAt?: number;
+  status: "running" | "done" | "error";
+  output?: string;
+}
+
+export interface TaskStepVerification {
+  status: TaskVerificationStatus;
+  message: string;
+  checkedAt: number;
+}
 
 export interface TaskStep {
   index: number;
@@ -302,27 +206,32 @@ export interface TaskStep {
   requiresConfirmation?: boolean;
   startedAt?: number;
   completedAt?: number;
+  attempts?: TaskStepAttempt[];
+  verification?: TaskStepVerification;
+  artifacts?: TaskArtifact[];
+  appContext?: string;
 }
 
-export type OpenClawRunStatus = "queued" | "running" | "done" | "error" | "cancelled";
-export type OpenClawRunSurface = "chat" | "browser" | "desktop" | "automation" | "mixed";
-
-export interface OpenClawRun {
+export interface AuraTask {
   id: string;
-  taskId: string;
-  messageId: string;
-  sessionId?: string;
-  runId?: string;
-  prompt: string;
-  status: OpenClawRunStatus;
-  surface: OpenClawRunSurface;
-  startedAt: number;
-  updatedAt: number;
-  completedAt?: number;
-  summary?: string;
+  command: string;
+  status: TaskStatus;
+  steps: TaskStep[];
+  result?: string;
   error?: string;
-  toolCount: number;
-  lastTool?: string;
+  createdAt: number;
+  updatedAt: number;
+  retries: number;
+  currentUrl?: string;
+  currentTitle?: string;
+  runId?: string;
+  skillPack?: string;
+  appContext?: string;
+  telemetryPath?: string;
+  perceptionSummary?: string;
+  runtime?: AutomationRuntime;
+  surface?: TaskSurface;
+  executionMode?: TaskExecutionMode;
 }
 
 export interface DesktopBrowserTab {
@@ -349,11 +258,23 @@ export interface BrowserSelection {
 }
 
 export interface InteractiveElement {
+  id: string;
   selector: string;
   role?: string;
   name: string;
   text?: string;
   tagName: string;
+  type?: string;
+  placeholder?: string;
+  value?: string;
+  disabled?: boolean;
+  visible?: boolean;
+  rect?: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
 }
 
 export interface PageContext {
@@ -365,58 +286,108 @@ export interface PageContext {
   scrollPosition: number;
   metadata: Record<string, string>;
   activeTabs: Array<{ id?: string; title?: string; url?: string }>;
+  activeElement?: InteractiveElement | null;
 }
 
-export type AutomationJobKind = "watch" | "scheduled" | "recurring" | "cron";
-export type AutomationJobStatus = "active" | "paused" | "pending" | "triggered" | "idle" | "running" | "error";
-export type AutomationScheduleMode = "interval" | "once" | "cron";
-
-export interface AutomationSchedule {
-  mode: AutomationScheduleMode;
-  intervalMinutes?: number;
-  cron?: string;
-  runAt?: number;
-  timezone?: string;
-  retryCount?: number;
+export interface AXTreeElement {
+  nodeId: string;
+  role: string;
+  name: string;
+  description?: string;
+  value?: string;
+  rect?: { x: number; y: number; width: number; height: number };
+  parentId?: string;
+  childrenIds?: string[];
+  ignored?: boolean;
 }
 
-export interface AutomationJobRun {
-  runId?: string;
-  status: "idle" | "running" | "done" | "error" | "cancelled" | "triggered";
-  startedAt?: number;
-  finishedAt?: number;
-  summary?: string;
-  error?: string;
+export interface AXTreeSnapshot {
+  nodes: AXTreeElement[];
+  url: string;
+  title: string;
 }
 
-export interface AutomationJob {
+export interface PageMonitor {
   id: string;
   title: string;
-  kind: AutomationJobKind;
-  sourcePrompt: string;
-  url?: string;
-  condition?: string;
-  intervalMinutes?: number;
-  schedule: AutomationSchedule;
+  url: string;
+  condition: string;
+  intervalMinutes: number;
   createdAt: number;
-  updatedAt: number;
   lastCheckedAt: number;
-  nextRunAt?: number;
-  status: AutomationJobStatus;
+  status: "active" | "paused" | "triggered";
   triggerCount: number;
-  skillId?: string;
-  skillName?: string;
-  lastRun?: AutomationJobRun;
-  runHistory?: AutomationJobRun[];
+  autoRunEnabled?: boolean;
+  autoRunCommand?: string;
+  triggerCooldownMinutes?: number;
+  preferredSurface?: TaskSurface;
+  executionMode?: TaskExecutionMode;
+  lastTriggeredAt?: number;
+  lastTriggeredTaskId?: string;
+  lastTriggerResult?: string;
+  lastTriggerError?: string;
 }
 
-export type PageMonitor = AutomationJob;
+export interface ScheduledTask {
+  id: string;
+  title: string;
+  command: string;
+  type: "one-time" | "recurring";
+  scheduledFor?: number; // For one-time tasks
+  cron?: string;        // For recurring tasks
+  createdAt: number;
+  updatedAt: number;
+  status: "pending" | "running" | "done" | "error" | "cancelled";
+  enabled: boolean;
+  skillPack?: string;
+  preferredSurface?: TaskSurface;
+  executionMode?: TaskExecutionMode;
+  background?: boolean;
+  autoApprovePolicy?: "none" | "scheduled_safe";
+  lastRunAt?: number;
+  completedAt?: number;
+  result?: string;
+  error?: string;
+  lastTaskId?: string;
+  lastMessageId?: string;
+  lastRuntime?: AutomationRuntime;
+}
 
 export interface AuraMacro {
   id: string;
   trigger: string;
   expansion: string;
   description: string;
+}
+
+export interface DomainActionDefinition {
+  id: string;
+  label: string;
+  command: string;
+  verification?: string;
+}
+
+export interface DomainActionPack {
+  id: string;
+  name: string;
+  hosts?: string[];
+  keywords?: string[];
+  preferredSurface?: TaskSurface;
+  summary: string;
+  actions: DomainActionDefinition[];
+}
+
+export type SkillReadiness = "ready" | "needs_setup" | "unsupported" | "disabled";
+export type SkillExecutionMode = "guidance" | "gateway" | "cli";
+
+export interface SkillRequirementSummary {
+  bins?: string[];
+  anyBins?: string[];
+  env?: string[];
+  config?: string[];
+  os?: string[];
+  primaryEnv?: string;
+  skillKey?: string;
 }
 
 export interface SkillSummary {
@@ -426,6 +397,16 @@ export interface SkillSummary {
   path: string;
   bundled: boolean;
   enabled: boolean;
+  category?: string;
+  keywords?: string[];
+  readiness?: SkillReadiness;
+  executionMode?: SkillExecutionMode;
+  autoApply?: boolean;
+  browserBacked?: boolean;
+  auraBacked?: boolean;
+  requirements?: SkillRequirementSummary;
+  missing?: string[];
+  setupHint?: string;
 }
 
 export interface GatewayStatus {
@@ -437,17 +418,44 @@ export interface GatewayStatus {
 
 export interface OpenClawConfig {
   gateway?: {
+    url?: string;
     port?: number;
     bind?: string;
+    mode?: string;
     auth?: { mode?: string; token?: string };
   };
+  browser?: {
+    enabled?: boolean;
+    defaultProfile?: string;
+  };
   agents?: {
-    main?: { model?: string; provider?: string };
-    defaults?: {
-      workspace?: string;
-      model?: { primary?: string; fallbacks?: string[] };
-      models?: Record<string, unknown>;
-    };
+    main?: { model?: string; provider?: string; sessionKey?: string };
+  };
+  automation?: {
+    primaryStrict?: boolean;
+    policyTier?: "safe_auto" | "confirm" | "locked";
+    maxStepRetries?: number;
+    disableLocalFallback?: boolean;
+    wsProtocolVersion?: string;
+    eventReplayLimit?: number;
+  };
+  channels?: Record<string, unknown>;
+  skills?: {
+    allow?: string[];
+    allowBundled?: string[];
+    entries?: Record<
+      string,
+      {
+        enabled?: boolean;
+        apiKey?: string | { source?: string; provider?: string; id?: string };
+        env?: Record<string, string>;
+        config?: Record<string, unknown>;
+      }
+    >;
+  };
+  plugins?: {
+    allow?: string[];
+    entries?: Record<string, { enabled?: boolean }>;
   };
   providers?: Record<string, { apiKey?: string; enabled?: boolean }>;
 }
@@ -476,7 +484,8 @@ export interface AuraStorageShape {
   profile: UserProfile;
   settings: AuraSettings;
   permissions: PermissionState[];
-  currentSessionKey: string | null;
+  currentSession: AuraSession | null;
+  sessionHistory: AuraSession[];
   history: HistoryEntry[];
   bubblePosition: BubblePosition;
   bubbleTooltipSeen: boolean;
@@ -486,8 +495,8 @@ export interface AuraStorageShape {
   widgetPosition: BubblePosition;
   widgetExpanded: boolean;
   widgetSize: OverlaySize;
-  automationJobs: AutomationJob[];
   monitors: PageMonitor[];
+  scheduledTasks: ScheduledTask[];
   macros: AuraMacro[];
   activeRoute: AppRoute;
 }
@@ -496,13 +505,14 @@ export type MessageType =
   | "CHAT_MESSAGE"
   | "LLM_TOKEN"
   | "LLM_DONE"
-  | "RUN_STATUS"
+  | "TASK_PROGRESS"
   | "TASK_RESULT"
   | "TASK_ERROR"
   | "CONFIRM_ACTION"
-  | "CONFIRM_ACTION_RESOLVED"
   | "MONITORS_LOADED"
+  | "MONITORS_UPDATED"
   | "MONITOR_TRIGGERED"
+  | "SCHEDULED_TASKS_UPDATED"
   | "MACROS_LOADED"
   | "BROWSER_TABS_UPDATED"
   | "BROWSER_SELECTION"
@@ -510,8 +520,8 @@ export type MessageType =
   | "RUNTIME_STATUS"
   | "BOOTSTRAP_STATUS"
   | "WIDGET_VISIBILITY"
-  | "TOOL_USE"
-  | "AUTOMATION_JOB_UPDATED";
+  | "STORAGE_SYNC"
+  | "GATEWAY_STATUS_CHANGED";
 
 export interface ExtensionMessage<T = unknown> {
   type: MessageType;
@@ -536,38 +546,31 @@ export interface LLMDonePayload {
   cleanText?: string;
 }
 
-export interface RunStatusPayload {
-  run: OpenClawRun;
+export interface TaskProgressPayload {
+  task: AuraTask;
+  event: {
+    type: "step_start" | "step_done" | "result" | "error" | "status";
+    statusText?: string;
+    output?: unknown;
+  };
 }
 
 export interface TaskErrorPayload {
   taskId?: string;
-  code: TaskErrorCode;
-  message: string;
-}
-
-export type TaskErrorCode =
+  code:
   | "AI_UNAVAILABLE"
   | "TIMEOUT"
   | "TASK_CANCELLED"
   | "PERMISSION_DENIED"
-  | "PAIRING_REQUIRED"
-  | "RATE_LIMIT"
-  | "BROWSER_UNAVAILABLE"
   | "UNKNOWN";
+  message: string;
+}
 
 export interface ConfirmActionPayload {
   requestId: string;
   taskId: string;
   message: string;
   step: TaskStep;
-}
-
-export type ApprovalDecision = "allow-once" | "allow-always" | "deny";
-
-export interface ConfirmActionResolvedPayload {
-  requestId: string;
-  decision?: string;
 }
 
 export interface BrowserTabsUpdatedPayload {
@@ -596,24 +599,6 @@ export interface ContextMenuActionPayload {
   text: string;
 }
 
-export interface ToolUsePayload {
-  tool: string;
-  toolUseId?: string;
-  runId?: string;
-  taskId?: string;
-  messageId?: string;
-  surface?: OpenClawRunSurface;
-  action: string;
-  params: Record<string, unknown>;
-  status: "running" | "done" | "error";
-  output?: string;
-  timestamp: number;
-}
-
-export interface AutomationJobUpdatedPayload {
-  job: AutomationJob;
-}
-
 export interface BrowserNavigationRequest {
   url: string;
 }
@@ -622,21 +607,42 @@ export interface ChatSendRequest {
   message: string;
   source: "text" | "voice";
   history?: Array<{ role: "user" | "assistant"; content: string }>;
-  images?: string[];
   sessionId?: string;
+  background?: boolean;
+  skipScheduleDetection?: boolean;
+  preferredSurface?: TaskSurface;
+  executionMode?: TaskExecutionMode;
+  autoApprovePolicy?: "none" | "scheduled_safe";
+  explicitSkillIds?: string[];
+  workflowId?: string;
+  workflowName?: string;
+  workflowOrigin?: "chat" | "scheduler" | "monitor" | "skill" | "api";
+  checkpointLabel?: string;
+}
+
+export interface ChatSendResult {
+  messageId: string;
+  taskId: string;
+  status: TaskStatus;
+  resultText?: string;
+  errorText?: string;
+  runtime?: AutomationRuntime;
+  surface?: TaskSurface;
+  executionMode?: TaskExecutionMode;
 }
 
 export interface BrowserDomActionRequest {
   action:
-    | "click"
-    | "type"
-    | "scroll"
-    | "submit"
-    | "select"
-    | "hover"
-    | "focus"
-    | "clear"
-    | "find"
-    | "execute_js";
+  | "click"
+  | "type"
+  | "scroll"
+  | "press"
+  | "submit"
+  | "select"
+  | "hover"
+  | "focus"
+  | "clear"
+  | "find"
+  | "execute_js";
   params: Record<string, unknown>;
 }

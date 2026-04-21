@@ -1,0 +1,57 @@
+{
+  "pack": "complex-browser-check",
+  "total": 3,
+  "success": 3,
+  "failed": 0,
+  "successRate": 100,
+  "latency": {
+    "p50": 21116,
+    "p90": 37022,
+    "p99": 37022
+  },
+  "results": [
+    {
+      "id": "complex-github-summary",
+      "ok": true,
+      "durationMs": 37022,
+      "error": null,
+      "payload": {
+        "completed": true,
+        "background": false,
+        "jobId": "376021ca-5367-4053-a9da-276c8c4076cc",
+        "messageId": "4679e16e-d9a3-43fb-a804-c1b693c5513e",
+        "taskId": "55c14b6d-5a7c-4c93-8921-ac825809d201",
+        "durationMs": 37014
+      }
+    },
+    {
+      "id": "complex-wikipedia-summary",
+      "ok": true,
+      "durationMs": 21116,
+      "error": null,
+      "payload": {
+        "completed": true,
+        "background": false,
+        "jobId": "4714cb30-b83e-419a-a123-0b9e744f7acd",
+        "messageId": "8ab9cd29-f4df-4ff1-a4e4-d0b914dd1f34",
+        "taskId": "028a5358-499f-42c7-9593-652d8a6e036e",
+        "durationMs": 21106
+      }
+    },
+    {
+      "id": "complex-google-summary",
+      "ok": true,
+      "durationMs": 18435,
+      "error": null,
+      "payload": {
+        "completed": true,
+        "background": false,
+        "jobId": "0470b5af-a407-4c37-85a9-eb33e333e4f7",
+        "messageId": "8a54cf64-656c-45ed-a1d6-9bdd180044b3",
+        "taskId": "af3d3abb-10da-46fd-9a29-573dca74505d",
+        "durationMs": 18426
+      }
+    }
+  ],
+  "generatedAt": "2026-04-07T03:56:29.961Z"
+}

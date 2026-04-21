@@ -1,211 +1,370 @@
-# Aura Desktop Developer Guide
+# Aura Desktop — Developer Guide (CLAUDE.md)
 
-## Quick Start
+Electron app wrapping OpenClaw for non-technical users. Download, install, use — zero terminal setup.
+
+---
+
+## Architecture Overview
+
+Three-layer Electron app with task execution pipeline:
+
+```
+Main Process (Node.js)           Renderer (React/Vite)
+┌─────────────────────┐          ┌─────────────────────┐
+│  index.ts           │ ◄──IPC──► │  App.tsx            │
+│  GatewayManager     │          │  useAuraStore.ts     │
+│  BrowserController  │          │  components/         │
+│  TaskExecutor       │          └─────────────────────┘
+│  IntentClassifier   │
+│  MonitorManager     │
+│  AuthService        │
+│  LLM Client         │
+│  AuraStore          │
+└─────────────────────┘
+         │
+         ▼
+   Groq API (direct HTTP, streaming)
+   Deepgram API (STT/TTS)
+```
+
+**Two windows:**
+- **Main window** (1560×980) — full app UI with sidebar nav
+- **Widget window** — frameless, transparent, always-on-top floating bubble (84×84 collapsed, max 520×760 expanded)
+
+---
+
+## Key Files
+
+### Main Process (`src/main/`)
+| File | Purpose |
+|------|---------|
+| `index.ts` | App entry, window creation, IPC handler registration |
+| `services/gateway-manager.ts` | Chat orchestration: classify intent → plan → execute or stream. Manages Groq API calls, task planning, step confirmation |
+| `services/browser-controller.ts` | Electron BrowserView multi-tab browser: navigate, DOM actions, page context, screenshots |
+| `services/task-executor.ts` | **NEW** — Step-by-step browser automation: runs planned TaskSteps via BrowserController |
+| `services/intent-classifier.ts` | **NEW** — Classifies user messages: query, task, navigate, autofill, monitor. Heuristic-first with LLM fallback |
+| `services/monitor-manager.ts` | **NEW** — Background page polling with Electron notifications |
+| `services/llm-client.ts` | Direct Groq API client: `streamChat()` for streaming, `completeChat()` for single responses, `resolveGroqApiKey()` for key resolution |
+| `services/auth-service.ts` | Firebase email/password + Google auth |
+| `services/store.ts` | JSON file persistence in `userData/aura-store.json` |
+
+### Renderer (`src/renderer/`)
+| File | Purpose |
+|------|---------|
+| `app/App.tsx` | Root component — routing, all view panels |
+| `app/WidgetApp.tsx` | Widget window root |
+| `store/useAuraStore.ts` | Zustand store, IPC bridge to main process |
+| `components/Chat/ChatPanel.tsx` | Chat interface with task progress bubbles |
+| `components/ConfirmModal.tsx` | **NEW** — Step confirmation modal for dangerous actions |
+| `components/TaskProgress.tsx` | **NEW** — Inline task progress bubble in chat thread |
+| `components/VoicePanel.tsx` | Voice mode: Deepgram STT/TTS, AuraFace, MicLevelBars, 5-phase state machine |
+| `components/AuraFace.tsx` | Canvas-based animated blob (idle/listening/speaking states) |
+| `components/ActiveTaskBanner.tsx` | Top banner showing active task status |
+| `components/pages/HistoryPage.tsx` | **NEW** — Session and task history view |
+| `components/primitives.tsx` | Shared UI components |
+| `services/deepgram.ts` | Deepgram STT client (URL query-param auth for Electron) |
+| `services/tts.ts` | TTS service (Deepgram streaming + WebSpeech fallback) |
+| `services/web-speech.ts` | WebSpeech STT fallback client |
+| `config/env.ts` | Vite env vars |
+
+### Shared (`src/shared/`)
+| File | Purpose |
+|------|---------|
+| `types.ts` | All shared TypeScript types |
+| `ipc.ts` | IPC channel name constants |
+
+### Preload (`src/preload/`)
+| File | Purpose |
+|------|---------|
+| `index.ts` | Exposes `window.auraDesktop` API to renderer via `contextBridge` |
+| `browser-view.ts` | BrowserView selection/context menu preload |
+
+---
+
+## Task Execution Pipeline
+
+This is the core automation system. Every user message flows through this pipeline:
+
+```
+User message
+  │
+  ▼
+IntentClassifier.classify(message, pageContext)
+  │
+  ├─ 'query'     → streamViaGroq() → LLM_TOKEN events → streaming chat
+  ├─ 'navigate'  → directAction → TaskExecutor.executeStep() → done
+  ├─ 'task'      → planTask() → TaskExecutor.execute() → step-by-step
+  ├─ 'autofill'  → planTask() → TaskExecutor.execute() → fill + confirm
+  └─ 'monitor'   → MonitorManager.scheduleMonitor() → background polling
+```
+
+### Intent Classification
+
+1. **Heuristic first** (< 10ms): regex patterns for navigate, autofill, click, submit, monitor
+2. **LLM fallback** if confidence < 0.9: `completeChat()` with `llama-3.1-8b-instant`, 1500ms timeout
+3. **Safe default**: any failure returns `'query'` — falls back to normal chat
+
+### Task Planning
+
+- Uses `completeChat()` with `llama-3.1-8b-instant` (maxTokens: 800, temperature: 0.1)
+- System prompt includes: user command, page URL/title, interactive elements, visible text (first 2000 chars), user profile
+- Returns `TaskStep[]` — each step has: `tool`, `params`, `description`, `requiresConfirmation?`
+- On JSON parse failure: falls back to chat mode
+
+### Step Execution
+
+TaskExecutor runs steps sequentially via BrowserController:
+- `navigate` → `navigate()` + wait for `did-stop-loading`
+- `click` → `runDomAction({ action: 'click' })`
+- `type` → `runDomAction({ action: 'type' })` — maps profile fields if `useProfile: true`
+- `submit` → always requires user confirmation first
+- `screenshot`, `read`, `wait`, `ask_user`, etc.
+
+### Step Confirmation
+
+For dangerous actions (`submit`, `execute_js`, payment, delete):
+1. Main process emits `CONFIRM_ACTION` with `requestId`
+2. Renderer shows `ConfirmModal`
+3. User clicks Allow/Cancel
+4. Renderer calls `window.auraDesktop.task.confirmResponse({ requestId, confirmed })`
+5. Main process resolves the pending promise → executor continues or stops
+6. Auto-denies after 30s timeout
+
+---
+
+## IPC API (window.auraDesktop)
+
+All renderer→main communication goes through the preload bridge:
+
+```typescript
+// Auth
+window.auraDesktop.auth.getState()
+window.auraDesktop.auth.signIn({ email, password })
+window.auraDesktop.auth.signUp({ email, password })
+window.auraDesktop.auth.google({ email })
+window.auraDesktop.auth.signOut()
+
+// Storage
+window.auraDesktop.storage.get(keys?)
+window.auraDesktop.storage.set(partial)
+
+// Runtime
+window.auraDesktop.runtime.getStatus()
+window.auraDesktop.runtime.bootstrap()
+window.auraDesktop.runtime.restart()
+
+// Chat
+window.auraDesktop.chat.send({ message, source, history?, sessionId? })
+window.auraDesktop.chat.stop()
+
+// Task (NEW)
+window.auraDesktop.task.confirmResponse({ requestId, confirmed })
+window.auraDesktop.task.cancel({ taskId })
+
+// Browser
+window.auraDesktop.browser.getTabs()
+window.auraDesktop.browser.newTab({ url })
+window.auraDesktop.browser.switchTab({ id })
+window.auraDesktop.browser.closeTab({ id })
+window.auraDesktop.browser.navigate({ url })
+window.auraDesktop.browser.back() / .forward() / .reload()
+window.auraDesktop.browser.setBounds({ x, y, width, height })
+window.auraDesktop.browser.getPageContext()
+window.auraDesktop.browser.captureScreenshot()
+window.auraDesktop.browser.domAction({ action, params })
+
+// Monitors (NEW)
+window.auraDesktop.monitor.start(monitor)
+window.auraDesktop.monitor.stop({ id })
+window.auraDesktop.monitor.list()
+
+// Skills
+window.auraDesktop.skills.list()
+
+// App
+window.auraDesktop.app.showMainWindow()
+window.auraDesktop.app.showWidgetWindow()
+window.auraDesktop.app.quit()
+window.auraDesktop.widget.setBounds({ x, y, width, height })
+```
+
+Main→renderer events come via `IPC_CHANNELS.appEvent` listener:
+```typescript
+// Message types:
+// LLM_TOKEN, LLM_DONE — chat streaming
+// TASK_PROGRESS — task step updates (planning, running, step_start, step_done, step_error, done, cancelled)
+// TASK_ERROR — task execution failure
+// CONFIRM_ACTION — step requires user confirmation (has requestId for round-trip)
+// BROWSER_TABS_UPDATED, BROWSER_SELECTION, CONTEXT_MENU_ACTION
+// RUNTIME_STATUS, BOOTSTRAP_STATUS
+// WIDGET_VISIBILITY
+// MONITOR_TRIGGERED — page monitor condition matched
+```
+
+---
+
+## LLM Integration (Groq API)
+
+Chat and planning use the Groq API directly (not OpenClaw gateway):
+
+```typescript
+// Streaming chat (for query intent)
+streamChat(apiKey, messages, { onToken, onDone, onError }, { model, maxTokens, temperature })
+
+// Single completion (for classification + planning)
+completeChat(apiKey, messages, { model, maxTokens, temperature })
+```
+
+**Key resolution** (`resolveGroqApiKey()`):
+1. `process.env.GROQ_API_KEY`
+2. `process.env.VITE_LLM_API_KEY`
+3. `process.env.PLASMO_PUBLIC_LLM_API_KEY`
+4. Hardcoded managed key (fallback)
+
+**Models used:**
+- Chat: `llama-3.3-70b-versatile` (configurable via `VITE_LLM_MODEL`)
+- Classification + Planning: `llama-3.1-8b-instant` (fast, cheap)
+
+---
+
+## OpenClaw — Reference Architecture
+
+OpenClaw is a powerful AI agent platform. While Aura v1 uses direct Groq API + BrowserController for task execution, the full OpenClaw integration is planned for v2. Key knowledge for future work:
+
+### Gateway Protocol (WebSocket)
+- JSON frames: `{ type: "req"|"res"|"event", id?, method?, params?, result?, error? }`
+- Handshake: `connect.challenge` → `connect` (with API key) → `hello-ok`
+- Roles: operator (sends commands), node (executes on device)
+- Key method: `chat.send({ sessionKey, message, thinking?, deliver?, attachments? })`
+
+### Agent Events
+```typescript
+interface AgentEventPayload {
+  runId: string
+  seq: number
+  stream: "lifecycle" | "tool" | "assistant" | "error"
+  ts: number
+  data: { delta?: string; tool?: string; status?: string; ... }
+}
+```
+
+### Browser Automation (Playwright + CDP)
+- Actions: click, type, fill, select, drag, scroll, wait, evaluate, batch
+- Accessibility tree snapshots for element discovery
+- Screenshot capture
+- Multi-tab management
+
+### Skills System
+- 52 bundled SKILL.md files in `openclaw-src/skills/`
+- Categories: communication (Slack, Gmail), development (GitHub), productivity (Calendar), etc.
+- Each skill provides domain-specific instructions injected into agent context
+
+### Node System (future)
+- Remote device control: camera, screen recording, location, notifications
+- System command execution
+- iOS, Android, macOS node support
+
+---
+
+## Dev Commands
 
 ```bash
-npm install
+# Start dev mode (3 parallel processes)
+cd d:/PV/Aura/aura-desktop
 npm run dev
-```
 
-Useful checks:
+# Processes started:
+# 1. vite (renderer on :5173)
+# 2. tsup --watch (main process → dist/main.cjs)
+# 3. electron . (waits for :5173 and dist/main.cjs to exist)
 
-```bash
-npm run typecheck
-npm run build
-npm run package:win   # Windows NSIS installer → release/ folder
-```
+# Debug with DevTools
+npm run dev:electron:debug   # sets AURA_OPEN_DEVTOOLS=1
 
-## Core Principle
+# Build for production
+npm run build                # main + renderer
+npm run package:win          # NSIS installer (Windows)
+npm run package:win:dir      # unpacked dir (faster, for testing)
 
-**Aura = thin UI wrapper. OpenClaw = the brain.**
-
-OpenClaw is a full AI gateway that natively handles: chat, cron scheduling,
-skill management, session history, tool catalog, voice/TTS, desktop control,
-browser tools, and approval workflows. Aura renders the UI and manages the
-Electron app shell. If OpenClaw already does something, Aura must NOT
-re-implement it.
-
-## Repo Shape
-
-```text
-aura-desktop/
-|-- src/
-|   |-- main/
-|   |   |-- index.ts                    # Electron main entry, IPC handlers, service wiring
-|   |   `-- services/
-|   |       |-- gateway-manager.ts      # CENTRAL: OpenClaw lifecycle, WebSocket, chat routing
-|   |       |-- intent-classifier.ts    # Fast-path regex (navigate/scroll ONLY, <10ms)
-|   |       |-- browser-controller.ts   # Embedded BrowserView tab management
-|   |       |-- desktop-controller.ts   # Native desktop interactions (@nut-tree-fork)
-|   |       |-- config-manager.ts       # openclaw.json config, API key auth-profiles
-|   |       |-- store.ts               # Local JSON persistence (widget state, theme, profile)
-|   |       `-- llm-client.ts          # LEGACY — only used for API key resolution at startup
-|   |-- preload/
-|   |   `-- index.ts                    # contextBridge API exposure
-|   |-- renderer/
-|   |   |-- app/
-|   |   |   `-- WidgetApp.tsx           # Floating desktop widget (Chat/Voice/History/Tools)
-|   |   |-- components/
-|   |   |   |-- ChatAssistCards.tsx      # Suggestion chips, activity cards, pending state helpers
-|   |   |   |-- HistoryPanel.tsx        # Session history timeline
-|   |   |   |-- ToolsPanel.tsx          # Skills/Monitors/Macros sub-tabs
-|   |   |   |-- InputBar.tsx            # Chat input with macro suggestions
-|   |   |   |-- ChatThread.tsx          # Message list rendering
-|   |   |   |-- ChatPanel.tsx           # Chat panel wrapper
-|   |   |   |-- pages/HomePage.tsx      # Chat-first home surface
-|   |   |   `-- primitives.tsx          # MessageBubble, PendingBubble, AuraLogoBlob
-|   |   |-- services/
-|   |   |   `-- desktop-api.ts          # TypeScript interface for preload API
-|   |   `-- store/
-|   |       `-- useAuraStore.ts         # Zustand store for UI state
-|   `-- shared/
-|       |-- ipc.ts                      # IPC channel constants
-|       `-- types.ts                    # Shared TypeScript types
-|-- vendor/openclaw/                    # Vendored OpenClaw source (the brain)
-|-- PLAN.md          # Architecture & delivery plan (READ THIS FIRST)
-|-- TASK.md          # Task tracker with current bugs and phase plan
-|-- AGENT-PROMPT.md  # Implementation prompt for next coding agent
-`-- package.json
-```
-
-## How It Works
-
-### 1. OpenClaw Gateway
-
-Aura spawns OpenClaw as a child process:
-```
-process.execPath openclaw.mjs gateway run --port 18789 --token <uuid> --bind loopback --auth token
-```
-
-With `ELECTRON_RUN_AS_NODE=1` so the Electron binary runs as plain Node.js.
-
-Vendored OpenClaw source: `vendor/openclaw`
-Packaged Aura bundle: `openclaw-src` inside the app resources
-Runtime home: `%APPDATA%\aura-desktop\openclaw-home\`
-
-### 2. WebSocket Connection
-
-Aura connects to `ws://127.0.0.1:18789` using protocol v3 with Ed25519 device
-auth. The handshake:
-
-1. Server sends `connect.challenge` with a nonce
-2. Aura signs the nonce with its device private key
-3. Aura sends `connect` request with token + device signature
-4. Server responds with `hello-ok`
-
-### 3. Chat Flow
-
-```
-User types message
-  → classifyFastPath() [<10ms, regex only]
-  → "open youtube" / "scroll down" / "go back" → instant local action
-  → EVERYTHING ELSE → streamViaOpenClaw()
-      → chat.send RPC → OpenClaw agent pipeline
-      → Agent decides: converse, browse, desktop, schedule, use skill
-      → Streaming events → LLM_TOKEN / TOOL_USE / RUN_STATUS → renderer
-```
-
-### 4. Session Management
-
-**Sessions are lazy.** `chat.send` auto-creates sessions when the sessionKey
-doesn't exist yet. Aura should NOT call `sessions.create` before sending the
-first message. Instead:
-
-1. Generate a session key locally (`crypto.randomUUID()`)
-2. Pass it to `chat.send` — OpenClaw creates the session on demand
-3. After chat completes, call `sessions.list` to refresh the session list
-4. Use `sessions.get` to load a specific session's messages
-
-**`sessions.create` params** (verified from OpenClaw source):
-- Accepts: `key`, `agentId`, `label`, `model`, `parentSessionKey`, `task`, `message`
-- Does NOT accept: `title`, `sessionKey`, `name`
-- Returns: `{ ok, key, sessionId, entry, ... }` — the canonical key is `key`
-
-### 5. OpenClaw Native RPCs
-
-| What | RPC | Notes |
-|------|-----|-------|
-| Send chat | `chat.send` | Main AI path — auto-creates sessions |
-| Stop response | `chat.abort` | Cancel active generation |
-| Create cron job | `cron.add` | Schedule recurring tasks |
-| List cron jobs | `cron.list` | Fetch all scheduled jobs |
-| Remove cron job | `cron.remove` | Cancel a scheduled job |
-| Run job now | `cron.run` | Manual trigger |
-| Job run history | `cron.runs` | Past execution results |
-| List tools | `tools.catalog` | All available tools and skills |
-| Skill status | `skills.status` | Installed skills and their state |
-| List sessions | `sessions.list` | Chat session history |
-| Get session | `sessions.get` | Specific session with messages |
-| Create session | `sessions.create` | Pre-create with config (rarely needed) |
-| List models | `models.list` | Available AI models |
-| Health check | `status.request` | Gateway health |
-
-## Editing Guidance
-
-### DO
-
-- **Route all AI through `chat.send`** — OpenClaw's agent understands intent natively
-- **Use OpenClaw RPCs** for scheduling, skills, sessions, tools — don't rebuild locally
-- **Keep fast-path for instant nav only** — "open youtube", "scroll down", "go back"
-- **Let sessions be lazy** — `chat.send` auto-creates them, don't pre-create
-- **Add RPC proxy methods** to `GatewayManager` when the renderer needs OpenClaw data
-- **Maintain the premium UI** — glassmorphism, spring-loaded buttons, rich gradients
-- **Keep runtime details in main process** — don't leak secrets to renderer
-
-### DON'T
-
-- **Don't call `sessions.create` before `chat.send`** — chat.send handles it
-- **Don't send `title` to `sessions.create`** — it's not a valid param
-- **Don't extract `sessionKey` from `sessions.create` response** — the field is `key`
-- **Don't add LLM calls in the main process** — no `completeChat()`, no local model calls
-- **Don't classify intent with regex/LLM** — only fast-path for instant nav
-- **Don't re-implement cron scheduling** — use `cron.add` / `cron.list` / `cron.remove`
-- **Don't re-implement skill discovery** — use `tools.catalog` / `skills.status`
-- **Don't re-implement session storage** — use `sessions.list` / `sessions.get`
-- **Don't inject fake tool definitions via system prompt** — OpenClaw has real tools
-- **Don't expose raw config** — users see health dashboards, not JSON editors
-
-### Legacy Code (Removed or Being Removed)
-
-| File | Status | Replacement |
-|------|--------|-------------|
-| `monitor-manager.ts` | REMOVED | `cron.*` RPCs |
-| `automation-bridge.ts` | REMOVED | `cron.add` RPC |
-| `skill-registry.ts` | REMOVED | `tools.catalog` / `skills.status` RPCs |
-| `vision-agent.ts` | REMOVED | OpenClaw desktop tools |
-| `llm-client.ts` | LEGACY | Only used for API key resolution at startup |
-
-## Current Status
-
-The chat unblock pass is now implemented:
-- `sendMessage()` generates a local session key and sends directly through `chat.send`
-- explicit `sessions.create` remains available only for optional pre-creation use
-- TTFT clears on both first-token and direct-`LLM_DONE` paths
-- activity cards are scoped to the current session instead of falling back to a global recent run
-
-The next implementation priority is **OpenClaw-first seamless automation**:
-- keep Aura focused on approvals, visibility, run/status UX, and diagnostics
-- keep browser/desktop execution behavior in vendored OpenClaw
-- avoid adding Aura-side automation heuristics beyond strict browser navigation fast-paths
-
-## Current Priorities
-
-1. Make OpenClaw-owned desktop and browser automation feel seamless in the background
-2. Keep Aura limited to shell behavior: approvals, visibility, run/status UX, and diagnostics
-3. Validate the packaged Aura + bundled OpenClaw runtime path
-4. Then continue with session-key caching, gateway pre-warming, and ship polish
-
-## Verification Baseline
-
-Before closing a meaningful change, run:
-
-```bash
+# Type check
 npm run typecheck
 ```
 
-If packaging or startup behavior changes, also run:
+---
 
-```bash
-npm run build
-npm run dev  # smoke test: send a chat message, verify response
+## Directory Aliases (tsconfig paths)
+
 ```
+@shared/*  →  src/shared/*
+@renderer/*  →  src/renderer/*
+@main/*  →  src/main/*
+```
+
+---
+
+## State Management
+
+Zustand store (`useAuraStore`) mirrors persisted storage via IPC:
+- `hydrate()` — called on mount, loads all state from main process
+- `handleAppEvent(message)` — handles all `aura:event` IPC messages
+- All mutations that need persistence call `window.auraDesktop.storage.set()`
+
+Key state for task execution:
+- `activeTask: AuraTask | null` — currently running task
+- `pendingConfirmation: ConfirmActionPayload | null` — step awaiting user approval
+- `taskMessages: Map<string, AuraTask>` — task state keyed by taskId for inline chat bubbles
+
+Storage shape (`AuraStorageShape`) includes: authState, profile, settings, permissions, sessions, history, monitors, macros, widgetPosition/size, overlayPosition/size, route.
+
+---
+
+## App Routes
+
+| Route | Component | Description |
+|-------|-----------|-------------|
+| `home` | HomeView | Chat interface, session history sidebar, task progress |
+| `browser` | BrowserView | Embedded browser + floating Aura overlay |
+| `monitors` | MonitorsView | Page monitor management |
+| `skills` | SkillsView | Bundled OpenClaw skills list |
+| `history` | HistoryPage | Session and task history |
+| `profile` | ProfileView | User profile data (used in prompts + autofill) |
+| `settings` | SettingsView | App settings, theme, model preset |
+
+---
+
+## Styling
+
+- Tailwind CSS v3 with custom theme in `tailwind.config.ts`
+- CSS variables in `src/renderer/index.css`
+- Dark/light via `[data-theme="dark"]` on `<html>`
+- Glass panels: `glass-panel` utility class
+- Background color: `#0f0e17` (dark), transparent widget window
+- Custom animations: `caption-fade-in`, `animate-shimmer`, `task-pulse`
+
+---
+
+## Build & Packaging
+
+electron-builder bundles:
+- `dist/**` (compiled main, preload, renderer)
+- `extraResources`: copies `../openclaw-src/{openclaw.mjs,package.json,dist,assets,skills}` → `resources/openclaw-src/`
+
+For `package:win` to succeed, `../openclaw-src/` must exist relative to the `aura-desktop` directory (i.e., at `d:/PV/Aura/openclaw-src/`).
+
+NSIS installer produces `Aura Desktop Setup x.x.x.exe` in `dist/`.
+
+---
+
+## Common Issues
+
+| Issue | Fix |
+|-------|-----|
+| `openclaw.mjs not found` | Ensure `d:/PV/Aura/openclaw-src/openclaw.mjs` exists |
+| Renderer blank on `npm run dev` | Wait for both vite (:5173) AND tsup (dist/main.cjs) to finish |
+| BrowserView not showing | `browserSyncBounds` must be called after layout renders |
+| Widget not draggable | Widget uses mouse events; frameless window needs `-webkit-app-region: drag` on handle |
+| Auth sign-in fails | Firebase project must be configured; check `.env.local` keys |
+| `ELECTRON_RUN_AS_NODE` child crash | OpenClaw requires `ELECTRON_RUN_AS_NODE=1` when spawned inside Electron |
+| **`TypeError: app.isPackaged` on startup** | Your shell has `ELECTRON_RUN_AS_NODE=1` set globally (from openclaw-backend work). This makes electron.exe run as plain Node.js where `require("electron").app` is undefined. Fix: use `npm run dev` which calls `scripts/dev-electron.cjs` — it strips the var before spawning electron. Never run `electron .` directly when this var is set. |
+| Deepgram WebSocket error | Electron doesn't forward WebSocket subprotocol headers reliably. Use URL query-param auth (`?token=<key>`) instead of subprotocol auth. |
+| Voice mode no audio | Check `VITE_DEEPGRAM_API_KEY` in `.env.local`. Falls back to WebSpeech if Deepgram unavailable. |

@@ -1,0 +1,98 @@
+name: Build macOS Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - achyuth
+    paths:
+      - ".github/workflows/build-macos.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/**"
+      - "src/**"
+      - "tsup.config.ts"
+      - "vite.config.*"
+
+jobs:
+  package-macos:
+    name: Package macOS DMG
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: aura-desktop
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          path: aura-desktop
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # stage-openclaw-runtime.ts expects ../openclaw-src as a sibling of the
+      # app checkout, with dist/ + assets/ + skills/ + openclaw.mjs already
+      # in place. The HakkanShah/openclaw-src repo gitignores dist/, and
+      # building it from source needs Bun + SwiftUI tooling we don't want on
+      # CI. The `openclaw` npm tarball already ships the exact layout the
+      # stager needs, so pull that instead and unpack it at ../openclaw-src.
+      - name: Fetch prebuilt OpenClaw runtime from npm
+        working-directory: ${{ github.workspace }}
+        run: |
+          mkdir -p openclaw-src
+          cd openclaw-src
+          npm pack openclaw@latest --silent
+          tar --strip-components=1 -xzf openclaw-*.tgz
+          rm -f openclaw-*.tgz
+          ls -la | head -15
+
+      # The committed package-lock.json is generated on Windows and only
+      # tracks @rollup/rollup-win32-* entries, not @rollup/rollup-darwin-*.
+      # This is a known npm bug (https://github.com/npm/cli/issues/4828):
+      # both `npm ci` and `npm install` honor the existing lock and skip the
+      # darwin binding, causing rollup to fail at require-time on macOS.
+      # Delete the lock first so npm re-resolves optional deps from scratch
+      # for the current runner. The deleted lock is never committed back.
+      - name: Remove Windows-generated lock file
+        run: rm -f package-lock.json
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build unsigned universal mac app
+        run: npm run package:mac:dir
+
+      # Smoke test actually launches the bundled OpenClaw gateway and opens
+      # a WebSocket. On the CI mac runner it can exit non-zero for reasons
+      # unrelated to the packaged app (missing mic/file permissions, no
+      # API keys in env). Don't let it gate artifact uploads.
+      - name: Smoke test packaged mac runtime
+        continue-on-error: true
+        run: npm run smoke:packaged-runtime -- "dist/mac-universal/Aura Desktop.app/Contents/Resources"
+
+      - name: Build unsigned universal DMG
+        run: npm run package:mac
+
+      - name: Upload unsigned mac app bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aura-desktop-mac-app
+          path: aura-desktop/dist/mac-universal/**
+          if-no-files-found: warn
+
+      - name: Upload unsigned mac DMG
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aura-desktop-mac-dmg
+          path: aura-desktop/dist/*.dmg
+          if-no-files-found: warn

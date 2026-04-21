@@ -4,6 +4,7 @@ import { AppSidebar } from "./AppSidebar";
 import { HomePage } from "../pages/HomePage";
 import { BrowserPage } from "../pages/BrowserPage";
 import { MonitorsPage } from "../pages/MonitorsPage";
+import { SchedulerPage } from "../pages/SchedulerPage";
 import { SkillsPage } from "../pages/SkillsPage";
 import { HistoryPage } from "../pages/HistoryPage";
 import { ProfilePage } from "../pages/ProfilePage";
@@ -21,6 +22,7 @@ export const MainSurface = (): JSX.Element => {
         {route === "home" && <HomePage />}
         {route === "browser" && <BrowserPage />}
         {route === "monitors" && <MonitorsPage />}
+        {route === "scheduler" && <SchedulerPage />}
         {route === "skills" && <SkillsPage />}
         {route === "history" && <HistoryPage />}
         {route === "profile" && <ProfilePage />}
