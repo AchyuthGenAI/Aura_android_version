@@ -5,12 +5,14 @@ on:
   push:
     branches:
       - achyuth
+      - achyuth_1
     paths:
       - ".github/workflows/build-macos.yml"
       - "package.json"
       - "package-lock.json"
       - "scripts/**"
       - "src/**"
+      - "vendor/openclaw/**"
       - "tsup.config.ts"
       - "vite.config.*"
 
@@ -35,21 +37,18 @@ jobs:
         with:
           node-version: 22
 
-      # stage-openclaw-runtime.ts expects ../openclaw-src as a sibling of the
-      # app checkout, with dist/ + assets/ + skills/ + openclaw.mjs already
-      # in place. The HakkanShah/openclaw-src repo gitignores dist/, and
-      # building it from source needs Bun + SwiftUI tooling we don't want on
-      # CI. The `openclaw` npm tarball already ships the exact layout the
-      # stager needs, so pull that instead and unpack it at ../openclaw-src.
-      - name: Fetch prebuilt OpenClaw runtime from npm
+      # Aura's hard-forked OpenClaw runtime now lives in `vendor/openclaw/`
+      # inside this repo. scripts/stage-openclaw-runtime.ts automatically
+      # prefers that in-repo vendor over the legacy `../openclaw-src/` sibling,
+      # so no external download is needed here. We still create an empty
+      # sibling directory so any older script paths that reference it don't
+      # ENOENT on first run.
+      - name: Prepare staging scratch dir
         working-directory: ${{ github.workspace }}
         run: |
           mkdir -p openclaw-src
-          cd openclaw-src
-          npm pack openclaw@latest --silent
-          tar --strip-components=1 -xzf openclaw-*.tgz
-          rm -f openclaw-*.tgz
-          ls -la | head -15
+          echo "Using in-repo vendor/openclaw hard-fork; sibling dir is a no-op placeholder."
+          ls -la aura-desktop/vendor/openclaw | head -15
 
       # The committed package-lock.json is generated on Windows and only
       # tracks @rollup/rollup-win32-* entries, not @rollup/rollup-darwin-*.
@@ -76,17 +75,25 @@ jobs:
       # API keys in env). Don't let it gate artifact uploads.
       - name: Smoke test packaged mac runtime
         continue-on-error: true
-        run: npm run smoke:packaged-runtime -- "dist/mac-universal/Aura Desktop.app/Contents/Resources"
+        run: npm run smoke:packaged-runtime -- "dist/installer-v6/mac-universal/Aura Desktop.app/Contents/Resources"
 
       - name: Build unsigned universal DMG
         run: npm run package:mac
+
+      - name: List build output
+        if: always()
+        run: |
+          echo "--- dist tree ---"
+          ls -la dist/ || true
+          echo "--- dist/installer-v6 tree ---"
+          ls -la dist/installer-v6/ || true
 
       - name: Upload unsigned mac app bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: aura-desktop-mac-app
-          path: aura-desktop/dist/mac-universal/**
+          path: aura-desktop/dist/installer-v6/mac-universal/**
           if-no-files-found: warn
 
       - name: Upload unsigned mac DMG
@@ -94,5 +101,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: aura-desktop-mac-dmg
-          path: aura-desktop/dist/*.dmg
+          path: aura-desktop/dist/installer-v6/*.dmg
           if-no-files-found: warn
