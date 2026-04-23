@@ -1,7 +1,7 @@
 {
   "name": "openclaw",
-  "version": "0.3.0-aura-fork",
-  "description": "Aura Desktop hard-fork of the OpenClaw runtime. The gateway services chat.send end-to-end by streaming from Groq (primary) / Google Gemini (fallback) over the OpenClaw WebSocket protocol.",
+  "version": "0.4.0-aura-fork",
+  "description": "Aura Desktop hard-fork of the OpenClaw runtime. The gateway services chat.send end-to-end with a real agentic tool-call loop (Groq function calling) and 18 cross-platform Windows/macOS/Linux tools for URL launching, apps, filesystem, HTTP, shell, keyboard, clipboard, screenshots, and scheduling.",
   "author": "Persist Ventures",
   "license": "UNLICENSED",
   "private": true,

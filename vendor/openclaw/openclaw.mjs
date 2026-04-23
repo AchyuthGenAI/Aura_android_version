@@ -30,8 +30,14 @@ const require = createRequire(import.meta.url);
 const exec = promisify(execCb);
 
 const RUNTIME_NAME = "aura-openclaw-fork";
-const RUNTIME_VERSION = "0.3.0";
+const RUNTIME_VERSION = "0.4.0";
 const PROTOCOL_VERSION = 3;
+
+// Platform detection — must be declared before AURA_SYSTEM_PROMPT so the
+// prompt builder can branch on OS. Used throughout the tool registry below.
+const isWindows = process.platform === "win32";
+const isMac = process.platform === "darwin";
+const isLinux = !isWindows && !isMac;
 
 const GROQ_CHAT_MODEL =
   process.env.OPENCLAW_GROQ_MODEL || "llama-3.3-70b-versatile";
@@ -46,17 +52,33 @@ const HTTP_BODY_CAP = 16_000;
 const SHELL_DENY_RE =
   /\b(?:format\s+[a-z]:|rd\s+\/s\s+\/q\s+[cC]:\\?$|del\s+\/f\s+\/s\s+\/q\s+[cC]:\\|shutdown\s+\/s|reg\s+delete\s+hklm|mkfs\.|dd\s+if=.*of=\/dev\/)/i;
 
-const AURA_SYSTEM_PROMPT = [
-  "You are Aura, an agentic Windows assistant running inside the OpenClaw runtime on the user's PC.",
-  "You have real tools: open_url, open_app, web_search, read_file, write_file, append_file, list_dir,",
-  "http_get, http_post, run_command, current_time, system_info, get_clipboard, set_clipboard,",
-  "type_text, press_keys, take_screenshot, and schedule_reminder. Call them to actually perform",
-  "actions — do NOT describe actions without executing them. After the tools run, briefly confirm",
-  "what you did and what the user should see. Never claim you can't control the browser, desktop,",
-  "or keyboard; those tools are live right now. If a tool fails, report the error and suggest a fix.",
-  "Prefer the simplest tool that accomplishes the goal (e.g. open_url for URLs, web_search for",
-  "search queries, open_app for apps). Chain multiple tool calls when needed.",
-].join(" ");
+function buildSystemPrompt() {
+  const osLabel = isMac ? "macOS" : isWindows ? "Windows" : "Linux";
+  const shellHint = isMac
+    ? "macOS shell is /bin/sh. Use 'open -a <App>' to launch apps, 'pbcopy/pbpaste' for clipboard, 'screencapture' for screenshots, 'osascript' for AppleScript."
+    : isWindows
+      ? "Windows shell is cmd.exe. Use 'start <app-or-url>' to launch, PowerShell for rich automation."
+      : "Linux shell is /bin/sh. Use 'xdg-open' for URLs, 'xclip'/'xsel' for clipboard, 'gnome-screenshot'/'scrot' for screenshots.";
+  const keysHint = isMac
+    ? "For press_keys on macOS use 'cmd+c', 'cmd+shift+t', 'cmd+space', etc. (Cmd, not Ctrl, for macOS shortcuts.)"
+    : isWindows
+      ? "For press_keys on Windows use 'ctrl+c', 'ctrl+shift+t', 'alt+tab', etc."
+      : "For press_keys on Linux use 'ctrl+c', 'super+l', 'alt+tab', etc.";
+  return [
+    `You are Aura, an agentic ${osLabel} assistant running inside the OpenClaw runtime on the user's PC.`,
+    "You have real tools: open_url, open_app, web_search, read_file, write_file, append_file, list_dir,",
+    "http_get, http_post, run_command, current_time, system_info, get_clipboard, set_clipboard,",
+    "type_text, press_keys, take_screenshot, and schedule_reminder. Call them to actually perform",
+    "actions — do NOT describe actions without executing them. After the tools run, briefly confirm",
+    "what you did and what the user should see. Never claim you can't control the browser, desktop,",
+    "or keyboard; those tools are live right now. If a tool fails, report the error and suggest a fix.",
+    "Prefer the simplest tool that accomplishes the goal (e.g. open_url for URLs, web_search for",
+    "search queries, open_app for apps). Chain multiple tool calls when needed.",
+    shellHint,
+    keysHint,
+  ].join(" ");
+}
+const AURA_SYSTEM_PROMPT = buildSystemPrompt();
 
 // ---------------------------------------------------------------------------
 // Tool registry
@@ -66,8 +88,6 @@ const AURA_SYSTEM_PROMPT = [
 //   - describe(args): short human-readable label (used in status updates)
 // ---------------------------------------------------------------------------
 
-const isWindows = process.platform === "win32";
-
 function clip(value, cap) {
   const str = typeof value === "string" ? value : JSON.stringify(value ?? "");
   if (str.length <= cap) return str;
@@ -76,7 +96,13 @@ function clip(value, cap) {
 
 async function execCapture(command, { timeoutMs = TOOL_TIMEOUT_MS, shell = true } = {}) {
   const opts = { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, windowsHide: true };
-  if (shell) opts.shell = process.env.ComSpec || true;
+  if (shell) {
+    // On Windows use cmd.exe (ComSpec); on macOS/Linux use the default shell
+    // (child_process will use /bin/sh when `shell: true`). Passing a specific
+    // shell binary on POSIX would break here-strings / quoting that plain
+    // sh can't parse (e.g. AppleScript one-liners we pipe through osascript).
+    opts.shell = isWindows ? (process.env.ComSpec || true) : true;
+  }
   try {
     const { stdout, stderr } = await exec(command, opts);
     return { ok: true, stdout: clip(stdout ?? "", SHELL_OUTPUT_CAP), stderr: clip(stderr ?? "", SHELL_OUTPUT_CAP) };
@@ -101,6 +127,86 @@ async function psExec(scriptBlock) {
   );
   return result;
 }
+
+// Run an AppleScript one-liner via osascript. macOS-only. Each `-e` arg
+// is a single line of AppleScript; callers pass arrays of strings.
+async function osaExec(lines) {
+  if (!isMac) {
+    return { ok: false, error: "AppleScript tools are only supported on macOS." };
+  }
+  const args = ["-e", ...lines.flatMap((l) => ["-e", l])].slice(1);
+  return new Promise((resolve) => {
+    const child = spawn("osascript", args, { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* ignore */ } }, TOOL_TIMEOUT_MS);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ ok: false, stderr: err?.message ?? String(err), stdout: "" });
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, stdout: clip(stdout, SHELL_OUTPUT_CAP), stderr: clip(stderr, SHELL_OUTPUT_CAP) });
+    });
+  });
+}
+
+// Pipe a string into stdin of a command (used for pbcopy on macOS and
+// xclip/xsel on Linux). Returns exit status.
+function pipeToStdin(command, args, input, { timeoutMs = TOOL_TIMEOUT_MS } = {}) {
+  return new Promise((resolve) => {
+    try {
+      const child = spawn(command, args, { windowsHide: true });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+      const timer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* ignore */ } }, timeoutMs);
+      child.on("error", (err) => { clearTimeout(timer); resolve({ ok: false, stderr: err?.message ?? String(err) }); });
+      child.on("exit", (code) => { clearTimeout(timer); resolve({ ok: code === 0, stderr: clip(stderr, SHELL_OUTPUT_CAP) }); });
+      child.stdin.end(input, "utf8");
+    } catch (err) {
+      resolve({ ok: false, stderr: err?.message ?? String(err) });
+    }
+  });
+}
+
+// Parse a platform-neutral key descriptor like "cmd+shift+t", "ctrl+c",
+// "enter", "f5". Returns { modifiers: Set<string>, key: string }.
+function parseKeyDescriptor(keys) {
+  const parts = String(keys || "").toLowerCase().split("+").map((p) => p.trim()).filter(Boolean);
+  const modSet = new Set();
+  let key = "";
+  for (const p of parts) {
+    if (["cmd", "command", "meta", "win", "super"].includes(p)) modSet.add("cmd");
+    else if (["ctrl", "control"].includes(p)) modSet.add("ctrl");
+    else if (p === "shift") modSet.add("shift");
+    else if (["alt", "option", "opt"].includes(p)) modSet.add("alt");
+    else key = p;
+  }
+  return { modifiers: modSet, key };
+}
+
+// AppleScript key-code table for named keys (macOS virtual key codes).
+const MAC_KEY_CODES = {
+  enter: 36, return: 36, tab: 48, space: 49, escape: 53, esc: 53,
+  up: 126, down: 125, left: 123, right: 124,
+  home: 115, end: 119, pageup: 116, pagedown: 121,
+  delete: 117, del: 117, backspace: 51,
+  f1: 122, f2: 120, f3: 99, f4: 118, f5: 96, f6: 97, f7: 98, f8: 100,
+  f9: 101, f10: 109, f11: 103, f12: 111,
+};
+
+// Windows SendKeys translation for named keys. Single characters pass through.
+const WIN_KEY_TOKENS = {
+  enter: "{ENTER}", return: "{ENTER}", tab: "{TAB}", space: " ",
+  escape: "{ESC}", esc: "{ESC}",
+  up: "{UP}", down: "{DOWN}", left: "{LEFT}", right: "{RIGHT}",
+  home: "{HOME}", end: "{END}", pageup: "{PGUP}", pagedown: "{PGDN}",
+  delete: "{DEL}", del: "{DEL}", backspace: "{BKSP}",
+  f1: "{F1}", f2: "{F2}", f3: "{F3}", f4: "{F4}", f5: "{F5}", f6: "{F6}",
+  f7: "{F7}", f8: "{F8}", f9: "{F9}", f10: "{F10}", f11: "{F11}", f12: "{F12}",
+};
 
 function resolveUserPath(p) {
   if (!p) return p;
@@ -128,7 +234,12 @@ const tools = {
       if (!/^https?:\/\//i.test(url)) {
         return { ok: false, summary: "open_url needs an http(s) URL.", result: { url } };
       }
-      const cmd = isWindows ? `start "" "${url.replace(/"/g, "")}"` : (process.platform === "darwin" ? `open "${url}"` : `xdg-open "${url}"`);
+      const safeUrl = url.replace(/"/g, "");
+      const cmd = isWindows
+        ? `start "" "${safeUrl}"`
+        : isMac
+          ? `open "${safeUrl}"`
+          : `xdg-open "${safeUrl}"`;
       const r = await execCapture(cmd, { timeoutMs: 5_000 });
       return { ok: r.ok, summary: r.ok ? `Opened ${url}` : `Failed to open ${url}: ${r.stderr}`, result: { url, ...r } };
     },
@@ -181,9 +292,18 @@ const tools = {
       if (!app) return { ok: false, summary: "open_app needs an app name.", result: {} };
       const cliArgs = typeof args?.args === "string" ? args.args : "";
       const safeApp = app.replace(/"/g, "");
-      const cmd = isWindows
-        ? `start "" "${safeApp}" ${cliArgs}`
-        : `${safeApp} ${cliArgs}`;
+      let cmd;
+      if (isWindows) {
+        cmd = `start "" "${safeApp}" ${cliArgs}`;
+      } else if (isMac) {
+        // `open -a "Safari"` resolves friendly names; explicit .app paths also
+        // work. Trailing `--args "..."` passes CLI args to the launched app.
+        cmd = cliArgs
+          ? `open -a "${safeApp}" --args ${cliArgs}`
+          : `open -a "${safeApp}"`;
+      } else {
+        cmd = `${safeApp} ${cliArgs}`;
+      }
       const r = await execCapture(cmd, { timeoutMs: 8_000 });
       return { ok: r.ok, summary: r.ok ? `Launched ${app}` : `Failed to launch ${app}: ${r.stderr}`, result: { app, ...r } };
     },
@@ -480,14 +600,32 @@ const tools = {
   },
   // ─────────────────────────────────────────────────────────────────────────
   get_clipboard: {
-    schema: { name: "get_clipboard", description: "Read the current text contents of the Windows clipboard.", parameters: { type: "object", properties: {} } },
+    schema: { name: "get_clipboard", description: "Read the current text contents of the OS clipboard (Windows + macOS + Linux with xclip).", parameters: { type: "object", properties: {} } },
     describe: () => "get_clipboard",
     async run() {
-      const r = await psExec("Get-Clipboard -Raw");
+      if (isMac) {
+        const r = await execCapture("pbpaste", { timeoutMs: 5_000 });
+        return {
+          ok: r.ok,
+          summary: r.ok ? `Clipboard: ${clip(r.stdout, 120)}` : `get_clipboard failed: ${r.stderr}`,
+          result: { text: r.ok ? r.stdout : "", error: r.ok ? null : r.stderr },
+        };
+      }
+      if (isWindows) {
+        const r = await psExec("Get-Clipboard -Raw");
+        return {
+          ok: r.ok,
+          summary: r.ok ? `Clipboard: ${clip(r.stdout, 120)}` : `get_clipboard failed: ${r.stderr}`,
+          result: { text: r.ok ? r.stdout : "", error: r.ok ? null : r.stderr },
+        };
+      }
+      // Linux: try xclip first, fall back to xsel
+      let r = await execCapture("xclip -selection clipboard -o 2>/dev/null", { timeoutMs: 5_000 });
+      if (!r.ok) r = await execCapture("xsel --clipboard --output 2>/dev/null", { timeoutMs: 5_000 });
       return {
         ok: r.ok,
-        summary: r.ok ? `Clipboard: ${clip(r.stdout, 120)}` : `get_clipboard failed: ${r.stderr}`,
-        result: { text: r.ok ? r.stdout : "", error: r.ok ? null : r.stderr },
+        summary: r.ok ? `Clipboard: ${clip(r.stdout, 120)}` : "get_clipboard: install xclip or xsel on Linux.",
+        result: { text: r.ok ? r.stdout : "", error: r.ok ? null : (r.stderr || "xclip/xsel not installed") },
       };
     },
   },
@@ -495,38 +633,71 @@ const tools = {
   set_clipboard: {
     schema: {
       name: "set_clipboard",
-      description: "Set the Windows clipboard to the given text.",
+      description: "Set the OS clipboard to the given text (Windows + macOS + Linux with xclip).",
       parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
     },
     describe: (a) => `set_clipboard (${clip(a?.text ?? "", 40)})`,
     async run(args) {
       const text = String(args?.text ?? "");
-      const escaped = text.replace(/'/g, "''");
-      const r = await psExec(`Set-Clipboard -Value '${escaped}'`);
-      return { ok: r.ok, summary: r.ok ? "Clipboard set." : `set_clipboard failed: ${r.stderr}`, result: { bytes: text.length } };
+      if (isMac) {
+        const r = await pipeToStdin("pbcopy", [], text, { timeoutMs: 5_000 });
+        return { ok: r.ok, summary: r.ok ? "Clipboard set." : `set_clipboard failed: ${r.stderr}`, result: { bytes: text.length } };
+      }
+      if (isWindows) {
+        const escaped = text.replace(/'/g, "''");
+        const r = await psExec(`Set-Clipboard -Value '${escaped}'`);
+        return { ok: r.ok, summary: r.ok ? "Clipboard set." : `set_clipboard failed: ${r.stderr}`, result: { bytes: text.length } };
+      }
+      // Linux
+      let r = await pipeToStdin("xclip", ["-selection", "clipboard"], text, { timeoutMs: 5_000 });
+      if (!r.ok) r = await pipeToStdin("xsel", ["--clipboard", "--input"], text, { timeoutMs: 5_000 });
+      return { ok: r.ok, summary: r.ok ? "Clipboard set." : `set_clipboard: install xclip or xsel on Linux.`, result: { bytes: text.length } };
     },
   },
   // ─────────────────────────────────────────────────────────────────────────
   type_text: {
     schema: {
       name: "type_text",
-      description: "Type text into the currently focused window via simulated keyboard input (Windows only).",
+      description: "Type literal text into the currently focused window via simulated keyboard input. Works on Windows (SendKeys) and macOS (System Events keystroke).",
       parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
     },
     describe: (a) => `type_text (${clip(a?.text ?? "", 40)})`,
     async run(args) {
       const text = String(args?.text ?? "");
       if (!text) return { ok: false, summary: "type_text needs text.", result: {} };
-      const escaped = text
-        .replace(/'/g, "''")
-        .replace(/([+^%~(){}\[\]])/g, "{$1}");
-      const script = [
-        "Add-Type -AssemblyName System.Windows.Forms;",
-        "Start-Sleep -Milliseconds 150;",
-        `[System.Windows.Forms.SendKeys]::SendWait('${escaped}')`,
-      ].join(" ");
-      const r = await psExec(script);
-      return { ok: r.ok, summary: r.ok ? `Typed ${text.length} chars.` : `type_text failed: ${r.stderr}`, result: { bytes: text.length } };
+      if (isWindows) {
+        const escaped = text
+          .replace(/'/g, "''")
+          .replace(/([+^%~(){}\[\]])/g, "{$1}");
+        const script = [
+          "Add-Type -AssemblyName System.Windows.Forms;",
+          "Start-Sleep -Milliseconds 150;",
+          `[System.Windows.Forms.SendKeys]::SendWait('${escaped}')`,
+        ].join(" ");
+        const r = await psExec(script);
+        return { ok: r.ok, summary: r.ok ? `Typed ${text.length} chars.` : `type_text failed: ${r.stderr}`, result: { bytes: text.length } };
+      }
+      if (isMac) {
+        // AppleScript: escape backslashes and quotes, split on newlines so each
+        // line becomes a separate keystroke followed by a "return" key code.
+        const chunks = text.split(/\r?\n/);
+        const lines = ['delay 0.15'];
+        for (let i = 0; i < chunks.length; i += 1) {
+          const escaped = chunks[i].replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+          if (escaped.length > 0) {
+            lines.push(`tell application "System Events" to keystroke "${escaped}"`);
+          }
+          if (i < chunks.length - 1) {
+            lines.push('tell application "System Events" to key code 36');
+          }
+        }
+        const r = await osaExec(lines);
+        return { ok: r.ok, summary: r.ok ? `Typed ${text.length} chars.` : `type_text failed: ${r.stderr}`, result: { bytes: text.length } };
+      }
+      // Linux: try xdotool
+      const escaped = text.replace(/"/g, '\\"');
+      const r = await execCapture(`xdotool type --delay 10 -- "${escaped}"`, { timeoutMs: 10_000 });
+      return { ok: r.ok, summary: r.ok ? `Typed ${text.length} chars.` : "type_text: install xdotool on Linux.", result: { bytes: text.length } };
     },
   },
   // ─────────────────────────────────────────────────────────────────────────
@@ -534,28 +705,75 @@ const tools = {
     schema: {
       name: "press_keys",
       description:
-        "Press a keyboard shortcut. Use SendKeys syntax: '^c' (Ctrl+C), '^+t' (Ctrl+Shift+T), '%{F4}' (Alt+F4), '{ENTER}', '{TAB}', '{ESC}'. Windows only.",
+        "Press a keyboard shortcut using a platform-neutral descriptor. Modifiers: 'cmd'/'ctrl'/'shift'/'alt'. Named keys: 'enter', 'tab', 'escape', 'space', 'up', 'down', 'left', 'right', 'home', 'end', 'pageup', 'pagedown', 'delete', 'backspace', 'f1'..'f12'. Examples: 'cmd+c' (macOS copy), 'ctrl+c' (Windows copy), 'cmd+shift+t', 'alt+tab', 'enter'.",
       parameters: { type: "object", properties: { keys: { type: "string" } }, required: ["keys"] },
     },
     describe: (a) => `press_keys (${a?.keys ?? ""})`,
     async run(args) {
-      const keys = String(args?.keys ?? "");
+      const keys = String(args?.keys ?? "").trim();
       if (!keys) return { ok: false, summary: "press_keys needs a key sequence.", result: {} };
-      const escaped = keys.replace(/'/g, "''");
-      const script = [
-        "Add-Type -AssemblyName System.Windows.Forms;",
-        "Start-Sleep -Milliseconds 150;",
-        `[System.Windows.Forms.SendKeys]::SendWait('${escaped}')`,
-      ].join(" ");
-      const r = await psExec(script);
-      return { ok: r.ok, summary: r.ok ? `Pressed ${keys}` : `press_keys failed: ${r.stderr}`, result: { keys } };
+      const { modifiers, key } = parseKeyDescriptor(keys);
+
+      if (isWindows) {
+        let seq = "";
+        if (modifiers.has("ctrl")) seq += "^";
+        if (modifiers.has("shift")) seq += "+";
+        if (modifiers.has("alt")) seq += "%";
+        // Windows key isn't reachable via SendKeys; no-op on 'cmd'
+        const token = WIN_KEY_TOKENS[key] ?? (key.length === 1 ? key : `{${key.toUpperCase()}}`);
+        seq += token;
+        const escaped = seq.replace(/'/g, "''");
+        const script = [
+          "Add-Type -AssemblyName System.Windows.Forms;",
+          "Start-Sleep -Milliseconds 150;",
+          `[System.Windows.Forms.SendKeys]::SendWait('${escaped}')`,
+        ].join(" ");
+        const r = await psExec(script);
+        return { ok: r.ok, summary: r.ok ? `Pressed ${keys}` : `press_keys failed: ${r.stderr}`, result: { keys } };
+      }
+
+      if (isMac) {
+        const modList = [];
+        if (modifiers.has("cmd")) modList.push("command down");
+        if (modifiers.has("shift")) modList.push("shift down");
+        if (modifiers.has("alt")) modList.push("option down");
+        if (modifiers.has("ctrl")) modList.push("control down");
+        const modStr = modList.length ? ` using {${modList.join(", ")}}` : "";
+
+        let scriptLine;
+        if (MAC_KEY_CODES[key] !== undefined) {
+          scriptLine = `tell application "System Events" to key code ${MAC_KEY_CODES[key]}${modStr}`;
+        } else if (key.length >= 1) {
+          // keystroke plays well with letter/number/symbol keys with modifiers.
+          const safeKey = key.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+          scriptLine = `tell application "System Events" to keystroke "${safeKey}"${modStr}`;
+        } else {
+          return { ok: false, summary: `press_keys: could not parse '${keys}'.`, result: { keys } };
+        }
+        const r = await osaExec(["delay 0.15", scriptLine]);
+        return { ok: r.ok, summary: r.ok ? `Pressed ${keys}` : `press_keys failed: ${r.stderr}`, result: { keys } };
+      }
+
+      // Linux via xdotool: translate "cmd+c" -> "super+c", "alt" -> "alt"
+      const xParts = [];
+      if (modifiers.has("ctrl")) xParts.push("ctrl");
+      if (modifiers.has("shift")) xParts.push("shift");
+      if (modifiers.has("alt")) xParts.push("alt");
+      if (modifiers.has("cmd")) xParts.push("super");
+      const keyMap = { enter: "Return", tab: "Tab", escape: "Escape", esc: "Escape",
+        up: "Up", down: "Down", left: "Left", right: "Right", home: "Home", end: "End",
+        pageup: "Prior", pagedown: "Next", delete: "Delete", backspace: "BackSpace" };
+      const xKey = keyMap[key] ?? key;
+      xParts.push(xKey);
+      const r = await execCapture(`xdotool key --clearmodifiers ${xParts.join("+")}`, { timeoutMs: 5_000 });
+      return { ok: r.ok, summary: r.ok ? `Pressed ${keys}` : "press_keys: install xdotool on Linux.", result: { keys } };
     },
   },
   // ─────────────────────────────────────────────────────────────────────────
   take_screenshot: {
     schema: {
       name: "take_screenshot",
-      description: "Capture the primary screen and save to a PNG file. Returns the absolute file path.",
+      description: "Capture the primary screen and save to a PNG file. Returns the absolute file path. Works on Windows (GDI), macOS (screencapture), and Linux (gnome-screenshot).",
       parameters: {
         type: "object",
         properties: { path: { type: "string", description: "Optional save path. Defaults to the user's Pictures folder." } },
@@ -568,20 +786,40 @@ const tools = {
       const target = args?.path
         ? resolveUserPath(args.path)
         : path.join(defaultDir, `aura-screenshot-${Date.now()}.png`);
-      const safeTarget = target.replace(/'/g, "''");
-      const script = [
-        "Add-Type -AssemblyName System.Windows.Forms;",
-        "Add-Type -AssemblyName System.Drawing;",
-        "$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds;",
-        "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height;",
-        "$g = [System.Drawing.Graphics]::FromImage($bmp);",
-        "$g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size);",
-        `$bmp.Save('${safeTarget}', [System.Drawing.Imaging.ImageFormat]::Png);`,
-        "$g.Dispose(); $bmp.Dispose();",
-        `Write-Output '${safeTarget}'`,
-      ].join(" ");
-      const r = await psExec(script);
-      if (!r.ok) return { ok: false, summary: `take_screenshot failed: ${r.stderr}`, result: {} };
+
+      if (isWindows) {
+        const safeTarget = target.replace(/'/g, "''");
+        const script = [
+          "Add-Type -AssemblyName System.Windows.Forms;",
+          "Add-Type -AssemblyName System.Drawing;",
+          "$b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds;",
+          "$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height;",
+          "$g = [System.Drawing.Graphics]::FromImage($bmp);",
+          "$g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size);",
+          `$bmp.Save('${safeTarget}', [System.Drawing.Imaging.ImageFormat]::Png);`,
+          "$g.Dispose(); $bmp.Dispose();",
+          `Write-Output '${safeTarget}'`,
+        ].join(" ");
+        const r = await psExec(script);
+        if (!r.ok) return { ok: false, summary: `take_screenshot failed: ${r.stderr}`, result: {} };
+        return { ok: true, summary: `Saved screenshot to ${target}`, result: { path: target } };
+      }
+
+      if (isMac) {
+        // `-x` silences the camera shutter sound. System asks the user to
+        // grant Screen Recording permission the first time; after that it
+        // captures silently.
+        const safeTarget = target.replace(/"/g, '\\"');
+        const r = await execCapture(`screencapture -x "${safeTarget}"`, { timeoutMs: 10_000 });
+        if (!r.ok) return { ok: false, summary: `take_screenshot failed: ${r.stderr}`, result: {} };
+        return { ok: true, summary: `Saved screenshot to ${target}`, result: { path: target } };
+      }
+
+      // Linux: try gnome-screenshot first, fall back to scrot
+      const safeTarget = target.replace(/"/g, '\\"');
+      let r = await execCapture(`gnome-screenshot -f "${safeTarget}"`, { timeoutMs: 10_000 });
+      if (!r.ok) r = await execCapture(`scrot "${safeTarget}"`, { timeoutMs: 10_000 });
+      if (!r.ok) return { ok: false, summary: "take_screenshot: install gnome-screenshot or scrot on Linux.", result: {} };
       return { ok: true, summary: `Saved screenshot to ${target}`, result: { path: target } };
     },
   },
@@ -590,7 +828,7 @@ const tools = {
     schema: {
       name: "schedule_reminder",
       description:
-        "Schedule a reminder to fire after N seconds. When it fires, OpenClaw will pop a Windows notification. Good for short timers; use the user's own calendar for longer scheduling.",
+        "Schedule a reminder to fire after N seconds. Pops a native notification dialog (Windows MessageBox / macOS notification + dialog / Linux notify-send). Good for short timers; use the user's own calendar for longer scheduling.",
       parameters: {
         type: "object",
         properties: {
@@ -606,14 +844,30 @@ const tools = {
       const message = String(args?.message ?? "Aura reminder").slice(0, 300);
       if (!delaySec) return { ok: false, summary: "schedule_reminder needs a positive delay_seconds.", result: {} };
       setTimeout(() => {
-        if (!isWindows) return;
-        const escaped = message.replace(/'/g, "''");
-        const script = [
-          "Add-Type -AssemblyName System.Windows.Forms;",
-          `[System.Windows.Forms.MessageBox]::Show('${escaped}', 'Aura reminder') | Out-Null`,
-        ].join(" ");
-        // Fire-and-forget
-        psExec(script).catch(() => { /* ignore */ });
+        if (isWindows) {
+          const escaped = message.replace(/'/g, "''");
+          const script = [
+            "Add-Type -AssemblyName System.Windows.Forms;",
+            `[System.Windows.Forms.MessageBox]::Show('${escaped}', 'Aura reminder') | Out-Null`,
+          ].join(" ");
+          psExec(script).catch(() => { /* ignore */ });
+          return;
+        }
+        if (isMac) {
+          const safeMsg = message.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+          // Post a banner notification AND a blocking dialog so the user
+          // actually sees it even if notifications are muted.
+          osaExec([
+            `display notification "${safeMsg}" with title "Aura reminder" sound name "Submarine"`,
+          ]).catch(() => { /* ignore */ });
+          osaExec([
+            `display dialog "${safeMsg}" with title "Aura reminder" buttons {"OK"} default button "OK"`,
+          ]).catch(() => { /* ignore */ });
+          return;
+        }
+        // Linux
+        const safeMsg = message.replace(/"/g, '\\"');
+        execCapture(`notify-send "Aura reminder" "${safeMsg}"`, { timeoutMs: 5_000 }).catch(() => { /* ignore */ });
       }, delaySec * 1000);
       return {
         ok: true,
