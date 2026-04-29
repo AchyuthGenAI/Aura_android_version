@@ -29,6 +29,7 @@ import type {
 import { normalizeTextContent } from "@shared/text-content";
 
 import { BrowserController } from "./browser-controller";
+import { OpenClawHostBridge } from "./openclaw-host-bridge";
 import { ConfigManager } from "./config-manager";
 import { AuraStore } from "./store";
 import { DomainActionRegistry } from "./domain-action-registry";
@@ -228,9 +229,14 @@ const summarizeGatewayValue = (value: unknown): string => {
 
 const GATEWAY_AUTOMATION_REFUSAL_RE =
   /\b(?:text-based ai assistant|do not have the ability|cannot control your (?:web )?browser|can't control your (?:web )?browser|you(?:'ll| will) need to do that manually)\b/i;
+const ACTIONABLE_USER_COMMAND_RE =
+  /\b(?:open|go to|navigate|visit|click|tap|type|fill|submit|send|turn on|turn off|enable|disable|launch|start|stop|search)\b/i;
+const GENERIC_NOOP_COMPLETION_RE =
+  /^(?:ok(?:ay)?[.!]?\s*)?(?:done|completed|task complete(?:d)?|finished|all set)[.!]?\s*$/i;
 
 export class GatewayManager {
   private gatewayProcess: ChildProcess | null = null;
+  private openClawHostBridge: OpenClawHostBridge | null = null;
   private ws: WebSocket | null = null;
   private connected = false;
   private pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void; timeout: NodeJS.Timeout }>();
@@ -410,6 +416,7 @@ export class GatewayManager {
       console.log("[GatewayManager] Reusing existing gateway process PID:", this.gatewayProcess?.pid);
     } else if (this.configManager.shouldAutoStartGateway() && this.openClawEntryPath) {
       try {
+        await this.ensureOpenClawHostBridge();
         await this.startGatewayProcess();
       } catch (err) {
         // If a gateway is already running on the port, still attempt to connect to it
@@ -473,6 +480,59 @@ export class GatewayManager {
     if (this.gatewayProcess && this.gatewayProcess.exitCode === null) {
       this.gatewayProcess.kill();
       this.gatewayProcess = null;
+    }
+    this.stopOpenClawHostBridge();
+  }
+
+  /**
+   * Called by {@link OpenClawHostBridge} when the forked gateway wants to run a
+   * gated tool (`run_command`, `write_file`, …). Shows the standard Aura
+   * confirmation modal and resolves when the user approves or denies.
+   */
+  async confirmOpenClawToolExecution(toolName: string, args: Record<string, unknown>): Promise<boolean> {
+    return this.confirmStep(
+      {
+        taskId: this.activeTaskId ?? "openclaw-gateway",
+        message:
+          `OpenClaw requests permission to run **${toolName}**.\n\n` +
+          `Arguments (truncated):\n\`\`\`json\n${JSON.stringify(args, null, 2).slice(0, 1200)}\n\`\`\``,
+        step: {
+          index: 0,
+          tool: "ask_user",
+          description: `Approve OpenClaw tool: ${toolName}`,
+          status: "pending",
+          params: {},
+        },
+      },
+      { background: false },
+    );
+  }
+
+  private async ensureOpenClawHostBridge(): Promise<void> {
+    if (this.openClawHostBridge) return;
+    const bridge = new OpenClawHostBridge(this.browserController, this, () => {
+      const pol = this.configManager.readConfig().automation?.openclawToolPolicy;
+      return pol?.browserNavigateHosts?.map((h) => h.trim()).filter(Boolean) ?? [];
+    });
+    await bridge.start();
+    this.openClawHostBridge = bridge;
+  }
+
+  private stopOpenClawHostBridge(): void {
+    this.openClawHostBridge?.stop();
+    this.openClawHostBridge = null;
+  }
+
+  private forwardOpenClawRuntimeEnv(target: NodeJS.ProcessEnv): void {
+    const pol = this.configManager.readConfig().automation?.openclawToolPolicy;
+    if (pol?.allowedHttpHosts?.length) {
+      target.OPENCLAW_ALLOWED_HTTP_HOSTS = pol.allowedHttpHosts.map((h) => h.trim()).filter(Boolean).join(",");
+    }
+    if (pol?.allowedFilePathPrefixes?.length) {
+      target.OPENCLAW_ALLOWED_FILE_PREFIXES = pol.allowedFilePathPrefixes.map((p) => p.trim()).filter(Boolean).join(",");
+    }
+    if (pol?.browserNavigateHosts?.length) {
+      target.OPENCLAW_BROWSER_NAV_HOSTS = pol.browserNavigateHosts.map((h) => h.trim()).filter(Boolean).join(",");
     }
   }
 
@@ -918,13 +978,6 @@ export class GatewayManager {
   ): Promise<ChatSendResult> {
     const sessionKey = this.configManager.getDefaultSessionKey();
     const skillContext = this.selectSkillContext(request.message, pageContext, "gateway", request.explicitSkillIds);
-    const enrichedMessage = this.buildGatewayEnrichedMessage(
-      request.message,
-      pageContext,
-      skillContext.context,
-      preferredSurface,
-    );
-    const gatewayRequest = { ...request, message: enrichedMessage };
     let screenshotDataUrl: string | null = null;
     if (preferredSurface !== "desktop") {
       try {
@@ -953,21 +1006,46 @@ export class GatewayManager {
     this.emitProgress(task, { type: "status", statusText: "Handing this task to OpenClaw runtime." });
 
     try {
-      const responseText = await this.streamViaGateway(messageId, gatewayRequest, {
-        sessionKey,
-        thinking: executionProfile.thinking,
-        timeoutMs: executionProfile.timeoutMs,
-        screenshotDataUrl,
-      });
+      let responseText = "";
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const outboundMessage = attempt === 0
+          ? this.buildGatewayEnrichedMessage(request.message, pageContext, skillContext.context, preferredSurface)
+          : this.buildGatewayRetryMessage(
+              request.message,
+              pageContext,
+              skillContext.context,
+              preferredSurface,
+              responseText,
+            );
 
-      const gatewayTask = this.activeGatewayAgentTask;
-      const finalTask = gatewayTask?.task ?? task;
-      const finalText = responseText || gatewayTask?.assistantText || "Task complete.";
-      if (gatewayTask && this.shouldFallbackFromGatewayAgent(finalText, gatewayTask)) {
+        responseText = await this.streamViaGateway(messageId, { ...request, message: outboundMessage }, {
+          sessionKey,
+          thinking: executionProfile.thinking,
+          timeoutMs: executionProfile.timeoutMs,
+          screenshotDataUrl,
+        });
+
+        const gatewayTask = this.activeGatewayAgentTask;
+        const finalText = responseText || gatewayTask?.assistantText || "Task complete.";
+        if (!gatewayTask || !this.shouldFallbackFromGatewayAgent(finalText, gatewayTask)) {
+          break;
+        }
+
+        if (attempt === 0 && this.shouldRetryGatewayWithoutTools(gatewayTask)) {
+          this.emitProgress(gatewayTask.task, {
+            type: "status",
+            statusText: "OpenClaw replied without tool activity. Retrying with stricter automation instructions.",
+          });
+          this.resetGatewayTaskForRetry(gatewayTask);
+          this.activeRunId = null;
+          continue;
+        }
+
         const shouldBlockFallback = this.configManager.shouldDisableLocalFallback();
         if (shouldBlockFallback) {
-          throw new Error("OpenClaw did not emit any executable automation steps, so Aura will not mark this task as completed.");
+          throw new Error("OpenClaw replied without any executable automation steps after retrying, so Aura will not mark this task as completed.");
         }
+        const finalTask = gatewayTask.task;
         this.emitProgress(finalTask, {
           type: "status",
           statusText: "OpenClaw gateway unavailable. Switching to local agent.",
@@ -978,6 +1056,9 @@ export class GatewayManager {
         return this.handleAgenticTask(messageId, taskId, session, request, pageContext, preferredSurface);
       }
 
+      const gatewayTask = this.activeGatewayAgentTask;
+      const finalTask = gatewayTask?.task ?? task;
+      const finalText = responseText || gatewayTask?.assistantText || "Task complete.";
       this.markGatewayTaskAccepted(finalTask, "OpenClaw accepted the task.");
       finalTask.status = "done";
       finalTask.updatedAt = now();
@@ -1185,7 +1266,7 @@ export class GatewayManager {
         }
         : request;
       const responseText = this.shouldUseGatewayForChat()
-        ? await this.streamViaGateway(messageId, gatewayRequest)
+        ? await this.streamViaGateway(messageId, gatewayRequest, { thinking: "low", timeoutMs: 75_000 })
         : await this.streamViaDirectLlm(messageId, prompt, request.history, skillContext.context);
       this.handleChatSuccess(messageId, taskId, task, session, request, responseText);
       return this.createSendResult({
@@ -2105,9 +2186,17 @@ Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned th
   ): string {
     return [
       "You are the OpenClaw runtime. Execute this automation task end-to-end using your real browser and tool capabilities.",
+      "This is an automation turn, not a text-only Q&A turn.",
       "Do not hand the task back to Aura-local automation or claim completion without actually doing the work.",
+      "For any actionable request, emit one or more real tool calls before your final answer.",
       "If a required auth session, skill, or integration is missing, stop immediately and report the specific blocker.",
       preferredSurface ? `Preferred surface: ${preferredSurface}.` : null,
+      preferredSurface === "browser" || preferredSurface === "mixed"
+        ? "Stay inside Aura's in-app browser using browser_tabs, browser_navigate, browser_snapshot, browser_dom_action, and browser_screenshot. Do not fall back to open_url unless the user explicitly asked for the external/default browser."
+        : null,
+      preferredSurface === "desktop"
+        ? "Use the live desktop/system tools to act on the machine. Do not respond with hypothetical instructions."
+        : null,
       pageContext
         ? [
             "",
@@ -2136,6 +2225,30 @@ Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned th
         : null,
       "",
       `User request: ${userMessage}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  private buildGatewayRetryMessage(
+    userMessage: string,
+    pageContext: PageContext | null,
+    skillContext: string | undefined,
+    preferredSurface: "browser" | "desktop" | "mixed" | undefined,
+    previousResponseText: string,
+  ): string {
+    const previousReply = normalizeTextContent(previousResponseText).trim();
+    return [
+      this.buildGatewayEnrichedMessage(userMessage, pageContext, skillContext, preferredSurface),
+      "",
+      "[Retry directive]",
+      "Your previous reply was invalid because it finished without producing any executable tool activity.",
+      "Retry the same request now and emit real OpenClaw tool calls before your final answer.",
+      preferredSurface === "browser" || preferredSurface === "mixed"
+        ? "Start with browser_tabs, browser_snapshot, or browser_navigate, then continue with browser_dom_action until the site task is actually completed inside Aura."
+        : "Use the relevant OpenClaw tools to perform the work instead of replying with instructions only.",
+      previousReply ? `Previous invalid reply: ${previousReply.slice(0, 500)}` : null,
+      "[End retry directive]",
     ]
       .filter(Boolean)
       .join("\n");
@@ -2184,6 +2297,48 @@ Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned th
     this.gatewayCooldownUntil = Date.now() + durationMs;
   }
 
+  /**
+   * The forked gateway logs structured lines to stderr as `[openclaw:obs] {...}`.
+   * Those JSON blobs often contain the substring `429` inside numeric fields, which
+   * must NOT trip the parent's circuit breaker — that was falsely killing in-flight
+   * chats and surfacing duplicate "rate limit" toasts.
+   */
+  private stderrIndicatesGatewayLlmRateLimit(text: string): boolean {
+    if (text.includes("[openclaw:obs]")) return false;
+    const t = text.toLowerCase();
+    const looksLimited =
+      /\b429\b/.test(text)
+      || /\b413\b/.test(text)
+      || t.includes("resource exhausted")
+      || t.includes("rate limit")
+      || t.includes("too many requests")
+      || t.includes("request too large")
+      || t.includes("tokens per minute")
+      || t.includes("token limit");
+    if (!looksLimited) return false;
+    return (
+      t.includes("groq")
+      || t.includes("gemini")
+      || t.includes("chat.send failed")
+      || t.includes("openclaw")
+    );
+  }
+
+  /**
+   * Some provider 429 lines are transient and OpenClaw can recover by switching
+   * provider internally. Only hard-fail the active run when stderr explicitly
+   * indicates the chat round itself has terminated.
+   */
+  private stderrIndicatesTerminalGatewayFailure(text: string): boolean {
+    const t = text.toLowerCase();
+    return (
+      t.includes("chat.send failed")
+      || t.includes("request failed after retries")
+      || t.includes("agent loop failed")
+      || t.includes("fatal")
+    );
+  }
+
   private shouldFallbackToLocalFromGatewayError(message: string): boolean {
     const normalized = message.toLowerCase();
     return normalized.includes("429")
@@ -2197,7 +2352,14 @@ Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned th
   private isComplexGatewayTask(message: string): boolean {
     const normalized = message.trim().toLowerCase();
     const actionCount = [...normalized.matchAll(COMPLEX_TASK_ACTION_RE)].length;
-    return COMPLEX_TASK_SEQUENCE_RE.test(normalized) || actionCount >= 3;
+    if (COMPLEX_TASK_SEQUENCE_RE.test(normalized) || actionCount >= 3) {
+      return true;
+    }
+    // "Open WhatsApp and send hi" is only two action verbs but needs many tool + LLM rounds.
+    if (COMPLEX_TASK_APP_RE.test(normalized) && actionCount >= 2) {
+      return true;
+    }
+    return false;
   }
 
   private resolveGatewayExecutionProfile(
@@ -2205,19 +2367,21 @@ Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned th
     preferredSurface?: "browser" | "desktop" | "mixed",
   ): { thinking: "low" | "medium" | "high"; timeoutMs: number } {
     const complex = this.isComplexGatewayTask(message);
+    // OpenClaw may run up to several LLM+tool iterations; sub-minute caps caused false
+    // "OpenClaw task timed out" while the gateway was still working (e.g. desktop messaging).
     if (preferredSurface === "desktop") {
       return complex
-        ? { thinking: "high", timeoutMs: 75_000 }
-        : { thinking: "medium", timeoutMs: 35_000 };
+        ? { thinking: "high", timeoutMs: 240_000 }
+        : { thinking: "medium", timeoutMs: 150_000 };
     }
     if (preferredSurface === "mixed") {
       return complex
-        ? { thinking: "high", timeoutMs: 60_000 }
-        : { thinking: "medium", timeoutMs: 35_000 };
+        ? { thinking: "high", timeoutMs: 210_000 }
+        : { thinking: "medium", timeoutMs: 150_000 };
     }
     return complex
-      ? { thinking: "medium", timeoutMs: 45_000 }
-      : { thinking: "low", timeoutMs: 25_000 };
+      ? { thinking: "medium", timeoutMs: 180_000 }
+      : { thinking: "low", timeoutMs: 120_000 };
   }
 
   private resolveRuntimeAvailability(): {
@@ -2227,6 +2391,13 @@ Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned th
   } {
     if (this.connected && this.gatewayHealthState === "rate_limited") {
       const remaining = Math.ceil(this.getGatewayCooldownRemainingMs() / 1000);
+      if (this.configManager.shouldDisableLocalFallback()) {
+        return {
+          available: true,
+          usingLocalFallback: false,
+          reason: `OpenClaw providers are cooling down. Retry in ~${remaining}s — the gateway uses Gemini when Groq is throttled.`,
+        };
+      }
       return {
         available: true,
         usingLocalFallback: true,
@@ -2261,6 +2432,9 @@ Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned th
   private getOperationalReadyMessage(): string {
     if (this.connected && this.gatewayHealthState === "rate_limited") {
       const remaining = Math.ceil(this.getGatewayCooldownRemainingMs() / 1000);
+      if (this.configManager.shouldDisableLocalFallback()) {
+        return `OpenClaw is cooling down (~${remaining}s). The gateway retries with Gemini when Groq rate-limits.`;
+      }
       return `OpenClaw is rate-limited. Aura is temporarily using local Gemini for ${remaining}s.`;
     }
     if (this.connected && this.configManager.shouldDisableLocalFallback()) {
@@ -2318,13 +2492,17 @@ Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned th
 
     this.streamedText = "";
     return new Promise<string>((resolve, reject) => {
+      const runBudgetMs = options?.timeoutMs ?? 120_000;
+      // Allow a full budget for tool rounds plus extra time for the final model response
+      // after the last tool result (Groq/Gemini can be slow on long contexts).
+      const completionMs = Math.max(runBudgetMs + 90_000, 120_000);
       const completionTimeout = setTimeout(() => {
         if (this.chatDoneReject === wrappedReject) {
           this.chatDoneResolve = null;
           this.chatDoneReject = null;
         }
         reject(new Error("OpenClaw task timed out."));
-      }, Math.max((options?.timeoutMs ?? 30_000) + 10_000, 30_000));
+      }, completionMs);
 
       const wrappedResolve = (text: string) => {
         clearTimeout(completionTimeout);
@@ -2456,6 +2634,18 @@ Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned th
         delete childEnv.ELECTRON_RUN_AS_NODE;
       }
 
+      this.forwardOpenClawRuntimeEnv(childEnv);
+      if (this.openClawHostBridge) {
+        childEnv.AURA_OPENCLAW_BRIDGE_URL = this.openClawHostBridge.getInvokeUrl();
+        childEnv.AURA_OPENCLAW_BRIDGE_TOKEN = this.openClawHostBridge.getToken();
+      }
+      // Gated tools (`run_command`, `write_file`, …) ask the Aura UI for approval
+      // via the host bridge before executing. Set OPENCLAW_REQUIRE_UI_CONFIRM=0
+      // in the environment to disable (not recommended for shared machines).
+      if (!childEnv.OPENCLAW_REQUIRE_UI_CONFIRM) {
+        childEnv.OPENCLAW_REQUIRE_UI_CONFIRM = "1";
+      }
+
       const child = spawn(cmd, args, {
         cwd: path.dirname(this.openClawEntryPath),
         env: childEnv,
@@ -2478,10 +2668,10 @@ Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned th
           resolved = true;
           resolve();
         }
-        if (text.includes("429") || text.includes("rate limit") || text.includes("Resource exhausted")) {
+        if (this.stderrIndicatesGatewayLlmRateLimit(text)) {
           const retryAfterMs = this.parseGatewayRetryDelayMs(text);
           this.markGatewayRateLimited(
-            "Provider hit a rate limit. Rotating to the next provider in the chain.",
+            "The LLM provider rate-limited this request. OpenClaw will prefer backup models when available.",
             retryAfterMs,
           );
           const remaining = Math.ceil(this.getGatewayCooldownRemainingMs() / 1000);
@@ -2493,11 +2683,15 @@ Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned th
             message: this.getOperationalReadyMessage(),
             error: undefined,
           });
-          if (this.chatDoneReject) {
+          if (this.chatDoneReject && this.stderrIndicatesTerminalGatewayFailure(text)) {
             const rejectFn = this.chatDoneReject;
             this.chatDoneResolve = null;
             this.chatDoneReject = null;
-            rejectFn(new Error("Provider hit rate limit (429). Rotating to next provider in chain."));
+            rejectFn(
+              new Error(
+                "The AI provider is busy (rate limit). Wait a minute and try again — OpenClaw falls back to Gemini when Groq is throttled.",
+              ),
+            );
           }
           // Fire-and-forget: rotate the provider so the NEXT request uses a different key.
           void this.rotateToNextProvider("rate limit 429");
@@ -3105,16 +3299,36 @@ Do not assume Aura has every original OpenClaw-specific CLI or tool mentioned th
   }
 
   private shouldFallbackFromGatewayAgent(responseText: string, gatewayTask: GatewayAgentTaskState): boolean {
-    // Aura's hard-forked OpenClaw runtime (vendor/openclaw/openclaw.mjs)
-    // services chat.send end-to-end by streaming Groq/Gemini responses; it
-    // does not emit tool-execution events. A non-empty textual reply from the
-    // gateway IS a valid task outcome in this build, regardless of wording.
-    // The legacy refusal-regex heuristic caused false positives (e.g. "Since
-    // I'm a text-based assistant…") and has been retired. Only treat the
-    // turn as failed when the gateway returned absolutely nothing.
-    void gatewayTask;
     const normalizedText = normalizeTextContent(responseText).trim();
-    return normalizedText.length === 0;
+    if (normalizedText.length === 0) return true;
+
+    // Explicit refusals are never valid for an automation turn.
+    if (GATEWAY_AUTOMATION_REFUSAL_RE.test(normalizedText)) return true;
+
+    // Prevent false "Task complete." success when the model produced only a
+    // generic completion sentence without any tool execution.
+    const command = normalizeTextContent(gatewayTask.task.command ?? "").trim();
+    const actionable = ACTIONABLE_USER_COMMAND_RE.test(command);
+    if (actionable && !gatewayTask.sawToolEvent && GENERIC_NOOP_COMPLETION_RE.test(normalizedText)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private shouldRetryGatewayWithoutTools(gatewayTask: GatewayAgentTaskState): boolean {
+    return !gatewayTask.sawToolEvent;
+  }
+
+  private resetGatewayTaskForRetry(gatewayTask: GatewayAgentTaskState): void {
+    gatewayTask.toolStepIndexByCallId.clear();
+    gatewayTask.assistantText = "";
+    gatewayTask.sawAgentEvent = false;
+    gatewayTask.sawToolEvent = false;
+    gatewayTask.task.status = "running";
+    gatewayTask.task.result = undefined;
+    gatewayTask.task.error = undefined;
+    gatewayTask.task.updatedAt = now();
   }
 
   private async request<T = unknown>(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<T> {

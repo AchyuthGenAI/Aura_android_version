@@ -438,6 +438,15 @@ export interface OpenClawConfig {
     disableLocalFallback?: boolean;
     wsProtocolVersion?: string;
     eventReplayLimit?: number;
+    /** Optional allowlists enforced inside the forked `openclaw.mjs` child (not the renderer). */
+    openclawToolPolicy?: {
+      /** If non-empty, `http_get` / `http_post` may only target these hostnames (substring match on hostname). */
+      allowedHttpHosts?: string[];
+      /** If non-empty, filesystem tools must stay under these absolute path prefixes (after `~` expansion). */
+      allowedFilePathPrefixes?: string[];
+      /** If non-empty, `browser_navigate` / `new_tab` via the host bridge may only use these hosts. */
+      browserNavigateHosts?: string[];
+    };
   };
   channels?: Record<string, unknown>;
   skills?: {

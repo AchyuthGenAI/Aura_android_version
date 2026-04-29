@@ -1,7 +1,7 @@
 {
   "name": "openclaw",
-  "version": "0.4.0-aura-fork",
-  "description": "Aura Desktop hard-fork of the OpenClaw runtime. The gateway services chat.send end-to-end with a real agentic tool-call loop (Groq function calling) and 18 cross-platform Windows/macOS/Linux tools for URL launching, apps, filesystem, HTTP, shell, keyboard, clipboard, screenshots, and scheduling.",
+  "version": "0.5.3-aura-fork",
+  "description": "Aura Desktop hard-fork of the OpenClaw runtime: WebSocket protocol extensions (ping, session.info, gateway.stats), rich /health, structured observability + JSONL tool audit, optional HTTP/file allowlists, UI-gated sensitive tools via Aura host bridge, in-app BrowserView automation (browser_* tools), and first-class SKILL.md workspace skills (list_skills, read_skill). Agent loop uses Groq function calling with 25+ tools.",
   "author": "Persist Ventures",
   "license": "UNLICENSED",
   "private": true,

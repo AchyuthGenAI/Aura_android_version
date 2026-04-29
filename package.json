@@ -29,6 +29,7 @@
     "typecheck": "tsc --noEmit",
     "smoke:post-merge": "node --experimental-strip-types scripts/post-merge-smoke.ts",
     "test:automation:ws": "node scripts/test-automation-ws.cjs",
+    "test:openclaw-protocol": "node scripts/test-openclaw-protocol.cjs",
     "eval:automation:ws": "node scripts/evaluate-automation-ws.cjs",
     "preview": "vite preview"
   },

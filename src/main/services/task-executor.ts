@@ -299,21 +299,21 @@ export class TaskExecutor {
       }
 
       case "back": {
-        bc.back();
+        await bc.back();
         await this.waitForNavigation(bc);
         const ctx = await this.safeGetPageContext(bc);
         return { output: "Went back", pageContext: ctx, appContext: deriveAppContext(ctx) };
       }
 
       case "forward": {
-        bc.forward();
+        await bc.forward();
         await this.waitForNavigation(bc);
         const ctx = await this.safeGetPageContext(bc);
         return { output: "Went forward", pageContext: ctx, appContext: deriveAppContext(ctx) };
       }
 
       case "reload": {
-        bc.reload();
+        await bc.reload();
         await this.waitForNavigation(bc);
         const ctx = await this.safeGetPageContext(bc);
         return { output: "Reloaded the page", pageContext: ctx, appContext: deriveAppContext(ctx) };

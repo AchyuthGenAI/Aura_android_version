@@ -592,6 +592,20 @@ export class BrowserController {
     }
   }
 
+  /** OpenClaw / scheduler may call before UI focus; recover from no active tab. */
+  private async ensureUsableActiveTab(): Promise<void> {
+    if (this.getActiveTab()) return;
+    if (this.tabs.size === 0) {
+      await this.initialize();
+      return;
+    }
+    const firstId = [...this.tabs.keys()][0];
+    if (firstId) {
+      this.switchToTab(firstId);
+      this.broadcastTabs();
+    }
+  }
+
   getTabs(): BrowserTabsUpdatedPayload {
     return {
       tabs: [...this.tabs.values()].map((tab) => tab.snapshot),
@@ -667,6 +681,7 @@ export class BrowserController {
   }
 
   async navigate(request: BrowserNavigationRequest): Promise<BrowserTabsUpdatedPayload> {
+    await this.ensureUsableActiveTab();
     const tab = this.getActiveTab();
     if (!tab) {
       return this.getTabs();
@@ -681,7 +696,8 @@ export class BrowserController {
     return this.getTabs();
   }
 
-  back(): BrowserTabsUpdatedPayload {
+  async back(): Promise<BrowserTabsUpdatedPayload> {
+    await this.ensureUsableActiveTab();
     const tab = this.getActiveTab();
     if (tab?.view.webContents.navigationHistory.canGoBack()) {
       tab.view.webContents.navigationHistory.goBack();
@@ -690,7 +706,8 @@ export class BrowserController {
     return this.getTabs();
   }
 
-  forward(): BrowserTabsUpdatedPayload {
+  async forward(): Promise<BrowserTabsUpdatedPayload> {
+    await this.ensureUsableActiveTab();
     const tab = this.getActiveTab();
     if (tab?.view.webContents.navigationHistory.canGoForward()) {
       tab.view.webContents.navigationHistory.goForward();
@@ -699,7 +716,8 @@ export class BrowserController {
     return this.getTabs();
   }
 
-  reload(): BrowserTabsUpdatedPayload {
+  async reload(): Promise<BrowserTabsUpdatedPayload> {
+    await this.ensureUsableActiveTab();
     this.getActiveTab()?.view.webContents.reload();
     this.broadcastTabs();
     return this.getTabs();
@@ -723,6 +741,7 @@ export class BrowserController {
   }
 
   async getPageContext(): Promise<PageContext | null> {
+    await this.ensureUsableActiveTab();
     const tab = this.getActiveTab();
     if (!tab) {
       return null;
@@ -738,6 +757,7 @@ export class BrowserController {
   }
 
   async getAXTree(): Promise<AXTreeSnapshot | null> {
+    await this.ensureUsableActiveTab();
     const tab = this.getActiveTab();
     if (!tab) return null;
 
@@ -775,6 +795,7 @@ export class BrowserController {
   }
 
   async runDomAction(request: BrowserDomActionRequest): Promise<unknown> {
+    await this.ensureUsableActiveTab();
     const tab = this.getActiveTab();
     if (!tab) {
       throw new Error("No active browser tab.");
@@ -833,6 +854,7 @@ export class BrowserController {
   }
 
   async captureScreenshot(): Promise<string | null> {
+    await this.ensureUsableActiveTab();
     const tab = this.getActiveTab();
     if (!tab) {
       return null;

@@ -24,14 +24,17 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
 const require = createRequire(import.meta.url);
 const exec = promisify(execCb);
 
 const RUNTIME_NAME = "aura-openclaw-fork";
-const RUNTIME_VERSION = "0.4.0";
+const RUNTIME_VERSION = "0.5.4";
 const PROTOCOL_VERSION = 3;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const GATEWAY_STARTED_AT = Date.now();
 
 // Platform detection — must be declared before AURA_SYSTEM_PROMPT so the
 // prompt builder can branch on OS. Used throughout the tool registry below.
@@ -41,11 +44,21 @@ const isLinux = !isWindows && !isMac;
 
 const GROQ_CHAT_MODEL =
   process.env.OPENCLAW_GROQ_MODEL || "llama-3.3-70b-versatile";
+const GEMINI_CHAT_MODEL =
+  process.env.OPENCLAW_GEMINI_MODEL || "gemini-2.0-flash";
 const LLM_REQUEST_TIMEOUT_MS = 120_000;
 const AGENT_MAX_ITERATIONS = 6;
 const TOOL_TIMEOUT_MS = 20_000;
 const SHELL_OUTPUT_CAP = 4_000;
 const HTTP_BODY_CAP = 16_000;
+// Groq free tier often caps ~12k TPM per request; large tool schemas + multi-turn
+// tool JSON blow past that. Clip tool outputs and shrink history before each call.
+const LLM_TOOL_MESSAGE_MAX_CHARS = 1600;
+const LLM_MAX_CONVERSATION_JSON_CHARS = 22_000;
+/** If messages+compact-tools JSON is larger than this, call Gemini first (when a key exists). */
+// Real TPM limits are in *tokens*; char count is a cheap proxy. Default low so
+// we prefer Gemini whenever both keys exist (Groq on-demand often ~12k TPM).
+const GROQ_SAFE_TOTAL_CHARS = Number(process.env.OPENCLAW_GROQ_SAFE_CHARS || "9000");
 
 // Shell commands we refuse to run — short deny-list of destructive operations.
 // This is not a sandbox; it's a guardrail against obvious mistakes.
@@ -57,7 +70,7 @@ function buildSystemPrompt() {
   const shellHint = isMac
     ? "macOS shell is /bin/sh. Use 'open -a <App>' to launch apps, 'pbcopy/pbpaste' for clipboard, 'screencapture' for screenshots, 'osascript' for AppleScript."
     : isWindows
-      ? "Windows shell is cmd.exe. Use 'start <app-or-url>' to launch, PowerShell for rich automation."
+      ? "Windows: open_app resolves common apps (whatsapp, teams, slack, settings, bluetooth settings, …) to installs or URL schemes like ms-settings:bluetooth; use a full .exe path when unsure."
       : "Linux shell is /bin/sh. Use 'xdg-open' for URLs, 'xclip'/'xsel' for clipboard, 'gnome-screenshot'/'scrot' for screenshots.";
   const keysHint = isMac
     ? "For press_keys on macOS use 'cmd+c', 'cmd+shift+t', 'cmd+space', etc. (Cmd, not Ctrl, for macOS shortcuts.)"
@@ -72,13 +85,251 @@ function buildSystemPrompt() {
     "actions — do NOT describe actions without executing them. After the tools run, briefly confirm",
     "what you did and what the user should see. Never claim you can't control the browser, desktop,",
     "or keyboard; those tools are live right now. If a tool fails, report the error and suggest a fix.",
-    "Prefer the simplest tool that accomplishes the goal (e.g. open_url for URLs, web_search for",
-    "search queries, open_app for apps). Chain multiple tool calls when needed.",
+    "Prefer the simplest tool that accomplishes the goal (e.g. open_url for web URLs, web_search for",
+    "search queries, open_app for apps/system settings). On Windows, use open_app for ms-settings:* targets.",
+    "Chain multiple tool calls when needed.",
+    "When the user wants to control Aura's in-app browser (not the OS default browser), use",
+    "browser_navigate → browser_snapshot → browser_dom_action. Use list_skills / read_skill for",
+    "bundled workspace SKILL.md packs.",
     shellHint,
     keysHint,
   ].join(" ");
 }
 const AURA_SYSTEM_PROMPT = buildSystemPrompt();
+
+// ---------------------------------------------------------------------------
+// Observability, policy, host bridge, and workspace skills (fork extensions)
+// ---------------------------------------------------------------------------
+
+const HEALTH_ERROR_RING = [];
+const HEALTH_ERROR_RING_CAP = 24;
+
+function observe(level, event, data) {
+  const entry = { ts: Date.now(), level, event, ...data };
+  try {
+    process.stderr.write(`[openclaw:obs] ${JSON.stringify(entry)}\n`);
+  } catch {
+    /* ignore */
+  }
+  if (level === "error" || level === "warn") {
+    HEALTH_ERROR_RING.push(entry);
+    while (HEALTH_ERROR_RING.length > HEALTH_ERROR_RING_CAP) HEALTH_ERROR_RING.shift();
+  }
+}
+
+function appendToolAudit(record) {
+  try {
+    const home = process.env.OPENCLAW_HOME || os.tmpdir();
+    const logPath = path.join(home, "openclaw-tool-audit.jsonl");
+    fs.appendFileSync(
+      `${logPath}`,
+      `${JSON.stringify({
+        ts: new Date().toISOString(),
+        ...record,
+        args: typeof record.args === "object" ? clip(JSON.stringify(record.args), 2000) : record.args,
+      })}\n`,
+      "utf8",
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+function parseCommaEnv(name) {
+  const raw = process.env[name];
+  if (typeof raw !== "string" || !raw.trim()) return [];
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function httpHostAllowed(hostname, allowed) {
+  if (allowed.length === 0) return true;
+  const h = String(hostname || "").toLowerCase();
+  return allowed.some((entry) => {
+    const e = entry.toLowerCase().replace(/^\*\./, "");
+    return h === e || h.endsWith(`.${e}`);
+  });
+}
+
+function filePathAllowed(resolvedPath, prefixes) {
+  if (prefixes.length === 0) return true;
+  const norm = path.normalize(resolvedPath);
+  for (const p of prefixes) {
+    const rp = path.resolve(String(p).replace(/^~(?=$|[\\/])/, `${os.homedir()}`));
+    if (norm === rp || norm.startsWith(rp + path.sep)) return true;
+  }
+  return false;
+}
+
+function checkToolPolicy(name, args) {
+  const httpHosts = parseCommaEnv("OPENCLAW_ALLOWED_HTTP_HOSTS");
+  if ((name === "http_get" || name === "http_post") && httpHosts.length > 0) {
+    try {
+      const u = new URL(String(args?.url ?? ""));
+      if (!httpHostAllowed(u.hostname, httpHosts)) {
+        return { ok: false, reason: `HTTP host '${u.hostname}' is not in OPENCLAW_ALLOWED_HTTP_HOSTS.` };
+      }
+    } catch {
+      return { ok: false, reason: "Invalid URL for HTTP tool." };
+    }
+  }
+
+  const filePrefixes = parseCommaEnv("OPENCLAW_ALLOWED_FILE_PREFIXES");
+  if (filePrefixes.length > 0 && ["read_file", "write_file", "append_file", "list_dir"].includes(name)) {
+    const full = resolveUserPath(args?.path ?? ".");
+    if (!filePathAllowed(full, filePrefixes)) {
+      return { ok: false, reason: `Path is outside OPENCLAW_ALLOWED_FILE_PREFIXES: ${full}` };
+    }
+  }
+
+  if (name === "run_command" && filePrefixes.length > 0 && args?.cwd) {
+    const cwd = resolveUserPath(String(args.cwd));
+    if (!filePathAllowed(cwd, filePrefixes)) {
+      return { ok: false, reason: `cwd is outside OPENCLAW_ALLOWED_FILE_PREFIXES: ${cwd}` };
+    }
+  }
+
+  return { ok: true };
+}
+
+function bridgeInvoke(payload) {
+  return new Promise((resolve) => {
+    const base = process.env.AURA_OPENCLAW_BRIDGE_URL || "";
+    const token = process.env.AURA_OPENCLAW_BRIDGE_TOKEN || "";
+    if (!base.startsWith("http") || !token) {
+      resolve({ ok: false, error: "bridge_not_configured" });
+      return;
+    }
+    let u;
+    try {
+      u = new URL(base);
+    } catch {
+      resolve({ ok: false, error: "bad_bridge_url" });
+      return;
+    }
+    const data = JSON.stringify(payload);
+    const opts = {
+      hostname: u.hostname,
+      port: u.port || 80,
+      path: u.pathname || "/",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(data),
+        Authorization: `Bearer ${token}`,
+      },
+      timeout: 45_000,
+    };
+    const req = httpRequest(opts, (res) => {
+      let buf = "";
+      res.on("data", (c) => {
+        buf += c.toString("utf8");
+      });
+      res.on("end", () => {
+        try {
+          resolve(JSON.parse(buf));
+        } catch {
+          resolve({ ok: false, error: buf.slice(0, 400) });
+        }
+      });
+    });
+    req.on("error", (e) => resolve({ ok: false, error: e.message }));
+    req.on("timeout", () => {
+      try {
+        req.destroy();
+      } catch {
+        /* ignore */
+      }
+      resolve({ ok: false, error: "bridge_timeout" });
+    });
+    req.write(data);
+    req.end();
+  });
+}
+
+async function bridgeGate(tool, args) {
+  const r = await bridgeInvoke({ action: "gate", tool, args });
+  return Boolean(r?.allowed);
+}
+
+async function gateIfRequired(name, args) {
+  if (process.env.OPENCLAW_REQUIRE_UI_CONFIRM === "0") return true;
+  const gated = new Set(["run_command", "write_file", "append_file", "http_post"]);
+  if (!gated.has(name)) return true;
+  const base = process.env.AURA_OPENCLAW_BRIDGE_URL || "";
+  const tok = process.env.AURA_OPENCLAW_BRIDGE_TOKEN || "";
+  if (!base.startsWith("http") || !tok) {
+    // Aura only injects the bridge when it spawns this process locally. External
+    // gateways or headless CI runs have no modal host — skip UI gating so
+    // automation still works, but leave a loud observability breadcrumb.
+    observe("warn", "tool_gate_skipped_no_bridge", { tool: name });
+    return true;
+  }
+  return bridgeGate(name, args);
+}
+
+const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
+
+/** @type {Array<{ id: string, title: string, description: string, body: string, rootDir: string }>} */
+let gatewayRuntimeSkills = [];
+
+function parseSkillMarkdown(filePath, id) {
+  const raw = fs.readFileSync(filePath, "utf8");
+  let title = id;
+  let description = "";
+  const fm = raw.match(FRONTMATTER_RE);
+  let body = raw;
+  if (fm) {
+    body = raw.slice(fm[0].length).trim();
+    for (const line of fm[1].split(/\r?\n/)) {
+      const m = line.match(/^\s*([\w-]+):\s*(.*)$/);
+      if (m) {
+        const k = m[1].toLowerCase();
+        const v = m[2].trim().replace(/^["']|["']$/g, "");
+        if (k === "name") title = v;
+        if (k === "description") description = v;
+      }
+    }
+  }
+  return { id, title, description, body, rootDir: path.dirname(filePath) };
+}
+
+function loadWorkspaceSkills() {
+  const out = [];
+  const seen = new Set();
+  const dirs = [path.join(__dirname, "skills")];
+  for (const extra of parseCommaEnv("OPENCLAW_EXTRA_SKILL_DIRS")) {
+    dirs.push(path.resolve(extra));
+  }
+  for (const root of dirs) {
+    if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) continue;
+    for (const name of fs.readdirSync(root)) {
+      const skillDir = path.join(root, name);
+      const skillFile = path.join(skillDir, "SKILL.md");
+      if (!fs.existsSync(skillFile)) continue;
+      const id = name;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      try {
+        out.push(parseSkillMarkdown(skillFile, id));
+      } catch (err) {
+        observe("warn", "skill_load_failed", { id, message: err?.message ?? String(err) });
+      }
+    }
+  }
+  return out;
+}
+
+function formatSkillsForPrompt() {
+  if (!gatewayRuntimeSkills.length) return "";
+  const top = gatewayRuntimeSkills.slice(0, 8);
+  const lines = top.map(
+    (s) => `- **${s.id}** (${s.title}): ${clip(s.description || "no description", 90)}`,
+  );
+  const more = gatewayRuntimeSkills.length > top.length
+    ? `\n…+${gatewayRuntimeSkills.length - top.length} more (use list_skills / read_skill).`
+    : "";
+  return `Loaded workspace skills (${gatewayRuntimeSkills.length}):\n${lines.join("\n")}${more}`;
+}
 
 // ---------------------------------------------------------------------------
 // Tool registry
@@ -126,6 +377,197 @@ async function psExec(scriptBlock) {
     { shell: false },
   );
   return result;
+}
+
+// Windows: `start "" "WhatsApp"` fails for Store/desktop apps not on PATH.
+// Try known install dirs, registered URL schemes (whatsapp:), then where.exe, then legacy start.
+function shallowSplitWindowsArgs(cliArgsStr) {
+  const t = String(cliArgsStr ?? "").trim();
+  if (!t) return [];
+  return t.split(/\s+/).filter(Boolean);
+}
+
+const WINDOWS_APP_LAUNCH_HINTS = [
+  {
+    match: (k) =>
+      k === "settings"
+      || k === "windows settings"
+      || k === "system settings"
+      || k.includes("settings"),
+    protocols: ["ms-settings:"],
+    exePaths: () => [],
+  },
+  {
+    match: (k) =>
+      k === "bluetooth"
+      || k.includes("bluetooth settings")
+      || k.includes("bluetooth"),
+    protocols: ["ms-settings:bluetooth"],
+    exePaths: () => [],
+  },
+  {
+    match: (k) => k === "whatsapp" || k.includes("whatsapp"),
+    protocols: ["whatsapp:"],
+    exePaths: () => {
+      const la = process.env.LOCALAPPDATA || "";
+      const pf = process.env.PROGRAMFILES || "";
+      const pf86 = process.env["PROGRAMFILES(X86)"] || "";
+      return [
+        path.join(la, "WhatsApp", "WhatsApp.exe"),
+        path.join(pf, "WhatsApp", "WhatsApp.exe"),
+        path.join(pf86, "WhatsApp", "WhatsApp.exe"),
+        path.join(la, "Microsoft", "WindowsApps", "WhatsApp.exe"),
+      ];
+    },
+  },
+  {
+    match: (k) => k === "telegram",
+    protocols: ["telegram:"],
+    exePaths: () => [path.join(process.env.LOCALAPPDATA || "", "Telegram Desktop", "Telegram.exe")],
+  },
+  {
+    match: (k) => k === "slack",
+    protocols: ["slack:"],
+    exePaths: () => [
+      path.join(process.env.LOCALAPPDATA || "", "slack", "slack.exe"),
+      path.join(process.env.PROGRAMFILES || "", "Slack", "Slack.exe"),
+    ],
+  },
+  {
+    match: (k) => k === "spotify",
+    protocols: ["spotify:"],
+    exePaths: () => [
+      path.join(process.env.APPDATA || "", "Spotify", "Spotify.exe"),
+      path.join(process.env.LOCALAPPDATA || "", "Microsoft", "WindowsApps", "Spotify.exe"),
+    ],
+  },
+  {
+    match: (k) => k === "teams" || k === "msteams" || k.includes("microsoft teams"),
+    protocols: ["msteams:"],
+    exePaths: () => [
+      path.join(process.env.LOCALAPPDATA || "", "Microsoft", "Teams", "current", "Teams.exe"),
+      path.join(process.env.PROGRAMFILES || "", "Microsoft", "Teams", "current", "Teams.exe"),
+    ],
+  },
+  {
+    match: (k) => k === "discord",
+    protocols: ["discord:"],
+    exePaths: () => {
+      const base = path.join(process.env.LOCALAPPDATA || "", "Discord");
+      const out = [];
+      try {
+        if (fs.existsSync(base)) {
+          for (const name of fs.readdirSync(base)) {
+            if (!name.startsWith("app-")) continue;
+            const ex = path.join(base, name, "Discord.exe");
+            if (fs.existsSync(ex)) out.push(ex);
+          }
+        }
+      } catch {
+        /* ignore */
+      }
+      return out;
+    },
+  },
+];
+
+function spawnDetachedOpenWindows(targetPath, extraArgs) {
+  return new Promise((resolve) => {
+    const child = spawn(targetPath, extraArgs, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      shell: false,
+    });
+    child.on("error", (err) => {
+      resolve({ ok: false, stdout: "", stderr: err?.message ?? String(err) });
+    });
+    child.once("spawn", () => {
+      try {
+        child.unref();
+      } catch {
+        /* ignore */
+      }
+      resolve({ ok: true, stdout: "", stderr: "" });
+    });
+  });
+}
+
+async function tryWindowsShellUri(uri) {
+  const escaped = uri.replace(/'/g, "''");
+  return psExec(`Start-Process -FilePath '${escaped}'`);
+}
+
+async function resolveWindowsWhereExecutable(baseName) {
+  const base = baseName.replace(/\.exe$/i, "").trim();
+  if (!/^[a-zA-Z0-9_.-]+$/.test(base)) return null;
+  const r = await execCapture(`where.exe ${base}`, { shell: true, timeoutMs: 4000 });
+  if (!r.ok) return null;
+  const line = r.stdout
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .find((x) => Boolean(x) && !/^INFO:/i.test(x));
+  if (!line || !fs.existsSync(line)) return null;
+  return line;
+}
+
+async function launchWindowsOpenApp(appRaw, cliArgsStr) {
+  const app = String(appRaw ?? "").trim().replace(/"/g, "");
+  if (!app) return { ok: false, summary: "open_app needs an app name.", result: {} };
+
+  const extraArgs = shallowSplitWindowsArgs(cliArgsStr);
+  const lowerKey = app.toLowerCase().replace(/\.exe$/i, "").trim();
+
+  const tryExe = async (absPath, resolvedLabel) => {
+    if (!absPath || !fs.existsSync(absPath)) return null;
+    const r = await spawnDetachedOpenWindows(absPath, extraArgs);
+    if (!r.ok) return null;
+    return {
+      ok: true,
+      summary: `Launched ${path.basename(absPath)}`,
+      result: { app: absPath, resolved: resolvedLabel, ...r },
+    };
+  };
+
+  const pathLike = app.includes("\\") || app.includes("/") || /\.exe$/i.test(app);
+  if (pathLike || fs.existsSync(app)) {
+    const abs = path.isAbsolute(app) ? app : path.resolve(process.cwd(), app);
+    if (fs.existsSync(abs)) {
+      const out = await tryExe(abs, "path");
+      if (out) return out;
+    }
+  }
+
+  for (const hint of WINDOWS_APP_LAUNCH_HINTS) {
+    if (!hint.match(lowerKey)) continue;
+    for (const p of hint.exePaths()) {
+      const out = await tryExe(p, "known_install");
+      if (out) return out;
+    }
+    if (hint.protocols) {
+      for (const proto of hint.protocols) {
+        const pr = await tryWindowsShellUri(proto);
+        if (pr.ok) {
+          return {
+            ok: true,
+            summary: `Launched via ${proto} (registered app handler)`,
+            result: { app, protocol: proto, ...pr },
+          };
+        }
+      }
+    }
+  }
+
+  const whereHit = await resolveWindowsWhereExecutable(app);
+  if (whereHit) {
+    const out = await tryExe(whereHit, "where");
+    if (out) return out;
+  }
+
+  const cliRest = String(cliArgsStr ?? "").trim();
+  const cmd = cliRest ? `start "" "${app}" ${cliRest}` : `start "" "${app}"`;
+  const r = await execCapture(cmd, { timeoutMs: 8_000 });
+  return { ok: r.ok, summary: r.ok ? `Launched ${app}` : `Failed to launch ${app}: ${r.stderr}`, result: { app, ...r } };
 }
 
 // Run an AppleScript one-liner via osascript. macOS-only. Each `-e` arg
@@ -221,18 +663,25 @@ const tools = {
   open_url: {
     schema: {
       name: "open_url",
-      description: "Open a URL in the user's default web browser.",
+      description:
+        "Open a URL or supported OS URI in the user's default handler. " +
+        "Web URLs should be http(s). On Windows, URI schemes like ms-settings: are supported.",
       parameters: {
         type: "object",
-        properties: { url: { type: "string", description: "Absolute http(s) URL to open." } },
+        properties: { url: { type: "string", description: "Absolute URL/URI to open." } },
         required: ["url"],
       },
     },
     describe: (a) => `open_url (${a?.url ?? ""})`,
     async run(args) {
       const url = String(args?.url ?? "").trim();
-      if (!/^https?:\/\//i.test(url)) {
-        return { ok: false, summary: "open_url needs an http(s) URL.", result: { url } };
+      if (!url) {
+        return { ok: false, summary: "open_url needs a URL/URI.", result: { url } };
+      }
+      const isHttp = /^https?:\/\//i.test(url);
+      const isWindowsUri = isWindows && /^[a-z][a-z0-9+.-]*:/i.test(url);
+      if (!isHttp && !isWindowsUri) {
+        return { ok: false, summary: "open_url expects http(s), or a Windows URI scheme like ms-settings:.", result: { url } };
       }
       const safeUrl = url.replace(/"/g, "");
       const cmd = isWindows
@@ -276,7 +725,9 @@ const tools = {
   open_app: {
     schema: {
       name: "open_app",
-      description: "Launch a Windows application by name (e.g. 'notepad', 'calc', 'chrome', 'code') or explicit path.",
+      description:
+        "Launch a desktop application by friendly name or full path. " +
+        "Windows: names like whatsapp, teams, slack, notepad, calc, chrome; macOS: use -a style names (Safari, Notes).",
       parameters: {
         type: "object",
         properties: {
@@ -291,11 +742,12 @@ const tools = {
       const app = String(args?.app ?? "").trim();
       if (!app) return { ok: false, summary: "open_app needs an app name.", result: {} };
       const cliArgs = typeof args?.args === "string" ? args.args : "";
+      if (isWindows) {
+        return launchWindowsOpenApp(app, cliArgs);
+      }
       const safeApp = app.replace(/"/g, "");
       let cmd;
-      if (isWindows) {
-        cmd = `start "" "${safeApp}" ${cliArgs}`;
-      } else if (isMac) {
+      if (isMac) {
         // `open -a "Safari"` resolves friendly names; explicit .app paths also
         // work. Trailing `--args "..."` passes CLI args to the launched app.
         cmd = cliArgs
@@ -824,6 +1276,131 @@ const tools = {
     },
   },
   // ─────────────────────────────────────────────────────────────────────────
+  browser_navigate: {
+    schema: {
+      name: "browser_navigate",
+      description:
+        "Navigate Aura's in-app BrowserView to a URL (http/https only). Requires Aura's OpenClaw host bridge. Prefer this over open_url when the user wants automation inside Aura's browser tab.",
+      parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+    },
+    describe: (a) => `browser_navigate (${a?.url ?? ""})`,
+    async run(args) {
+      const url = String(args?.url ?? "").trim();
+      const r = await bridgeInvoke({ action: "navigate", url });
+      if (!r?.ok) return { ok: false, summary: `browser_navigate failed: ${r?.error ?? JSON.stringify(r)}`, result: r ?? {} };
+      return { ok: true, summary: `Navigated in-app browser to ${url}`, result: { tabs: r.tabs } };
+    },
+  },
+  browser_tabs: {
+    schema: {
+      name: "browser_tabs",
+      description: "List Aura in-app browser tabs and the active tab id.",
+      parameters: { type: "object", properties: {} },
+    },
+    describe: () => "browser_tabs",
+    async run() {
+      const r = await bridgeInvoke({ action: "tabs" });
+      if (!r?.ok) return { ok: false, summary: `browser_tabs failed: ${r?.error ?? ""}`, result: r ?? {} };
+      return { ok: true, summary: "Listed in-app browser tabs.", result: { tabs: r.tabs } };
+    },
+  },
+  browser_snapshot: {
+    schema: {
+      name: "browser_snapshot",
+      description:
+        "Capture structured page context from Aura's in-app browser (title, URL, visible text excerpt, interactive elements). Use after browser_navigate.",
+      parameters: { type: "object", properties: {} },
+    },
+    describe: () => "browser_snapshot",
+    async run() {
+      const r = await bridgeInvoke({ action: "page_context" });
+      if (!r?.ok) return { ok: false, summary: `browser_snapshot failed: ${r?.error ?? ""}`, result: r ?? {} };
+      return {
+        ok: true,
+        summary: `Snapshot: ${r.context?.title ?? "?"} — ${clip(r.context?.url ?? "", 80)}`,
+        result: { context: r.context },
+      };
+    },
+  },
+  browser_dom_action: {
+    schema: {
+      name: "browser_dom_action",
+      description:
+        "Run a DOM action in Aura's in-app browser (click, type, scroll, etc.). Params match Aura's BrowserDomActionRequest (action + params object).",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["click", "type", "scroll", "press", "submit", "select", "hover", "focus", "clear", "find", "execute_js"] },
+          params: { type: "object" },
+        },
+        required: ["action", "params"],
+      },
+    },
+    describe: (a) => `browser_dom_action (${a?.action ?? ""})`,
+    async run(args) {
+      const request = { action: args?.action, params: args?.params && typeof args.params === "object" ? args.params : {} };
+      const r = await bridgeInvoke({ action: "dom_action", request });
+      if (!r?.ok) return { ok: false, summary: `browser_dom_action failed: ${r?.error ?? ""}`, result: r ?? {} };
+      return { ok: true, summary: "DOM action completed.", result: { output: r.result } };
+    },
+  },
+  browser_screenshot: {
+    schema: {
+      name: "browser_screenshot",
+      description: "Capture the in-app BrowserView as a base64 PNG data URL (when supported).",
+      parameters: { type: "object", properties: {} },
+    },
+    describe: () => "browser_screenshot",
+    async run() {
+      const r = await bridgeInvoke({ action: "capture_screenshot" });
+      if (!r?.ok) return { ok: false, summary: `browser_screenshot failed: ${r?.error ?? ""}`, result: r ?? {} };
+      return {
+        ok: true,
+        summary: r.dataUrl ? "Captured in-app browser screenshot." : "No image returned.",
+        result: { dataUrl: r.dataUrl ?? null },
+      };
+    },
+  },
+  list_skills: {
+    schema: {
+      name: "list_skills",
+      description: "List Markdown skills (SKILL.md) bundled with this OpenClaw fork or extra skill directories.",
+      parameters: { type: "object", properties: {} },
+    },
+    describe: () => "list_skills",
+    async run() {
+      return {
+        ok: true,
+        summary: `${gatewayRuntimeSkills.length} skill(s) loaded.`,
+        result: {
+          skills: gatewayRuntimeSkills.map((s) => ({
+            id: s.id,
+            title: s.title,
+            description: clip(s.description, 400),
+          })),
+        },
+      };
+    },
+  },
+  read_skill: {
+    schema: {
+      name: "read_skill",
+      description: "Read the full SKILL.md body for a skill id from list_skills (truncated for the model).",
+      parameters: { type: "object", properties: { skill_id: { type: "string" } }, required: ["skill_id"] },
+    },
+    describe: (a) => `read_skill (${a?.skill_id ?? ""})`,
+    async run(args) {
+      const id = String(args?.skill_id ?? "").trim();
+      const skill = gatewayRuntimeSkills.find((s) => s.id === id);
+      if (!skill) return { ok: false, summary: `Unknown skill '${id}'.`, result: {} };
+      return {
+        ok: true,
+        summary: `Loaded skill ${id}`,
+        result: { id, title: skill.title, body: clip(skill.body, 12_000) },
+      };
+    },
+  },
+  // ─────────────────────────────────────────────────────────────────────────
   schedule_reminder: {
     schema: {
       name: "schedule_reminder",
@@ -879,20 +1456,89 @@ const tools = {
 };
 
 const toolSchemas = Object.values(tools).map((t) => ({ type: "function", function: t.schema }));
+
+/** Strip verbose schema text for Groq only — full schemas stay on Gemini. */
+function shrinkFunctionSchemaForTokens(fn) {
+  const s = structuredClone(fn);
+  if (typeof s.description === "string") {
+    s.description = clip(s.description, 88);
+  }
+  const p = s.parameters;
+  if (p && typeof p === "object" && p.properties && typeof p.properties === "object") {
+    for (const key of Object.keys(p.properties)) {
+      const prop = p.properties[key];
+      if (prop && typeof prop.description === "string") {
+        prop.description = clip(prop.description, 48);
+      }
+    }
+  }
+  return s;
+}
+
+const toolSchemasGroqCompact = Object.values(tools).map((t) => ({
+  type: "function",
+  function: shrinkFunctionSchemaForTokens(t.schema),
+}));
+
 const toolNames = new Set(Object.keys(tools));
 
+async function executeManagedTool(name, args) {
+  if (!toolNames.has(name)) {
+    return { ok: false, summary: `Unknown tool '${name}'.`, result: {} };
+  }
+  const p = checkToolPolicy(name, args);
+  if (!p.ok) {
+    observe("warn", "tool_policy_block", { tool: name, reason: p.reason });
+    return { ok: false, summary: p.reason, result: {} };
+  }
+  if (!(await gateIfRequired(name, args))) {
+    observe("warn", "tool_gate_denied", { tool: name });
+    appendToolAudit({ tool: name, args, ok: false, phase: "gate_denied" });
+    return {
+      ok: false,
+      summary: "User denied this tool in Aura, or the host bridge is unreachable.",
+      result: {},
+    };
+  }
+  const t0 = Date.now();
+  try {
+    const result = await tools[name].run(args);
+    appendToolAudit({
+      tool: name,
+      args,
+      ok: result.ok !== false,
+      ms: Date.now() - t0,
+      summary: clip(result.summary ?? "", 400),
+    });
+    return result;
+  } catch (err) {
+    const msg = err?.message ?? String(err);
+    observe("error", "tool_throw", { tool: name, message: msg });
+    appendToolAudit({ tool: name, args, ok: false, ms: Date.now() - t0, error: msg });
+    return { ok: false, summary: `Tool ${name} threw: ${msg}`, result: {} };
+  }
+}
+
 // ---------------------------------------------------------------------------
-// LLM call with tool support (Groq, OpenAI-compatible streaming + tool_calls).
-// Returns { content, toolCalls } after the stream ends. Emits content deltas
-// to onToken for live chat streaming.
+// LLM: OpenAI-compatible streaming + tool_calls (Groq primary, Gemini fallback).
 // ---------------------------------------------------------------------------
 
-function callGroqWithTools({ apiKey, messages, abortSignal, onToken }) {
+function callOpenAiCompatibleStream({
+  label,
+  hostname,
+  apiPath,
+  apiKey,
+  model,
+  messages,
+  abortSignal,
+  onToken,
+  toolsList = toolSchemas,
+}) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
-      model: GROQ_CHAT_MODEL,
+      model,
       messages,
-      tools: toolSchemas,
+      tools: toolsList,
       tool_choice: "auto",
       temperature: 0.2,
       stream: true,
@@ -900,9 +1546,9 @@ function callGroqWithTools({ apiKey, messages, abortSignal, onToken }) {
 
     const req = httpsRequest(
       {
-        hostname: "api.groq.com",
+        hostname,
         port: 443,
-        path: "/openai/v1/chat/completions",
+        path: apiPath,
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -914,16 +1560,23 @@ function callGroqWithTools({ apiKey, messages, abortSignal, onToken }) {
       (response) => {
         if (response.statusCode !== 200) {
           let errBody = "";
-          response.on("data", (chunk) => { errBody += chunk.toString("utf8"); });
-          response.on("end", () =>
-            reject(new Error(`Groq request failed (${response.statusCode}): ${errBody.slice(0, 400)}`)),
-          );
+          response.on("data", (chunk) => {
+            errBody += chunk.toString("utf8");
+          });
+          response.on("end", () => {
+            observe("error", "llm_http_error", {
+              provider: label,
+              httpStatus: response.statusCode,
+              body: errBody.slice(0, 400),
+            });
+            reject(new Error(`${label} request failed (${response.statusCode}): ${errBody.slice(0, 400)}`));
+          });
           return;
         }
 
         let buffer = "";
         let content = "";
-        const toolAcc = new Map(); // index -> { id, name, arguments }
+        const toolAcc = new Map();
         let settled = false;
         const finish = () => {
           if (settled) return;
@@ -938,7 +1591,11 @@ function callGroqWithTools({ apiKey, messages, abortSignal, onToken }) {
 
         response.on("data", (chunk) => {
           if (abortSignal?.aborted) {
-            try { req.destroy(); } catch { /* ignore */ }
+            try {
+              req.destroy();
+            } catch {
+              /* ignore */
+            }
             return;
           }
           buffer += chunk.toString("utf8");
@@ -948,14 +1605,21 @@ function callGroqWithTools({ apiKey, messages, abortSignal, onToken }) {
             const line = rawLine.trim();
             if (!line || !line.startsWith("data:")) continue;
             const data = line.slice(5).trim();
-            if (data === "[DONE]") { finish(); return; }
+            if (data === "[DONE]") {
+              finish();
+              return;
+            }
             try {
               const json = JSON.parse(data);
               const delta = json?.choices?.[0]?.delta;
               if (!delta) continue;
               if (typeof delta.content === "string" && delta.content.length > 0) {
                 content += delta.content;
-                try { onToken(delta.content); } catch { /* ignore */ }
+                try {
+                  onToken(delta.content);
+                } catch {
+                  /* ignore */
+                }
               }
               if (Array.isArray(delta.tool_calls)) {
                 for (const tc of delta.tool_calls) {
@@ -978,22 +1642,148 @@ function callGroqWithTools({ apiKey, messages, abortSignal, onToken }) {
           }
         });
         response.on("end", finish);
-        response.on("error", (err) => { if (!settled) { settled = true; reject(err); } });
+        response.on("error", (err) => {
+          if (!settled) {
+            settled = true;
+            reject(err);
+          }
+        });
       },
     );
 
     req.on("error", (err) => reject(err));
-    req.on("timeout", () => req.destroy(new Error("Groq request timed out.")));
+    req.on("timeout", () => req.destroy(new Error(`${label} request timed out.`)));
 
     if (abortSignal) {
-      const abortHandler = () => { try { req.destroy(); } catch { /* ignore */ } reject(new Error("aborted")); };
-      if (abortSignal.aborted) { abortHandler(); return; }
+      const abortHandler = () => {
+        try {
+          req.destroy();
+        } catch {
+          /* ignore */
+        }
+        reject(new Error("aborted"));
+      };
+      if (abortSignal.aborted) {
+        abortHandler();
+        return;
+      }
       abortSignal.addEventListener("abort", abortHandler, { once: true });
     }
 
     req.write(body);
     req.end();
   });
+}
+
+/**
+ * Shrinks chat messages so Groq on-demand tier is less likely to hit TPM / 413
+ * "request too large" errors. Tool role payloads are the usual culprit.
+ */
+function prepareMessagesForLlm(messages) {
+  const out = messages.map((m) => {
+    if (m.role === "tool" && typeof m.content === "string" && m.content.length > LLM_TOOL_MESSAGE_MAX_CHARS) {
+      return {
+        ...m,
+        content: `${clip(m.content, LLM_TOOL_MESSAGE_MAX_CHARS)}\n…[tool output truncated for token budget]`,
+      };
+    }
+    if (typeof m.content === "string" && m.content.length > 14_000) {
+      return { ...m, content: `${clip(m.content, 14_000)}\n…[message truncated]` };
+    }
+    return m;
+  });
+
+  let total = JSON.stringify(out).length;
+  while (total > LLM_MAX_CONVERSATION_JSON_CHARS && out.length > 2) {
+    const sysIdx = out.findIndex((x) => x.role === "system");
+    const dropAt = sysIdx >= 0 ? (sysIdx + 1 < out.length ? sysIdx + 1 : -1) : 0;
+    if (dropAt < 0 || dropAt >= out.length) break;
+    out.splice(dropAt, 1);
+    total = JSON.stringify(out).length;
+  }
+  return out;
+}
+
+async function callLlmWithToolsResilient({ messages, abortSignal, onToken }) {
+  const groqKey = resolveApiKey(["GROQ_API_KEY", "VITE_GROQ_API_KEY"]);
+  const geminiKey = resolveApiKey(["GOOGLE_API_KEY", "GEMINI_API_KEY", "VITE_GEMINI_API_KEY"]);
+  const prepared = prepareMessagesForLlm(messages);
+
+  const compactToolsJson = JSON.stringify(toolSchemasGroqCompact);
+  const msgJson = JSON.stringify(prepared);
+  const totalChars = msgJson.length + compactToolsJson.length;
+
+  const tryGeminiFullTools = () =>
+    callOpenAiCompatibleStream({
+      label: "Gemini",
+      hostname: "generativelanguage.googleapis.com",
+      apiPath: "/v1beta/openai/chat/completions",
+      apiKey: geminiKey,
+      model: GEMINI_CHAT_MODEL,
+      messages: prepared,
+      abortSignal,
+      onToken,
+      toolsList: toolSchemas,
+    });
+
+  const tryGroqCompactTools = () =>
+    callOpenAiCompatibleStream({
+      label: "Groq",
+      hostname: "api.groq.com",
+      apiPath: "/openai/v1/chat/completions",
+      apiKey: groqKey,
+      model: GROQ_CHAT_MODEL,
+      messages: prepared,
+      abortSignal,
+      onToken,
+      toolsList: toolSchemasGroqCompact,
+    });
+
+  // Groq free tier TPM often breaks on **tools + system + history** even when the
+  // user message is short. If we're already near the safe budget, skip Groq entirely
+  // when Gemini is available (same OpenClaw runtime — still "OpenClaw only").
+  if (geminiKey && totalChars > GROQ_SAFE_TOTAL_CHARS) {
+    observe("info", "llm_gemini_first_preflight", {
+      totalChars,
+      budget: GROQ_SAFE_TOTAL_CHARS,
+      msgChars: msgJson.length,
+      toolChars: compactToolsJson.length,
+    });
+    try {
+      return await tryGeminiFullTools();
+    } catch (err) {
+      if (!groqKey) throw err;
+      observe("warn", "llm_fallback_groq_after_gemini", {
+        reason: err instanceof Error ? err.message.slice(0, 200) : String(err),
+      });
+      return tryGroqCompactTools();
+    }
+  }
+
+  if (groqKey) {
+    try {
+      return await tryGroqCompactTools();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const retryable =
+        /\(429\)|\(413\)|\(503\)|\b429\b|\b413\b|rate limit|Rate limit|RESOURCE_EXHAUSTED|overloaded|unavailable|temporar|request too large|tokens per minute|TPM|token limit|payload too large/i.test(
+          msg,
+        );
+      if (retryable && geminiKey) {
+        observe("warn", "llm_fallback_gemini", { after: "groq", reason: msg.slice(0, 240) });
+        return tryGeminiFullTools();
+      }
+      throw err;
+    }
+  }
+
+  if (geminiKey) {
+    return tryGeminiFullTools();
+  }
+
+  throw new Error(
+    "OpenClaw needs at least one of GROQ_API_KEY or GOOGLE_API_KEY / GEMINI_API_KEY for chat.",
+  );
 }
 
 function resolveApiKey(names) {
@@ -1024,13 +1814,9 @@ function summarizeUserText(message) {
 // ---------------------------------------------------------------------------
 
 async function runAgent({ userText, abortSignal, sendChatDelta, sendToolStart, sendToolResult, sendAssistantProgress }) {
-  const groqKey = resolveApiKey(["GROQ_API_KEY", "VITE_GROQ_API_KEY"]);
-  if (!groqKey) {
-    throw new Error("OpenClaw has no GROQ_API_KEY configured. Set it in the environment.");
-  }
-
+  const skillBlock = formatSkillsForPrompt();
   const messages = [
-    { role: "system", content: AURA_SYSTEM_PROMPT },
+    { role: "system", content: AURA_SYSTEM_PROMPT + (skillBlock ? `\n\n${skillBlock}` : "") },
     { role: "user", content: userText },
   ];
 
@@ -1038,14 +1824,21 @@ async function runAgent({ userText, abortSignal, sendChatDelta, sendToolStart, s
   for (let iteration = 0; iteration < AGENT_MAX_ITERATIONS; iteration += 1) {
     if (abortSignal?.aborted) throw new Error("aborted");
 
-    const { content, toolCalls } = await callGroqWithTools({
-      apiKey: groqKey,
+    const { content, toolCalls } = await callLlmWithToolsResilient({
       messages,
       abortSignal,
       onToken: (chunk) => {
         assistantAcc += chunk;
-        try { sendChatDelta(chunk); } catch { /* ignore */ }
-        try { sendAssistantProgress(assistantAcc); } catch { /* ignore */ }
+        try {
+          sendChatDelta(chunk);
+        } catch {
+          /* ignore */
+        }
+        try {
+          sendAssistantProgress(assistantAcc);
+        } catch {
+          /* ignore */
+        }
       },
     });
 
@@ -1071,16 +1864,7 @@ async function runAgent({ userText, abortSignal, sendChatDelta, sendToolStart, s
 
       sendToolStart({ toolCallId: call.id, name, args });
 
-      let result;
-      if (!toolNames.has(name)) {
-        result = { ok: false, summary: `Unknown tool '${name}'.`, result: {} };
-      } else {
-        try {
-          result = await tools[name].run(args);
-        } catch (err) {
-          result = { ok: false, summary: `Tool ${name} threw: ${err?.message ?? String(err)}`, result: {} };
-        }
-      }
+      const result = await executeManagedTool(name, args);
 
       sendToolResult({ toolCallId: call.id, name, args, result, ok: result.ok !== false });
 
@@ -1184,22 +1968,46 @@ function runGateway(flags) {
   const authMode = flags.auth === "none" ? "none" : "token";
   const allowUnconfigured = Boolean(flags["allow-unconfigured"]);
 
+  gatewayRuntimeSkills = loadWorkspaceSkills();
+  observe("info", "gateway_boot", {
+    skills: gatewayRuntimeSkills.length,
+    tools: Object.keys(tools).length,
+    bridge: Boolean(process.env.AURA_OPENCLAW_BRIDGE_URL && process.env.AURA_OPENCLAW_BRIDGE_TOKEN),
+  });
+
   const WebSocketServer = loadWebSocketServer();
   if (!WebSocketServer) process.exit(1);
 
   const httpServer = createHttpServer((req, res) => {
     const url = req.url ?? "/";
     if (url.startsWith("/health") || url === "/") {
+      const detail = url.includes("detail=1") || url.includes("full=1");
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         ok: true,
         runtime: RUNTIME_NAME,
         version: RUNTIME_VERSION,
         protocol: PROTOCOL_VERSION,
+        protocolMethods: ["connect", "ping", "session.info", "gateway.stats", "chat.send", "chat.abort"],
+        uptimeMs: Date.now() - GATEWAY_STARTED_AT,
         authMode,
         allowUnconfigured,
         tools: Object.keys(tools),
+        toolCount: Object.keys(tools).length,
+        skills: gatewayRuntimeSkills.map((s) => ({ id: s.id, title: s.title })),
+        skillCount: gatewayRuntimeSkills.length,
         groq: Boolean(resolveApiKey(["GROQ_API_KEY", "VITE_GROQ_API_KEY"])),
+        google: Boolean(resolveApiKey(["GOOGLE_API_KEY", "GEMINI_API_KEY", "VITE_GEMINI_API_KEY"])),
+        bridgeConfigured: Boolean(
+          process.env.AURA_OPENCLAW_BRIDGE_URL && process.env.AURA_OPENCLAW_BRIDGE_TOKEN,
+        ),
+        policy: {
+          httpHostAllowlist: parseCommaEnv("OPENCLAW_ALLOWED_HTTP_HOSTS"),
+          filePathAllowlist: parseCommaEnv("OPENCLAW_ALLOWED_FILE_PREFIXES"),
+          browserNavAllowlist: parseCommaEnv("OPENCLAW_BROWSER_NAV_HOSTS"),
+          uiGateSensitiveTools: process.env.OPENCLAW_REQUIRE_UI_CONFIRM !== "0",
+        },
+        recentObservations: detail ? HEALTH_ERROR_RING : HEALTH_ERROR_RING.slice(-6),
       }));
       return;
     }
@@ -1276,11 +2084,12 @@ function runGateway(flags) {
           emitChat("aborted", { message: { text } });
         } else {
           emitAgent("lifecycle", { status: "completed", phase: "completed" });
-          emitChat("final", { message: { text, provider: "groq" } });
+          emitChat("final", { message: { text, provider: "openclaw" } });
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[openclaw] chat.send failed: ${message}\n`);
+        observe("error", "chat_send_failed", { message });
         if (abortCtrl.signal.aborted || message === "aborted") {
           emitAgent("lifecycle", { status: "aborted", phase: "aborted" });
           emitChat("aborted", {});
@@ -1324,8 +2133,61 @@ function runGateway(flags) {
         return;
       }
 
+      // Lightweight keepalive / compatibility pings (some OpenClaw clients use
+      // bare `{ type: "ping" }` instead of an RPC envelope).
+      if (parsed.type === "ping") {
+        send({ type: "pong", ts: Date.now(), runtime: RUNTIME_NAME, version: RUNTIME_VERSION });
+        return;
+      }
+
       if (parsed.type !== "req") return;
       const method = typeof parsed.method === "string" ? parsed.method : "";
+
+      if (method === "ping") {
+        send({
+          type: "res",
+          id: parsed.id,
+          ok: true,
+          payload: { pong: true, ts: Date.now(), runtime: RUNTIME_NAME, version: RUNTIME_VERSION },
+        });
+        return;
+      }
+
+      if (method === "session.info") {
+        send({
+          type: "res",
+          id: parsed.id,
+          ok: true,
+          payload: {
+            sessionId,
+            authenticated,
+            activeRuns: activeRuns.size,
+            protocol: PROTOCOL_VERSION,
+            runtime: RUNTIME_NAME,
+            version: RUNTIME_VERSION,
+          },
+        });
+        return;
+      }
+
+      if (method === "gateway.stats") {
+        send({
+          type: "res",
+          id: parsed.id,
+          ok: true,
+          payload: {
+            uptimeMs: Date.now() - GATEWAY_STARTED_AT,
+            toolCount: Object.keys(tools).length,
+            skillCount: gatewayRuntimeSkills.length,
+            activeRuns: activeRuns.size,
+            groq: Boolean(resolveApiKey(["GROQ_API_KEY", "VITE_GROQ_API_KEY"])),
+            bridgeConfigured: Boolean(
+              process.env.AURA_OPENCLAW_BRIDGE_URL && process.env.AURA_OPENCLAW_BRIDGE_TOKEN,
+            ),
+          },
+        });
+        return;
+      }
 
       if (method === "chat.send") {
         void handleChatSend(parsed.id, parsed.params);

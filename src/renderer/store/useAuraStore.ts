@@ -118,6 +118,10 @@ const appendToast = (
   title: string,
   message?: string,
 ): ToastNotice[] => {
+  if (tone !== "error") {
+    return toasts;
+  }
+
   const normalizedTitle = title.trim();
   const normalizedMessage = normalizeTextContent(message || "");
   const latest = toasts[toasts.length - 1];
